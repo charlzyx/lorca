@@ -328,6 +328,8 @@ struct Device: Identifiable, Hashable {
         case ios
         case ipados
         case android
+        /// A machine the relay lists that never said what it is: never a Runner.
+        case unknown
 
         var displayName: String {
             switch self {
@@ -337,6 +339,7 @@ struct Device: Identifiable, Hashable {
             case .ios: "iOS"
             case .ipados: "iPadOS"
             case .android: "Android"
+            case .unknown: ""
             }
         }
 
@@ -344,7 +347,7 @@ struct Device: Identifiable, Hashable {
         var isDesktop: Bool {
             switch self {
             case .macos, .linux, .windows: true
-            case .ios, .ipados, .android: false
+            case .ios, .ipados, .android, .unknown: false
             }
         }
     }
@@ -379,6 +382,11 @@ struct Device: Identifiable, Hashable {
     var isRunner: Bool { os.isDesktop }
 
     var roleLabel: String { isRunner ? L("Runner") : L("Device") }
+
+    /// What the Device panes say about a machine that never said what it is.
+    static var unknownNote: String {
+        L("This machine is paired to your account but has not sent its name or system. If you don't recognize it, unpair it.")
+    }
 }
 
 // MARK: - Bot

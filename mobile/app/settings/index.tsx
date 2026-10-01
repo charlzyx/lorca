@@ -5,7 +5,7 @@ import { Stack, useRouter } from "expo-router";
 import { useState } from "react";
 import { Alert, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { engine } from "../../src/core/engine";
-import { CUSTOM_PRESETS, customProviderNamed, isCustomProvider, isRunner, providerLabel } from "../../src/core/model";
+import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, providerLabel } from "../../src/core/model";
 import { deviceIsOnline, useStore } from "../../src/core/store";
 import { deviceLanguage, languageNames, languages, setAppLanguage, t, useLanguage } from "../../src/i18n";
 import { FieldRow, MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
@@ -72,8 +72,9 @@ export default function SettingsScreen() {
     { title: t("Other Server…"), selected: false, onPress: () => router.push("/settings/custom-provider") },
   ];
   const thisId = engine.deviceId;
+  // This phone first, and machines that never said what they are last.
   const sorted = [...devices].sort((a, b) =>
-    a.id === thisId ? -1 : b.id === thisId ? 1 : a.name.localeCompare(b.name),
+    a.id === thisId ? -1 : b.id === thisId ? 1 : Number(!!a.unknown) - Number(!!b.unknown) || a.name.localeCompare(b.name),
   );
 
   function commitName() {
@@ -278,7 +279,7 @@ export default function SettingsScreen() {
                 title={
                   device.id === thisId
                     ? t("{name} (this phone)", { name: device.name })
-                    : device.name
+                    : deviceName(device)
                 }
                 onPress={() => router.push(`/settings/device/${device.id}`)}
                 chevron

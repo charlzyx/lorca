@@ -79,9 +79,7 @@ impl OpenAiCompatProvider {
         if !request.system_prompt.trim().is_empty() {
             messages.push(json!({ "role": "system", "content": request.system_prompt }));
         }
-        for message in &transformed {
-            messages.extend(convert_message(message));
-        }
+        messages.extend(convert_messages(&transformed));
 
         let mut body = json!({
             "model": self.model,
@@ -142,15 +140,32 @@ impl OpenAiCompatProvider {
     }
 }
 
-/// One transcript message as the request messages it becomes: one, or a tool message followed
-/// by a user message carrying the images a tool returned, which tool messages cannot hold.
-fn convert_message(message: &LlmMessage) -> Vec<Value> {
+/// The transcript as request messages. A tool message cannot hold images, and nothing may come
+/// between an assistant's tool calls and the tool messages that answer them, so a run of tool
+/// results is all of its tool messages and then one user message with the images of the run.
+fn convert_messages(messages: &[LlmMessage]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for run in messages.chunk_by(|a, b| matches!((a, b), (LlmMessage::ToolResult(_), LlmMessage::ToolResult(_)))) {
+        let mut images = Vec::new();
+        for message in run {
+            out.push(convert_message(message, &mut images));
+        }
+        if !images.is_empty() {
+            out.push(json!({ "role": "user", "content": images }));
+        }
+    }
+    out
+}
+
+/// One transcript message as the request message it becomes. A tool result's images go to
+/// `images` instead, after a line naming the tool, for the user message that follows the run.
+fn convert_message(message: &LlmMessage, images: &mut Vec<Value>) -> Value {
     match message {
         LlmMessage::User(user) => {
             let only_text = user.content.iter().all(|part| matches!(part, ContentPart::Text { .. }));
             if only_text {
                 let text = user.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>().join("\n");
-                vec![json!({ "role": "user", "content": text })]
+                json!({ "role": "user", "content": text })
             } else {
                 let parts: Vec<Value> = user
                     .content
@@ -160,7 +175,7 @@ fn convert_message(message: &LlmMessage) -> Vec<Value> {
                         ContentPart::Image { data, mime_type } => image_part(data, mime_type),
                     })
                     .collect();
-                vec![json!({ "role": "user", "content": parts })]
+                json!({ "role": "user", "content": parts })
             }
         }
         LlmMessage::Assistant(assistant) => {
@@ -185,11 +200,11 @@ fn convert_message(message: &LlmMessage) -> Vec<Value> {
             if !tool_calls.is_empty() {
                 value["tool_calls"] = Value::Array(tool_calls);
             }
-            vec![value]
+            value
         }
         LlmMessage::ToolResult(result) => {
             let text = result.text();
-            let images: Vec<Value> = result
+            let mut parts: Vec<Value> = result
                 .content
                 .iter()
                 .filter_map(|part| match part {
@@ -199,18 +214,16 @@ fn convert_message(message: &LlmMessage) -> Vec<Value> {
                 .collect();
             let content = if !text.is_empty() {
                 text
-            } else if !images.is_empty() {
+            } else if !parts.is_empty() {
                 "(see attached image)".into()
             } else {
                 "(no tool output)".into()
             };
-            let mut out = vec![json!({ "role": "tool", "tool_call_id": result.tool_call_id, "content": content })];
-            if !images.is_empty() {
-                let mut parts = vec![json!({ "type": "text", "text": format!("Images from the {} tool result:", result.tool_name) })];
-                parts.extend(images);
-                out.push(json!({ "role": "user", "content": parts }));
+            if !parts.is_empty() {
+                images.push(json!({ "type": "text", "text": format!("Images from the {} tool result:", result.tool_name) }));
+                images.append(&mut parts);
             }
-            out
+            json!({ "role": "tool", "tool_call_id": result.tool_call_id, "content": content })
         }
     }
 }
@@ -439,6 +452,93 @@ impl Provider for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::NON_VISION_TOOL_IMAGE_PLACEHOLDER;
+    use crate::types::{AssistantMessage, ToolCall, ToolResultMessage, UserMessage};
+
+    fn request(messages: Vec<LlmMessage>) -> ModelRequest {
+        ModelRequest { system_prompt: String::new(), messages, tools: Vec::new(), cache_points: Vec::new(), max_tokens: None, options: Default::default() }
+    }
+
+    /// An assistant turn that called these tools, `(id, name)`, at once.
+    fn calls(calls: &[(&str, &str)]) -> LlmMessage {
+        let mut message = AssistantMessage::empty("opencode", "kimi-k3");
+        message.content = calls
+            .iter()
+            .map(|(id, name)| AssistantPart::ToolCall(ToolCall { id: (*id).into(), name: (*name).into(), arguments: json!({}) }))
+            .collect();
+        message.stop_reason = StopReason::ToolUse;
+        LlmMessage::Assistant(message)
+    }
+
+    fn result(id: &str, tool: &str, content: Vec<ContentPart>) -> LlmMessage {
+        LlmMessage::ToolResult(ToolResultMessage { tool_call_id: id.into(), tool_name: tool.into(), content, details: Value::Null, is_error: false, timestamp: 0 })
+    }
+
+    fn png(data: &str) -> ContentPart {
+        ContentPart::Image { data: data.into(), mime_type: "image/png".into() }
+    }
+
+    #[test]
+    fn a_parallel_turn_answers_every_call_before_the_images() {
+        // A codemode script returned a screenshot, and a bash call in the same batch its output.
+        let mut answer = AssistantMessage::empty("opencode", "kimi-k3");
+        answer.content = vec![AssistantPart::Text { text: "It loads.".into() }];
+        let body = OpenAiCompatProvider::new("opencode", "https://opencode.ai/zen/v1", "k", "kimi-k3").body(&request(vec![
+            LlmMessage::User(UserMessage::text("check the page")),
+            calls(&[("a", "codemode"), ("b", "bash")]),
+            result("a", "codemode", vec![png("AAAA")]),
+            result("b", "bash", vec![ContentPart::text("ok")]),
+            LlmMessage::Assistant(answer),
+            LlmMessage::User(UserMessage::text("and the footer?")),
+        ]));
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<_> = messages.iter().map(|message| message["role"].as_str().unwrap()).collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "tool", "user", "assistant", "user"]);
+        assert_eq!(messages[1]["tool_calls"].as_array().map(Vec::len), Some(2));
+        assert_eq!(messages[2], json!({ "role": "tool", "tool_call_id": "a", "content": "(see attached image)" }));
+        assert_eq!(messages[3], json!({ "role": "tool", "tool_call_id": "b", "content": "ok" }));
+        assert_eq!(
+            messages[4]["content"],
+            json!([
+                { "type": "text", "text": "Images from the codemode tool result:" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_its_results_still_sends_their_images() {
+        // Two image files read at once; the loop asks the model again right after.
+        let transcript = vec![
+            LlmMessage::User(UserMessage::text("compare a.png and b.png")),
+            calls(&[("a", "read"), ("b", "read")]),
+            result("a", "read", vec![png("AAAA")]),
+            result("b", "read", vec![ContentPart::text("Read b.png"), png("BBBB")]),
+        ];
+        let body = OpenAiCompatProvider::new("opencode", "https://opencode.ai/zen/v1", "k", "kimi-k3").body(&request(transcript.clone()));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[2], json!({ "role": "tool", "tool_call_id": "a", "content": "(see attached image)" }));
+        assert_eq!(messages[3], json!({ "role": "tool", "tool_call_id": "b", "content": "Read b.png" }));
+        assert_eq!(
+            messages[4],
+            json!({ "role": "user", "content": [
+                { "type": "text", "text": "Images from the read tool result:" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,AAAA" } },
+                { "type": "text", "text": "Images from the read tool result:" },
+                { "type": "image_url", "image_url": { "url": "data:image/png;base64,BBBB" } }
+            ] })
+        );
+
+        // GLM-5.3 takes no images: the notes the transform leaves are the tool messages' text.
+        let mut text_only = OpenAiCompatProvider::new("opencode", "https://opencode.ai/zen/v1", "k", "glm-5.3");
+        text_only.supports_images = false;
+        let body = text_only.body(&request(transcript));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4, "no user message after the results");
+        assert_eq!(messages[2]["content"], NON_VISION_TOOL_IMAGE_PLACEHOLDER);
+        assert_eq!(messages[3]["content"], format!("Read b.png\n{NON_VISION_TOOL_IMAGE_PLACEHOLDER}"));
+    }
 
     #[tokio::test]
     async fn gateway_reasoning_field_streams_as_thinking() {
@@ -469,14 +569,7 @@ mod tests {
 
     #[test]
     fn a_thinking_level_is_the_word_the_model_takes() {
-        let request = ModelRequest {
-            system_prompt: String::new(),
-            messages: vec![LlmMessage::User(crate::types::UserMessage::text("hi"))],
-            tools: Vec::new(),
-            cache_points: Vec::new(),
-            max_tokens: None,
-            options: Default::default(),
-        };
+        let request = request(vec![LlmMessage::User(UserMessage::text("hi"))]);
         let body = |kind: &str, model: &str, level: ThinkingLevel| {
             OpenAiCompatProvider::new(kind, "https://opencode.ai/zen/v1", "k", model).with_thinking(Some(level)).body(&request)
         };
