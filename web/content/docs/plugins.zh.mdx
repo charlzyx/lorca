@@ -64,7 +64,7 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
 
 需要账号的远程服务器会在 Lorca 第一次连接时要求登录：服务器会显示 **需要登录**，在它的表单里或智能体发出的卡片上点 **登录**，就会像市场插件一样通过 OAuth 登录。如果服务器接受令牌，可以把令牌放在请求头里，比如 `Authorization: Bearer …`。
 
-这些服务器保存在 Lorca 文件夹里的 `mcp.json`（`~/.lorca/mcp.json`），格式与 Claude Desktop、Cursor 和 Claude Code 相同，你可以从它们的配置里复制，也可以直接手动编辑。文件改动后几秒内，Lorca 就会重新读取：
+这些服务器保存在 Lorca 文件夹里的 `mcp.json`（`~/.lorca/mcp.json`），格式与 Claude Desktop、Cursor 和 Claude Code 相同，你可以从它们的配置里复制，也可以直接手动编辑。你一保存，Lorca 就会重新读取：
 
 ```json
 {

@@ -64,7 +64,7 @@ Any [MCP](https://modelcontextprotocol.io) server can be a plugin: a command the
 
 A remote server that needs an account asks for it when Lorca first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
 
-The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. Lorca reads it again within seconds of a change:
+The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. Lorca reads it again as soon as you save it:
 
 ```json
 {

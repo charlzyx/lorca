@@ -21,7 +21,7 @@ cli = ["runner", "server", "dep:usage", "dep:tracing-subscriber"]
 # Connecting and disconnecting account providers. Devices use this without the agent loop.
 provider-auth = ["dep:lorca-provider-auth"]
 # Running bots: the agent loop, providers, tools. Off for a Device that only takes part.
-runner = ["provider-auth", "dep:lorca-agent", "dep:open", "dep:rmcp", "dep:mcp_http"]
+runner = ["provider-auth", "dep:lorca-agent", "dep:open", "dep:rmcp", "dep:mcp_http", "dep:notify"]
 # The local websocket the desktop app connects to.
 server = ["dep:axum"]
 
@@ -64,6 +64,8 @@ if-addrs = "0.15.0"
 # rmcp speaks reqwest 0.13; the rest of the crate is on the workspace's 0.12, so the MCP side has its own client.
 mcp_http = { package = "reqwest", version = "0.13", default-features = false, features = ["json", "stream", "rustls", "http2"], optional = true }
 rmcp = { version = "3.4.0", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "auth", "reqwest"], optional = true }
+# The system's file events (inotify, FSEvents, ReadDirectoryChangesW), so `lorca serve` hears mcp.json change.
+notify = { version = "8.2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # `serve --parent-pid` watches the parent through a process handle.
