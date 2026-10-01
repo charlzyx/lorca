@@ -6,6 +6,15 @@ and the update window shows it.
 
 ## [Unreleased]
 
+- Your own MCP servers: Settings › Plugins has an MCP Servers section, where you add a server by
+  the command that runs it or its URL, or paste its JSON from a README or another app's settings,
+  and edit, turn off, or remove it. Each server shows how it stands and the tools it offers, with
+  Sign in when it asks for one, and every bot on that computer can use it. Lorca keeps them in
+  `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use, and picks up
+  edits you make to the file. Pick another Runner in Settings to manage its servers.
+- `lorca mcp` lists, adds, removes, turns on or off, and signs in to MCP servers from a terminal,
+  and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or
+  Gemini CLI have on the computer.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

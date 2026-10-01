@@ -144,7 +144,8 @@ final class MarketplaceViewController: NSViewController {
     /// The plugin as the picked Runner has it, nil when it is not installed there.
     func installedPlugin(_ id: MarketplacePlugin.ID) -> InstalledPlugin? {
         guard let runner else { return nil }
-        return runner.plugins.first { $0.id == id } ?? installed[runner.id]?[id]
+        // A server of the Runner's mcp.json that shares the id is not this plugin.
+        return runner.plugins.first { $0.id == id && !$0.isMcpServer } ?? installed[runner.id]?[id]
     }
 
     /// Everything the picked Runner has, the marketplace's and the rest, in its own order.
@@ -273,7 +274,7 @@ final class MarketplaceViewController: NSViewController {
     /// The plugin's own sheet on the picked Runner: its sign-in, its setup, and Remove.
     func manage(_ pluginID: MarketplacePlugin.ID) {
         guard let runner else { return }
-        presentAsSheet(PluginViewController(pluginID: pluginID, runner: runner, bot: nil))
+        PluginViewController.present(pluginID: pluginID, runner: runner, bot: nil, from: self)
     }
 
     /// Adds the bot on the picked Runner and opens its chat, where it greets the user.

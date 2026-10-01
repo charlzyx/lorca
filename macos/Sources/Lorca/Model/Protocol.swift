@@ -176,11 +176,12 @@ enum Wire {
         var icon: String?
         var state: String
         var detail: String?
+        var source: String?
 
         func toModel() -> InstalledPlugin {
             InstalledPlugin(
                 id: id, name: name, description: description ?? "", version: version ?? "", icon: icon ?? "",
-                state: InstalledPlugin.State(rawValue: state) ?? .unknown, detail: detail ?? "")
+                state: InstalledPlugin.State(rawValue: state) ?? .unknown, detail: detail ?? "", source: source)
         }
     }
 

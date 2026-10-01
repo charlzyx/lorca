@@ -89,8 +89,9 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
 
 /// What this Runner can be asked. The memory verbs check that the bot runs here: a request
 /// that reached the wrong machine is refused, not forwarded. The plugin verbs act on this
-/// Runner's own installs; the permission verb answers a card a bot here is waiting on; the
-/// bash verbs type into, or stop, a command a bot here left waiting.
+/// Runner's own installs, and the `mcp.*` verbs on its mcp.json; the permission verb answers a
+/// card a bot here is waiting on; the bash verbs type into, or stop, a command a bot here left
+/// waiting.
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
@@ -101,6 +102,8 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
         }
         #[cfg(feature = "runner")]
         verb if verb.starts_with("plugins.") || verb == "permission.answer" => crate::plugins::serve_request(app, verb, body, Some(&request.requested_by)).await,
+        #[cfg(feature = "runner")]
+        verb if verb.starts_with("mcp.") => crate::plugins::mcp_json::serve_request(app, verb, body).await,
         #[cfg(feature = "runner")]
         "bash.stdin" | "bash.stop" => crate::shell::serve(app, &request.verb, body).await,
         other => Err(format!("Unknown request {other}")),

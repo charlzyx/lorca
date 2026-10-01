@@ -42,8 +42,34 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `lorca provider add <name> <base-url>` | Adds a custom provider: any server that speaks OpenAI's or Anthropic's API. `--api` picks `chat-completions` (the default), `responses`, or `messages`; `--model` names a model, once per model; `--api-key-stdin` reads a key. |
 | `lorca provider remove <kind>` | Disconnects a provider on every device, or deletes a custom one (`custom:openrouter`, as `provider list` shows it). |
 | `lorca provider list` | Lists the connected providers. |
+| `lorca mcp …` | Manages this computer's own MCP servers; see [MCP servers](#mcp-servers). |
 | `lorca status` | Prints this device's state as JSON: devices, bots, chats, providers. |
-| `lorca doctor` | Checks the home folder, identity, port, and relay, and says what is wrong. |
+| `lorca doctor` | Checks the home folder, identity, port, relay, and `mcp.json`, and says what is wrong. |
+
+## MCP servers
+
+`lorca mcp` edits `mcp.json` in Lorca's folder, the [MCP servers](/docs/plugins#your-own-mcp-servers) every bot on this computer can use. With `lorca serve` running, the change reaches it at once; without it, the next `lorca serve` reads the file.
+
+| Command | What it does |
+| --- | --- |
+| `lorca mcp list` | Lists the servers and how each stands: its tools, a sign-in it needs, or why it did not start. |
+| `lorca mcp get <name>` | Connects a server and shows its settings and tools. |
+| `lorca mcp add <name> <command> [args…]` | Adds a server this computer runs. Everything after the command is its arguments, flags included; `-e KEY=value` sets a variable, once per variable, before the command. |
+| `lorca mcp add <name> <url>` | Adds a remote server that speaks streamable HTTP. `-H "Name: value"` adds a header, before or after the URL. |
+| `lorca mcp add-json <name> <json>` | Adds a server from its JSON, as a README or another app's config writes it. |
+| `lorca mcp remove <name>` | Removes a server, with its sign-in. |
+| `lorca mcp enable <name>`, `disable <name>` | Turns a server on or off. Off, bots don't see it and it never starts. |
+| `lorca mcp sign-in <name>` | Signs in to a remote server that asks for it, in this computer's browser. |
+| `lorca mcp import [file]` | Adds the servers from another app's config: Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI, or the file you name. |
+
+```bash
+lorca mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
+lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+lorca mcp add linear https://mcp.linear.app/mcp
+lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
+```
+
+`--description` tells bots what a server is for. `add` connects the server once it is saved and says whether it started.
 
 ## A headless Runner
 
@@ -67,6 +93,6 @@ The computer shows up in your Device list, and you can create bots for it from t
 
 ## Files
 
-Everything is under `~/.lorca/`, readable only by your user: your identity and machine keys, provider credentials, settings, chats, attachments, plugins, and one workspace folder per bot with its memory.
+Everything is under `~/.lorca/`, readable only by your user: your identity and machine keys, provider credentials, settings, chats, attachments, plugins, your MCP servers in `mcp.json`, and one workspace folder per bot with its memory.
 
 The macOS app logs the service to `~/Library/Logs/Lorca/cli.log`.

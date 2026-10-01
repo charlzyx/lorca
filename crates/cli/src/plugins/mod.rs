@@ -2,11 +2,13 @@
 //! servers, variables, skills, tool hints) that a Runner installs; the Runner keeps the
 //! package, the variables, the secrets, and the OAuth tokens, and advertises what it has in
 //! its machine blob. Every bot on the Runner may use every plugin installed there. The
-//! manifests on offer are the marketplace's (`crate::marketplace`). The MCP side, with the
-//! permission gate, is `mcp` under the `runner` feature.
+//! manifests on offer are the marketplace's (`crate::marketplace`); the servers the user adds
+//! themselves live in the Runner's `mcp.json` (`mcp_json`), each a plugin of its own. The MCP
+//! side, with the permission gate, is `mcp` under the `runner` feature.
 
 #[cfg(feature = "runner")]
 pub mod mcp;
+pub mod mcp_json;
 #[cfg(feature = "runner")]
 pub mod review;
 pub mod sign_in;
@@ -71,6 +73,9 @@ pub enum ServerSpec {
         args: Vec<String>,
         #[serde(default)]
         env: BTreeMap<String, String>,
+        /// Where it starts; the plugin's folder when unset. A leading `~` is the home folder.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// A streamable-HTTP server. `${VAR}` in `headers` is filled the same way.
     Http {
@@ -109,6 +114,10 @@ pub enum AuthSpec {
         device_authorization_endpoint: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         token_endpoint: Option<String>,
+        /// Sign in only once the server asks for it, with a 401 and its challenge: an `mcp.json`
+        /// server says nothing about how it signs in, and many need no sign-in at all.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        optional: bool,
     },
     /// `Authorization: Bearer <variable>`.
     Bearer { variable: String },
@@ -213,15 +222,24 @@ pub fn slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
-/// Fills a header or an environment value, or `None` when it names a variable with no value, so
-/// an optional key left unset is not sent at all. Sent as its `${VAR}` placeholder it reads as a
-/// key: Context7 answers every tool call with "Invalid API key".
+/// A placeholder's variable and its default: `${NAME}`, or `${NAME:-default}` as a shell writes
+/// it, which `mcp.json` files use.
+fn placeholder(inner: &str) -> (&str, Option<&str>) {
+    match inner.split_once(":-") {
+        Some((name, default)) => (name, Some(default)),
+        None => (inner, None),
+    }
+}
+
+/// Fills a header or an environment value, or `None` when it names a variable with no value and
+/// no default, so an optional key left unset is not sent at all. Sent as its `${VAR}` placeholder
+/// it reads as a key: Context7 answers every tool call with "Invalid API key".
 pub fn fill_if_set(template: &str, values: &BTreeMap<String, String>) -> Option<String> {
     let mut rest = template;
     while let Some(start) = rest.find("${") {
         let Some(end) = rest[start + 2..].find('}') else { break };
-        let name = &rest[start + 2..start + 2 + end];
-        if values.get(name).is_none_or(|value| value.trim().is_empty()) {
+        let (name, default) = placeholder(&rest[start + 2..start + 2 + end]);
+        if default.is_none() && values.get(name).is_none_or(|value| value.trim().is_empty()) {
             return None;
         }
         rest = &rest[start + 3 + end..];
@@ -229,7 +247,8 @@ pub fn fill_if_set(template: &str, values: &BTreeMap<String, String>) -> Option<
     Some(fill(template, values))
 }
 
-/// Fills `${VAR}` from the plugin's variables and secrets; an unknown name stays as it is.
+/// Fills `${VAR}` from the plugin's variables and secrets, and `${VAR:-default}` with the default
+/// when the variable has no value; an unknown name with no default stays as it is.
 pub fn fill(template: &str, values: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let mut rest = template;
@@ -237,10 +256,11 @@ pub fn fill(template: &str, values: &BTreeMap<String, String>) -> String {
         out.push_str(&rest[..start]);
         match rest[start + 2..].find('}') {
             Some(end) => {
-                let name = &rest[start + 2..start + 2 + end];
-                match values.get(name) {
-                    Some(value) => out.push_str(value),
-                    None => out.push_str(&rest[start..start + 3 + end]),
+                let (name, default) = placeholder(&rest[start + 2..start + 2 + end]);
+                match (values.get(name).filter(|value| default.is_none() || !value.is_empty()), default) {
+                    (Some(value), _) => out.push_str(value),
+                    (None, Some(default)) => out.push_str(default),
+                    (None, None) => out.push_str(&rest[start..start + 3 + end]),
                 }
                 rest = &rest[start + 3 + end..];
             }
@@ -288,6 +308,9 @@ pub struct Store {
     /// the flow ends. The plugin's detail carries it, so the app that started the sign-in
     /// without a card can show it.
     pub codes: BTreeMap<String, SignInCode>,
+    /// The Runner's `mcp.json` as last read, every server in it: the ones that run are plugins
+    /// in `installed` too.
+    pub mcp: mcp_json::McpFile,
 }
 
 /// A device-flow code waiting to be entered: which server it signs in, and where.
@@ -303,14 +326,19 @@ impl Store {
         let dir = config.plugins_dir();
         let installed: InstalledFile = config::read_json(&dir.join("installed.json")).unwrap_or_default();
         let secrets: SecretsFile = config::read_json(&dir.join("secrets.json")).unwrap_or_default();
-        Store { installed: installed.plugins, secrets, notes: BTreeMap::new(), codes: BTreeMap::new() }
+        let mut store = Store { installed: installed.plugins, secrets, notes: BTreeMap::new(), codes: BTreeMap::new(), mcp: mcp_json::McpFile::default() };
+        store.installed.retain(|plugin| plugin.source != mcp_json::SOURCE);
+        store.take_mcp(mcp_json::McpFile::read(&config.mcp_path()));
+        store
     }
 
     fn save(&self, config: &config::Config) -> anyhow::Result<()> {
         let dir = config.plugins_dir();
         std::fs::create_dir_all(&dir)?;
         config::set_private(&dir)?;
-        config::write_json_private(&dir.join("installed.json"), &InstalledFile { plugins: self.installed.clone() })?;
+        // The servers from mcp.json are that file's.
+        let plugins = self.installed.iter().filter(|plugin| plugin.source != mcp_json::SOURCE).cloned().collect();
+        config::write_json_private(&dir.join("installed.json"), &InstalledFile { plugins })?;
         config::write_json_private(&dir.join("secrets.json"), &self.secrets)?;
         Ok(())
     }
@@ -392,17 +420,33 @@ impl Store {
             icon: manifest.icon.clone(),
             state,
             detail,
+            source: (plugin.source == mcp_json::SOURCE).then(|| plugin.source.clone()),
         }
     }
 
-    /// An OAuth server with no tokens and no pasted token.
+    /// An OAuth server with no tokens and no pasted token. One that signs in only when asked
+    /// needs it once the server has answered with its challenge.
     pub fn needs_sign_in(&self, id: &str, server: &str, spec: &ServerSpec, values: &BTreeMap<String, String>) -> bool {
         match spec {
-            ServerSpec::Http { auth: Some(AuthSpec::Oauth { token_variable, .. }), .. } => {
+            ServerSpec::Http { auth: Some(AuthSpec::Oauth { token_variable, optional, .. }), .. } => {
                 let pasted = token_variable.as_ref().map(|v| values.contains_key(v)).unwrap_or(false);
-                !pasted && self.secret(id, &format!("oauth:{server}")).is_none()
+                let asked = !*optional || self.secret(id, &format!("challenge:{server}")).is_some();
+                !pasted && asked && self.secret(id, &format!("oauth:{server}")).is_none()
             }
             _ => false,
+        }
+    }
+
+    /// Keeps the challenge a server that signs in only when asked answered with, so the plugin
+    /// reads Sign in from then on, across restarts, until it is signed in.
+    pub fn note_challenge(&mut self, config: &config::Config, id: &str, server: &str, challenge: &str) {
+        if self.secret(id, &format!("challenge:{server}")).is_some() {
+            return;
+        }
+        // An object, so `values` never takes it for a variable.
+        self.set_secret(id, &format!("challenge:{server}"), Some(json!({ "header": challenge })));
+        if let Err(error) = self.save(config) {
+            tracing::warn!(%error, "saving a server's sign-in challenge");
         }
     }
 }
@@ -412,6 +456,9 @@ impl Store {
 /// Installs or updates a plugin on this Runner and writes its skills to its folder.
 pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<PluginStatus, String> {
     manifest.check()?;
+    if let Some(server) = app.plugins.lock().unwrap().get(&manifest.id).filter(|plugin| plugin.source == mcp_json::SOURCE) {
+        return Err(format!("The MCP server {} in mcp.json has the id {}. Rename it there first.", server.manifest.name, manifest.id));
+    }
     let dir = app.config.plugins_dir().join(&manifest.id);
     let skills = dir.join("skills");
     std::fs::create_dir_all(&skills).map_err(|e| e.to_string())?;
@@ -441,8 +488,16 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
     Ok(status)
 }
 
-/// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it.
+/// Removes a plugin, its secrets, and its folder; every bot on this Runner loses it. A server
+/// from `mcp.json` leaves that file.
 pub fn uninstall(app: &Arc<App>, id: &str) -> Result<(), String> {
+    #[cfg(feature = "runner")]
+    {
+        let from_file = app.plugins.lock().unwrap().get(id).filter(|plugin| plugin.source == mcp_json::SOURCE).map(|plugin| plugin.manifest.name.clone());
+        if let Some(name) = from_file {
+            return mcp_json::remove(app, &name);
+        }
+    }
     {
         let mut store = app.plugins.lock().unwrap();
         let before = store.installed.len();
@@ -534,7 +589,7 @@ pub fn note(app: &Arc<App>, id: &str, state: Option<(&str, &str)>) {
 }
 
 /// The Runner's plugin list changed: the machine blob and the local app hear.
-fn announce(app: &Arc<App>) {
+pub(crate) fn announce(app: &Arc<App>) {
     app.push_machine_blob_if_changed();
     app.emit(app.roster_summary());
 }
@@ -555,12 +610,19 @@ pub fn detail(app: &Arc<App>, id: &str) -> Result<Value, String> {
                 ServerSpec::Stdio { command, .. } => ("stdio", json!({ "command": command })),
                 ServerSpec::Http { url, auth, .. } => {
                     let waiting = store.codes.get(id).filter(|code| &code.server == name);
+                    // A server that signs in only when asked shows its sign-in once it has asked.
+                    let tokens = store.secret(id, &format!("oauth:{name}")).is_some();
+                    let oauth = match auth {
+                        Some(AuthSpec::Oauth { optional: true, .. }) => tokens || store.secret(id, &format!("challenge:{name}")).is_some(),
+                        Some(AuthSpec::Oauth { .. }) => true,
+                        _ => false,
+                    };
                     (
                         "http",
                         json!({
                             "url": url,
-                            "oauth": matches!(auth, Some(AuthSpec::Oauth { .. })),
-                            "signed_in": matches!(auth, Some(AuthSpec::Oauth { .. })) && !store.needs_sign_in(id, name, spec, &values),
+                            "oauth": oauth,
+                            "signed_in": oauth && !store.needs_sign_in(id, name, spec, &values),
                             "code": waiting.map(|code| &code.code),
                             "link": waiting.map(|code| &code.link),
                         }),
@@ -737,6 +799,12 @@ mod tests {
         assert_eq!(fill_if_set("static", &values).as_deref(), Some("static"));
         values.insert("BLANK".to_string(), " ".to_string());
         assert_eq!(fill_if_set("${BLANK}", &values), None, "a blank value is no value");
+        // A default, as mcp.json files write it.
+        assert_eq!(fill("${MISSING:-8080}/${TOKEN:-x}", &values), "8080/abc");
+        values.insert("EMPTY".to_string(), String::new());
+        assert_eq!(fill("${EMPTY:-fallback}", &values), "fallback", "an empty value takes the default, as a shell's :- does");
+        assert_eq!(fill("${EMPTY}", &values), "");
+        assert_eq!(fill_if_set("Bearer ${MISSING:-anonymous}", &values).as_deref(), Some("Bearer anonymous"));
         assert_eq!(slug("  GitHub  Server! "), "github-server");
         assert!(pattern_matches("search_*", "search_issues") && !pattern_matches("search_*", "create_issue") && pattern_matches("get_me", "get_me"));
     }
@@ -795,7 +863,7 @@ mod tests {
         let app = &scratch.0;
         let mut old = crate::marketplace::bundled().plugins.into_iter().find(|m| m.id == "github").unwrap();
         // As installed before the device flow existed: a bare OAuth entry.
-        old.servers.insert("github".into(), ServerSpec::Http { url: "https://api.githubcopilot.com/mcp/".into(), headers: BTreeMap::new(), auth: Some(AuthSpec::Oauth { scopes: vec![], token_variable: Some("GITHUB_TOKEN".into()), client_id_variable: None, client_secret_variable: None, client_id: None, client_secret: None, device_authorization_endpoint: None, token_endpoint: None }) });
+        old.servers.insert("github".into(), ServerSpec::Http { url: "https://api.githubcopilot.com/mcp/".into(), headers: BTreeMap::new(), auth: Some(AuthSpec::Oauth { scopes: vec![], token_variable: Some("GITHUB_TOKEN".into()), client_id_variable: None, client_secret_variable: None, client_id: None, client_secret: None, device_authorization_endpoint: None, token_endpoint: None, optional: false }) });
         install(app, old, "marketplace").unwrap();
         let mut vars = BTreeMap::new();
         vars.insert("GITHUB_TOKEN".to_string(), "ghp-secret".to_string());

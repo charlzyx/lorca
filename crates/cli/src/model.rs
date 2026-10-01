@@ -67,6 +67,10 @@ pub struct PluginStatus {
     /// What the state means, for a row's subtitle.
     #[serde(default)]
     pub detail: String,
+    /// `mcp.json` for a server from the Runner's `mcp.json`, which the apps edit as one; none for
+    /// a plugin from the marketplace or its own manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl Device {

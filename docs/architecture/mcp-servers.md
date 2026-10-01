@@ -1,0 +1,39 @@
+# MCP servers
+
+The MCP servers the user adds themselves, beside the marketplace's [plugins](plugins.md#plugins), live in `mcp.json` in the CLI's data directory (`crates/cli/src/plugins/mcp_json.rs`), in the format Claude Desktop, Cursor, and Claude Code share: `{ "mcpServers": { "<name>": { … } } }`, each a command (`command`, `args`, `env`, `cwd`) or a remote server (`type` `http`, `url`, `headers`), with `description`, `disabled`, and `oauth` (`false`, or `{ clientId, clientSecret, scopes }` for a server that registers no clients on the fly).
+
+## Servers as plugins
+
+Each entry that can run and is on is a plugin of the Runner like any other, so it reaches the machine blob, the codemode listing, the system prompt's catalog, Auto-review, and sign-in cards: `source` `mcp.json` (on its `PluginStatus` too, which the apps read), its name as the plugin's, its id the name as an id (`My Docs` → `my-docs`; a name with no ASCII letter or digit gets `mcp-` and a hash), one server named `mcp`, the icon `terminal` or `globe`, and as its description the entry's, else the program it runs or the host it reaches, never an argument, a header, or a URL's path, which can hold a key; a connection error names a URL by its origin alone. `installed.json` never holds one. An entry that cannot run (no command or URL, both, an unknown type) or whose id another plugin has keeps its place in the file with why; one that is off is in no blob or turn and keeps its sign-in.
+
+## The file
+
+The file is read with its objects' keys in order (`Json`), each entry made canonical: other apps' spellings (Windsurf's `serverUrl`, Gemini's `httpUrl`, OpenCode's `environment`, `enabled`, and list `command`, Zed's command object, VS Code's `servers` in place of `mcpServers`) become the ones above, values strings, and a remote entry gains `"type": "http"`, which Claude Code needs; fields Lorca does not know stay. A write keeps the order an entry has, puts new keys in Lorca's (`type`, `command`, `args`, `env`, …), and leaves the rest of the file, such as another app's settings beside `mcpServers`, alone.
+
+`lorca serve` follows the file (`mcp_json::watch`: its size and time every two seconds, then 300 ms for an editor's second write), so an edit by hand, by an editor, or by another `lorca` reaches the Runner in seconds: a new or changed server connects once in the background to list its tools, its old `catalog.json` gone, and a removed one drops its connection, keeping its sign-in in case it comes back. At start, a server with no `catalog.json` connects once. A file that is not valid JSON keeps the servers read before, shows its error in the apps and `lorca mcp list`, and refuses writes until it is fixed.
+
+## Values and sign-in
+
+`${VAR}` in a command, its args, env, and `cwd`, a URL, and headers reads the login shell's environment, then the CLI's own, as Claude's and Cursor's files mean it, and `${VAR:-default}` takes the default for an empty or unset variable; a header or env value naming an unset variable with no default is left out. A command starts in its `cwd` (`~` is the home folder), which must be a folder already, else in the plugin's folder, made when it first starts.
+
+A remote entry with no `Authorization` header signs in only when asked (`AuthSpec::Oauth { optional }`): it connects without credentials, and a 401 keeps the server's `WWW-Authenticate` challenge in the secrets (`challenge:mcp`), so the plugin reads `needs_auth` across restarts until a [sign-in](plugins.md#plugins), the same as a marketplace plugin's. rmcp's client speaks streamable HTTP only; a failure at a URL ending in `/sse`, the older transport, says that the server's streamable URL usually ends in `/mcp`.
+
+## Managing it
+
+The `mcp.*` methods run on the Runner `runner_id` names, sealed to it ([Protocols](protocols.md)), or here when none is named:
+
+- `mcp.list`: the path, the file's error, and each server's name, id, `enabled`, canonical `config`, `problem`, `status`, `signs_in`, `signed_in`, and `tool_count`.
+- `mcp.get`: one server, with its `tools` as `catalog.json` has them.
+- `mcp.save`: `name`, a `config` in any app's spelling, and `previous_name` to edit or rename one. The CLI checks the entry and refuses a name or id another server or plugin has. A rename moves the plugin's secrets, folder, and Auto-review rules to the new id.
+- `mcp.remove`, with its secrets, folder, and always-allowed tools; `mcp.set_enabled`, the entry's `disabled`.
+- `mcp.reconnect`: answers once the server has connected or failed. `fresh` drops its connection first, as the apps' Reconnect does; otherwise a connection there or under way answers. A sealed one waits 150 s.
+- `mcp.sign_in`: the sign-in, in the browser on the Runner.
+- `mcp.parse`, always here: the servers pasted JSON holds, as a whole config (`mcpServers`, `servers`, OpenCode's `mcp`, Zed's `context_servers`), servers by name, a README's bare `"name": { … }`, or one server, with comments and trailing commas allowed.
+
+`plugins.uninstall` of such a plugin removes its entry, and a marketplace install refuses an id the file has. `lorca mcp list`, `get`, `add`, `add-json`, `remove`, `enable`, `disable`, `sign-in`, and `import` ([CLI](runtime.md)) go through the running `lorca serve`, else run in that process, which then starts a server only to check it; `add` and `get` connect the server and say how it went. `import` takes another app's config file, or with none, each of Claude Desktop's, Claude Code's, Cursor's, Windsurf's, VS Code's, and Gemini CLI's that the computer has, skipping names `mcp.json` has.
+
+## In the apps
+
+Settings › Plugins lists the picked Runner's servers below its plugins, in a section of their own (MCP Servers on Workbench), and the plugins' section leaves them out: each server with its symbol in the color of how it stands, its state (14 tools, Needs a sign-in, why it did not start, Off) and command line or URL, and a switch; Add Server…; and on this computer, `mcp.json` with Open. The section asks `mcp.list` again when the servers' states change, and for this computer's file on every roster change, since an edit that broke it changes no state. The search finds the section and each server that is on.
+
+The server sheet (`Sheets/McpServerViewController.swift`, `src/ui/sheets/mcpServer.tsx`) has a Form or JSON switch; the name, with the `name__tool` its tools go by; Command or URL; the command line, split and joined with Windows' quoting rules so a path keeps its backslashes, with its environment as rows, or the URL with its headers (a value whose name says it is a key hides behind its eye); and what it is for. JSON pasted into any field opens the JSON view, which `mcp.parse` reads as it changes; JSON with several servers adds them together. Saved, the sheet shows how the server stands with Reconnect or Sign in, a switch, and the tools it offered, read-only ones marked, waits on `mcp.reconnect`, and offers Remove…. A row for such a plugin, in a bot's inspector or the marketplace's installed page, opens this sheet. The phone shows the servers that are on among the Runner's plugins in chat details.

@@ -3,7 +3,9 @@
 
 import { hostInfo } from "../../host";
 import { L } from "../../l10n";
+import { isMcpServer } from "../../model/mcp";
 import {
+  isRunner,
   paneTitle,
   providerName,
   providerSubtitle,
@@ -54,6 +56,13 @@ export const Entries = {
   bot: (bot: Bot, providers: readonly ProviderCredential[]) =>
     entry("bots", bot.name, { keywords: [bot.description, providerName(bot.provider, providers), L("bot runner")] }),
   plugin: (plugin: InstalledPlugin) => entry("plugins", plugin.name, { keywords: [plugin.description, L("plugin mcp marketplace")] }),
+  // The section a Runner's mcp.json fills, and each server in it, which its row goes by.
+  mcpServers: (device: Device) =>
+    entry("plugins", L("MCP Servers"), {
+      row: L("MCP Servers on %@", device.name),
+      keywords: [L("mcp model context protocol server mcp.json custom command url json claude cursor")],
+    }),
+  mcpServer: (plugin: InstalledPlugin) => entry("plugins", plugin.name, { keywords: [plugin.description, L("mcp server mcp.json")] }),
   // A custom provider goes by the name the user gave it, as its row on the pane does.
   provider: (kind: ProviderKind, providers: readonly ProviderCredential[]) =>
     entry("providers", providerName(kind, providers), { keywords: [providerSubtitle(kind), L("credential connect disconnect sign in model")] }),
@@ -83,8 +92,11 @@ export function entriesIn(pane: SettingsPane, device: Device | undefined, store:
       return (device ? store.botsOn(device.id) : []).map((bot) => Entries.bot(bot, store.providers));
     case "providers":
       return store.providers.map((credential) => Entries.provider(credential.kind, store.providers));
-    case "plugins":
-      return (device?.plugins ?? []).map(Entries.plugin);
+    case "plugins": {
+      const plugins = device?.plugins ?? [];
+      const servers = device && isRunner(device) ? [Entries.mcpServers(device), ...plugins.filter(isMcpServer).map(Entries.mcpServer)] : [];
+      return [...plugins.filter((plugin) => !isMcpServer(plugin)).map(Entries.plugin), ...servers];
+    }
     case "device":
       return device ? [Entries.machineKey(), Entries.pairing()] : [Entries.machineKey()];
   }

@@ -9,6 +9,7 @@ import type { JSX } from "@solidjs/web";
 import { host } from "../host";
 import { L, Lc } from "../l10n";
 import * as Format from "../model/format";
+import { isMcpServer } from "../model/mcp";
 import {
   deviceSymbol,
   pluginStateColor,
@@ -208,7 +209,8 @@ function MarketplaceSheet(props: { runnerID: string | null; width: number; heigh
     installedPlugin: (id) => {
       const on = runner();
       if (!on) return undefined;
-      return on.plugins.find((plugin) => plugin.id === id) ?? installed.read()[on.id]?.[id];
+      // A server of the Runner's mcp.json that shares the id is not this plugin.
+      return on.plugins.find((plugin) => plugin.id === id && !isMcpServer(plugin)) ?? installed.read()[on.id]?.[id];
     },
     /** Everything the picked Runner has, the marketplace's and the rest, in its own order. */
     installedPlugins: () => {

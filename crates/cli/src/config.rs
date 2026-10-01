@@ -50,6 +50,11 @@ impl Config {
         self.home.join("plugins")
     }
 
+    /// The MCP servers the user adds themselves, in the format Claude Desktop and Cursor share.
+    pub fn mcp_path(&self) -> PathBuf {
+        self.home.join("mcp.json")
+    }
+
     pub fn ensure_home(&self) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.home)?;
         set_private(&self.home)?;
@@ -148,10 +153,14 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 
 /// Writes atomically with mode 0600.
 pub fn write_json_private<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    write_private(path, &serde_json::to_vec_pretty(value)?)
+}
+
+/// Writes `bytes` atomically with mode 0600.
+pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let bytes = serde_json::to_vec_pretty(value)?;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));

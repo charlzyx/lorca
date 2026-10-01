@@ -30,6 +30,7 @@ import {
   type ProviderModel,
   type Routine,
 } from "./models";
+import type { McpEntry, McpFile, McpServer, ParsedServer } from "./mcp";
 
 /** Why the last try to connect to the relay failed. */
 export interface WireRelayProblem {
@@ -57,6 +58,32 @@ export interface WirePluginStatus {
   icon?: string;
   state: string;
   detail?: string;
+  source?: string | null;
+}
+
+/** A server of a Runner's mcp.json, as `mcp.list` and `mcp.get` answer. */
+export interface WireMcpServer {
+  name: string;
+  id: string;
+  enabled: boolean;
+  config: Record<string, unknown> | null;
+  problem?: string | null;
+  status?: WirePluginStatus | null;
+  signs_in?: boolean | null;
+  signed_in?: boolean | null;
+  tool_count?: number | null;
+  tools?: { name: string; title?: string | null; description?: string | null; read_only?: boolean | null }[] | null;
+}
+
+export interface WireMcpFile {
+  path: string;
+  error?: string | null;
+  servers: WireMcpServer[];
+}
+
+/** `mcp.parse`: the servers pasted JSON holds. */
+export interface WireParsedServers {
+  servers: { name?: string | null; config: Record<string, unknown> | null; problem?: string | null }[];
 }
 
 export interface WireDevice {
@@ -380,7 +407,48 @@ export function toPlugin(wire: WirePluginStatus): InstalledPlugin {
     icon: wire.icon ?? "",
     state: (states as string[]).includes(wire.state) ? (wire.state as PluginState) : "unknown",
     detail: wire.detail ?? "",
+    source: optional(wire.source),
   };
+}
+
+/** An entry as the apps hold it: the strings where strings belong, whatever else the CLI sent. */
+export function toMcpEntry(wire: Record<string, unknown> | null | undefined): McpEntry {
+  const entry: McpEntry = { ...(wire ?? {}) };
+  const text = (value: unknown) => (typeof value === "string" ? value : value === undefined || value === null ? undefined : String(value));
+  const map = (value: unknown) =>
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, each]) => [key, text(each) ?? ""]))
+      : undefined;
+  for (const key of ["type", "command", "cwd", "url", "description"] as const) entry[key] = text(entry[key]);
+  entry.args = Array.isArray(entry.args) ? entry.args.map((arg) => text(arg) ?? "") : undefined;
+  entry.env = map(entry.env);
+  entry.headers = map(entry.headers);
+  entry.disabled = entry.disabled === true ? true : undefined;
+  for (const key of Object.keys(entry)) if (entry[key] === undefined) delete entry[key];
+  return entry;
+}
+
+export function toMcpServer(wire: WireMcpServer): McpServer {
+  return {
+    name: wire.name,
+    id: wire.id,
+    enabled: wire.enabled,
+    entry: toMcpEntry(wire.config),
+    problem: optional(wire.problem),
+    status: wire.status ? toPlugin(wire.status) : undefined,
+    signsIn: wire.signs_in ?? false,
+    signedIn: wire.signed_in ?? false,
+    toolCount: optional(wire.tool_count),
+    tools: wire.tools?.map((tool) => ({ name: tool.name, title: optional(tool.title), description: tool.description ?? "", readOnly: tool.read_only ?? false })),
+  };
+}
+
+export function toMcpFile(wire: WireMcpFile): McpFile {
+  return { path: wire.path, error: optional(wire.error), servers: wire.servers.map(toMcpServer) };
+}
+
+export function toParsedServers(wire: WireParsedServers): ParsedServer[] {
+  return wire.servers.map((server) => ({ name: optional(server.name), entry: server.config ? toMcpEntry(server.config) : undefined, problem: optional(server.problem) }));
 }
 
 export function toDevice(wire: WireDevice): Device {

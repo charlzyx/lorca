@@ -48,6 +48,7 @@ import {
   type Routine,
   commandRunOf,
 } from "./models";
+import { parseLocally, type McpEntry, type McpFile, type McpServer, type ParsedServer } from "./mcp";
 import { ReplyEngine } from "./replies";
 import {
   toAutoReview,
@@ -57,7 +58,10 @@ import {
   toCustomModel,
   toDevice,
   toMarketplace,
+  toMcpFile,
+  toMcpServer,
   toMessage,
+  toParsedServers,
   toPlugin,
   toPluginDetail,
   toModels,
@@ -67,6 +71,7 @@ import {
   type WireChatUsage,
   type WireJobEvent,
   type WireJobRetry,
+  type WireMcpServer,
   type WireMessage,
   type WireMessagePage,
   type WireModelList,
@@ -922,6 +927,109 @@ export class AppStore {
   async connectPlugin(pluginID: string, runnerID: string): Promise<void> {
     if (this.isMock) return;
     await this.request("plugins.connect", { runner_id: runnerID, plugin_id: pluginID });
+  }
+
+  // MARK: - MCP servers
+
+  /** The demo's mcp.json files, by Runner. */
+  private mockMcp = new Map<string, McpServer[]>();
+
+  private async mockMcpServers(runnerID: string): Promise<McpServer[]> {
+    if (!this.mockMcp.has(runnerID)) {
+      const { mcpServers } = await import("./mock");
+      this.mockMcp.set(runnerID, runnerID === "dev-workbench" ? mcpServers() : []);
+    }
+    return this.mockMcp.get(runnerID)!;
+  }
+
+  /** The demo's Runner takes its servers as the CLI would: the ones that run are its plugins. */
+  private setMockMcpServers(runnerID: string, servers: McpServer[]): void {
+    this.mockMcp.set(runnerID, servers);
+    const device = this.device(runnerID);
+    if (!device) return;
+    const plugins = [...device.plugins.filter((plugin) => plugin.source !== "mcp.json"), ...servers.flatMap((server) => (server.enabled && server.status ? [server.status] : []))];
+    this.devices = this.devices.map((each) => (each.id === runnerID ? { ...each, plugins } : each));
+    this.emit({ kind: "rosterChanged" });
+  }
+
+  /** A Runner's mcp.json: every server in it, usable or not, here or sealed to that Runner. */
+  async mcpServers(runnerID: string): Promise<McpFile> {
+    if (this.isMock) return { path: "~/.lorca/mcp.json", servers: await this.mockMcpServers(runnerID) };
+    return toMcpFile(await this.request("mcp.list", { runner_id: runnerID }));
+  }
+
+  /** One server with the tools it offered when it last connected. */
+  async mcpServer(name: string, runnerID: string): Promise<McpServer> {
+    if (this.isMock) {
+      const server = (await this.mockMcpServers(runnerID)).find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      return server;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.get", { runner_id: runnerID, name })).server);
+  }
+
+  /** Adds a server, or saves the one `previousName` names under `name`. The CLI checks the entry
+   * and writes it to the Runner's mcp.json, where the server starts once to list its tools. */
+  async saveMcpServer(runnerID: string, name: string, entry: McpEntry, previousName?: string): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      if ((previousName === undefined || previousName !== name) && servers.some((each) => each.name === name)) {
+        throw new RequestError(L("mcp.json already has a server named %@.", name));
+      }
+      const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "server";
+      const remote = typeof entry.url === "string";
+      const status: InstalledPlugin = { id, name, description: entry.description ?? "", version: "", icon: remote ? "globe" : "terminal", state: "ready", detail: "Ready", source: "mcp.json" };
+      const enabled = entry.disabled !== true;
+      const server: McpServer = { name, id, enabled, entry, status: enabled ? status : undefined, signsIn: false, signedIn: false, toolCount: 2, tools: [{ name: "echo", description: "Echo back what you send.", readOnly: true }, { name: "write_note", description: "Write a note.", readOnly: false }] };
+      const index = servers.findIndex((each) => each.name === (previousName ?? name));
+      this.setMockMcpServers(runnerID, index >= 0 ? servers.map((each, at) => (at === index ? server : each)) : [...servers, server]);
+      return server;
+    }
+    const reply = await this.request<{ server: WireMcpServer }>("mcp.save", { runner_id: runnerID, name, config: entry, ...(previousName ? { previous_name: previousName } : {}) });
+    return toMcpServer(reply.server);
+  }
+
+  /** Removes a server from the Runner's mcp.json, with its sign-in. */
+  async removeMcpServer(runnerID: string, name: string): Promise<void> {
+    if (this.isMock) {
+      this.setMockMcpServers(runnerID, (await this.mockMcpServers(runnerID)).filter((each) => each.name !== name));
+      return;
+    }
+    await this.request("mcp.remove", { runner_id: runnerID, name });
+  }
+
+  /** Turns a server on or off; off, no bot sees it and it never starts. */
+  async setMcpServerEnabled(runnerID: string, name: string, enabled: boolean): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const updated = servers.map((each) => {
+        if (each.name !== name) return each;
+        const entry = { ...each.entry };
+        if (enabled) delete entry.disabled;
+        else entry.disabled = true;
+        const status: InstalledPlugin = each.status ?? { id: each.id, name, description: entry.description ?? "", version: "", icon: typeof entry.url === "string" ? "globe" : "terminal", state: "ready", detail: "Ready", source: "mcp.json" };
+        return { ...each, enabled, entry, status: enabled ? status : undefined };
+      });
+      this.setMockMcpServers(runnerID, updated);
+      return updated.find((each) => each.name === name)!;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.set_enabled", { runner_id: runnerID, name, enabled })).server);
+  }
+
+  /** Connects a server and waits for it: from scratch (`fresh`), or taking a connection it has or
+   * one under way. Its state says how it went. */
+  async reconnectMcpServer(runnerID: string, name: string, fresh = true): Promise<McpServer> {
+    if (this.isMock) {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      return this.mcpServer(name, runnerID);
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.reconnect", { runner_id: runnerID, name, fresh })).server);
+  }
+
+  /** The servers pasted JSON holds, in any app's spelling; the CLI on this computer reads it. */
+  async parseMcpJSON(text: string): Promise<ParsedServer[]> {
+    if (this.isMock) return parseLocally(text);
+    return toParsedServers(await this.request("mcp.parse", { text }));
   }
 
   /** Replaces Auto-review (the switch and the rules); the change shows at once and the CLI's roster

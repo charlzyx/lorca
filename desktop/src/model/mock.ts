@@ -16,6 +16,7 @@ import {
   type ProviderModel,
   type Routine,
 } from "./models";
+import type { McpServer } from "./mcp";
 import { toMarketplace, type WireBotTemplate, type WireMarketplacePlugin } from "./wire";
 
 const minutesAgo = (minutes: number) => Date.now() - minutes * 60_000;
@@ -32,6 +33,71 @@ export function plugins(): InstalledPlugin[] {
   return [
     { id: "github", name: "GitHub", description: "Issues, pull requests, code search, and repositories on GitHub.", version: "1", icon: "chevron.left.forwardslash.chevron.right", state: "ready", detail: "Ready" },
     { id: "linear", name: "Linear", description: "Issues, projects, and cycles in Linear.", version: "1", icon: "line.3.horizontal.decrease.circle", state: "needs_auth", detail: "Sign in" },
+    ...mcpServers().flatMap((server) => (server.status ? [server.status] : [])),
+  ];
+}
+
+/** Workbench's mcp.json: a command, a remote server, one waiting for its sign-in, and one off. */
+export function mcpServers(): McpServer[] {
+  const plugin = (id: string, name: string, description: string, icon: string, state: InstalledPlugin["state"], detail: string): InstalledPlugin => ({
+    id,
+    name,
+    description,
+    version: "",
+    icon,
+    state,
+    detail,
+    source: "mcp.json",
+  });
+  return [
+    {
+      name: "filesystem",
+      id: "filesystem",
+      enabled: true,
+      entry: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents/Notes"], description: "My notes folder" },
+      status: plugin("filesystem", "filesystem", "My notes folder", "terminal", "ready", "Ready"),
+      signsIn: false,
+      signedIn: false,
+      toolCount: 4,
+      tools: [
+        { name: "read_text_file", description: "Read the complete contents of a file as text.", readOnly: true },
+        { name: "list_directory", description: "Get a detailed listing of all files and directories in a path.", readOnly: true },
+        { name: "search_files", description: "Recursively search for files and directories matching a pattern.", readOnly: true },
+        { name: "write_file", description: "Create a new file or completely overwrite an existing file.", readOnly: false },
+      ],
+    },
+    {
+      name: "deepwiki",
+      id: "deepwiki",
+      enabled: true,
+      entry: { type: "http", url: "https://mcp.deepwiki.com/mcp" },
+      status: plugin("deepwiki", "deepwiki", "Remote MCP server · mcp.deepwiki.com", "globe", "ready", "Ready"),
+      signsIn: false,
+      signedIn: false,
+      toolCount: 3,
+      tools: [
+        { name: "read_wiki_structure", description: "Get a list of documentation topics for a GitHub repository.", readOnly: true },
+        { name: "read_wiki_contents", description: "View documentation about a GitHub repository.", readOnly: true },
+        { name: "ask_question", description: "Ask any question about a GitHub repository.", readOnly: true },
+      ],
+    },
+    {
+      name: "sentry",
+      id: "sentry",
+      enabled: true,
+      entry: { type: "http", url: "https://mcp.sentry.dev/mcp" },
+      status: plugin("sentry", "sentry", "Remote MCP server · mcp.sentry.dev", "globe", "needs_auth", "Sign in"),
+      signsIn: true,
+      signedIn: false,
+    },
+    {
+      name: "postgres",
+      id: "postgres",
+      enabled: false,
+      entry: { command: "uvx", args: ["postgres-mcp", "--access-mode=restricted"], env: { DATABASE_URI: "postgresql://localhost/app" }, disabled: true },
+      signsIn: false,
+      signedIn: false,
+    },
   ];
 }
 

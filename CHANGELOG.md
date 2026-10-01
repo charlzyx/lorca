@@ -6,6 +6,8 @@ Sparkle shows it in the update window. The Windows and Linux app's are in
 
 ## [Unreleased]
 
+- Your own MCP servers: Settings › Plugins has an MCP Servers section, where you add a server by the command that runs it or its URL, or paste its JSON from a README or another app's settings, and edit, turn off, or remove it. Each server shows how it stands and the tools it offers, with Sign in when it asks for one, and every bot on that computer can use it. Lorca keeps them in `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use, and picks up edits you make to the file. Pick another Runner in Settings to manage its servers.
+- `lorca mcp` lists, adds, removes, turns on or off, and signs in to MCP servers from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI have on the computer.
 - Pairing a Mac or restoring your identity no longer asks you to connect a provider your account already has. Onboarding waits until the account's providers arrive from the relay, which a slow connection or a long list of chats used to outlast.
 - Onboarding's last step says the Mac is paired, or that your identity is restored, instead of calling it your first Device. A paired Mac is no longer pointed to Pair a Device, which only the Mac that created or restored your identity can do.
 - While onboarding pairs or restores, the Pair or Restore button and the field are disabled beside a spinner, and Back stops a pairing that is still waiting on the other computer.

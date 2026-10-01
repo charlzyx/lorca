@@ -128,6 +128,7 @@ impl Pool {
             let plugin = store.get(plugin_id).cloned().ok_or_else(|| format!("{plugin_id} is not installed on this Runner"))?;
             (plugin, store.values(plugin_id))
         };
+        let values = template_values(&plugin, values).await;
         let spec = plugin.manifest.servers.get(name).cloned().ok_or_else(|| format!("{} has no server {name}", plugin.manifest.name))?;
         let generation = self.generation(plugin_id);
         super::note(app, plugin_id, Some(("connecting", "Connecting…")));
@@ -148,7 +149,12 @@ impl Pool {
                 Ok(server)
             }
             Err(error) => {
-                super::note(app, plugin_id, Some(("error", &error)));
+                // A server that answered that it needs a sign-in reads Sign in, not an error.
+                let signs_in = {
+                    let store = app.plugins.lock().unwrap();
+                    store.needs_sign_in(plugin_id, name, &spec, &store.values(plugin_id))
+                };
+                super::note(app, plugin_id, (!signs_in).then_some(("error", error.as_str())));
                 Err(error)
             }
         }
@@ -161,6 +167,10 @@ impl Pool {
         for name in names {
             match self.server(app, plugin_id, &name).await {
                 Ok(server) => servers.push(server),
+                // A server that asked for a sign-in did what it should.
+                Err(error) if app.plugins.lock().unwrap().status(plugin_id).is_some_and(|status| status.state == "needs_auth") => {
+                    tracing::info!(%error, plugin = plugin_id, server = %name, "a plugin server needs a sign-in")
+                }
                 Err(error) => tracing::warn!(%error, plugin = plugin_id, server = %name, "connecting a plugin server"),
             }
         }
@@ -177,10 +187,11 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     let mut auth = None;
     let mut bearer_expires_at = None;
     let service = match spec {
-        ServerSpec::Stdio { command, args, env } => {
+        ServerSpec::Stdio { command, args, env, cwd } => {
+            let command = expand_home(&fill(command, values));
             // The login shell's environment, so `npx` or `uvx` resolve from the user's PATH, on
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
-            let mut cmd = lorca_agent::login_shell::command(command).await;
+            let mut cmd = lorca_agent::login_shell::command(&command).await;
             cmd.args(args.iter().map(|a| fill(a, values)));
             // A variable naming an optional key the user left unset is left out.
             for (key, value) in env {
@@ -188,15 +199,27 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                     cmd.env(key, value);
                 }
             }
-            cmd.current_dir(app.config.plugins_dir().join(&plugin.manifest.id));
+            let dir = match cwd {
+                Some(cwd) => std::path::PathBuf::from(expand_home(&fill(cwd, values))),
+                None => app.config.plugins_dir().join(&plugin.manifest.id),
+            };
+            if cwd.is_none() {
+                // A server from mcp.json has no folder until it first starts.
+                let _ = std::fs::create_dir_all(&dir);
+            } else if !dir.is_dir() {
+                return Err(format!("{} cannot start in {}: there is no such folder.", plugin.manifest.name, dir.display()));
+            }
+            cmd.current_dir(dir);
             // On Windows a bare name starts a file found on PATH (npx.cmd), which the error names:
             // a batch file refuses an argument with a line break.
             let program = std::path::Path::new(cmd.as_std().get_program()).display().to_string();
-            let starting = if program == *command { program } else { format!("{command} ({program})") };
+            let starting = if program == command { program } else { format!("{command} ({program})") };
             let transport = TokioChildProcess::new(cmd).map_err(|e| format!("Cannot start {starting}: {e}"))?;
             info.serve(transport).await.map_err(|e| format!("{command} did not answer the MCP handshake: {e}"))?
         }
         ServerSpec::Http { url, headers, auth: auth_spec } => {
+            // `${VAR}` in an mcp.json server's URL is the environment's.
+            let url = &fill(url, values);
             let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
             let mut custom = HashMap::new();
             // A header naming an optional key the user left unset is left out: Context7 without its
@@ -252,6 +275,20 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                         }
                     }
                 }
+                // A server that signs in only when asked is tried as it is first.
+                (None, Some(AuthSpec::Oauth { optional: true, .. }), None) => {
+                    let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config);
+                    match info.serve(transport).await {
+                        Ok(service) => service,
+                        Err(error) => match auth_challenge(&error) {
+                            Some(challenge) => {
+                                app.plugins.lock().unwrap().note_challenge(&app.config, &plugin.manifest.id, name, &challenge);
+                                return Err(format!("{} needs a sign-in.", plugin.manifest.name));
+                            }
+                            None => return Err(describe_connect_error(&error.to_string(), url)),
+                        },
+                    }
+                }
                 (None, Some(AuthSpec::Oauth { .. }), None) => return Err(format!("Sign in to {} first.", plugin.manifest.name)),
                 (None, Some(AuthSpec::Bearer { variable }), _) => return Err(format!("Set {variable} first.")),
                 (None, None, _) => {
@@ -273,11 +310,81 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools, instructions, auth, bearer_expires_at })
 }
 
+/// Why a remote server did not connect, naming it by its origin alone: the state goes into the
+/// machine blob, and a URL's path or query can hold a key (Zapier's does).
 fn describe_connect_error(error: &str, url: &str) -> String {
-    if error.contains("401") || error.to_lowercase().contains("unauthorized") {
-        format!("{url} refused the credentials. Sign in again.")
+    let shown = shown_url(url);
+    let error = match reqwest::Url::parse(url) {
+        Ok(parsed) => error.replace(parsed.as_str(), &shown).replace(url, &shown),
+        Err(_) => error.replace(url, &shown),
+    };
+    let lower = error.to_lowercase();
+    if error.contains("401") || lower.contains("unauthorized") || lower.contains("auth required") {
+        format!("{shown} refused the credentials. Sign in again.")
+    } else if reqwest::Url::parse(url).is_ok_and(|parsed| parsed.path().trim_end_matches('/').ends_with("/sse")) {
+        // The older HTTP+SSE transport, which rmcp's client does not speak.
+        format!("Could not connect to {shown}: {error}. Lorca speaks MCP's streamable HTTP; a server that offers it too usually has it at /mcp rather than /sse.")
     } else {
-        format!("Could not connect to {url}: {error}")
+        format!("Could not connect to {shown}: {error}")
+    }
+}
+
+/// `https://mcp.example.com` for any URL there.
+fn shown_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) => match (parsed.host_str(), parsed.port()) {
+            (Some(host), Some(port)) => format!("{}://{host}:{port}", parsed.scheme()),
+            (Some(host), None) => format!("{}://{host}", parsed.scheme()),
+            _ => "the server".into(),
+        },
+        Err(_) => "the server".into(),
+    }
+}
+
+/// The `WWW-Authenticate` challenge of a server that answered the handshake with a 401, or an
+/// empty one when it gave none: the server wants a sign-in.
+fn auth_challenge(error: &rmcp::service::ClientInitializeError) -> Option<String> {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    if let rmcp::service::ClientInitializeError::TransportError { error, .. } = error {
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error.error.as_ref());
+        while let Some(current) = cause {
+            if let Some(http) = current.downcast_ref::<StreamableHttpError<mcp_http::Error>>() {
+                if let Some(challenge) = http.auth_challenge() {
+                    return Some(challenge.to_string());
+                }
+                if let StreamableHttpError::Client(client) = http {
+                    if client.status().is_some_and(|status| status.as_u16() == 401) {
+                        return Some(String::new());
+                    }
+                }
+            }
+            cause = current.source();
+        }
+    }
+    // A transport that ended on it says so only in words.
+    let text = error.to_string().to_lowercase();
+    (text.contains("auth required") || text.contains("401 unauthorized")).then(String::new)
+}
+
+/// The values a server's `${VAR}` reads: the plugin's variables and secrets, and for a server
+/// from `mcp.json`, the login shell's environment, as Claude's and Cursor's files mean them.
+async fn template_values(plugin: &Installed, own: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    if plugin.source != super::mcp_json::SOURCE {
+        return own;
+    }
+    let mut values: BTreeMap<String, String> = std::env::vars_os().map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect();
+    for (name, value) in lorca_agent::login_shell::environment().await {
+        values.insert(name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned());
+    }
+    values.extend(own);
+    values
+}
+
+/// `~/x` as a path in the home folder.
+fn expand_home(path: &str) -> String {
+    match (path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")).or((path == "~").then_some("")), dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest).display().to_string(),
+        _ => path.to_string(),
     }
 }
 
@@ -525,9 +632,11 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
         let spec = plugin.manifest.servers.get(server).cloned().ok_or_else(|| format!("{} has no server {server}", plugin.manifest.name))?;
         (plugin, spec)
     };
+    let own = app.plugins.lock().unwrap().values(plugin_id);
+    let values = template_values(&plugin, own).await;
     let (url, scopes, client, device) = match &spec {
-        ServerSpec::Http { url, auth: Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint }), .. } => {
-            let values = app.plugins.lock().unwrap().values(plugin_id);
+        ServerSpec::Http { url, auth: Some(AuthSpec::Oauth { scopes, token_variable, client_id_variable, client_secret_variable, client_id, client_secret, device_authorization_endpoint, token_endpoint, .. }), .. } => {
+            let url = fill(url, &values);
             let set = |fixed: &Option<String>, variable: &Option<String>| {
                 fixed.clone().filter(|v| !v.trim().is_empty()).or_else(|| variable.as_ref().and_then(|v| values.get(v).cloned())).filter(|v| !v.trim().is_empty())
             };
@@ -542,7 +651,7 @@ pub async fn connect_oauth_for_card(app: &Arc<App>, plugin_id: &str, server: &st
                 (Some(device_endpoint), Some(token_endpoint), Some(_)) => Some((device_endpoint.clone(), token_endpoint.clone())),
                 _ => None,
             };
-            (url.clone(), scopes.clone(), hint, device)
+            (url, scopes.clone(), hint, device)
         }
         _ => return Err(format!("{server} does not sign in with OAuth.")),
     };
@@ -978,6 +1087,30 @@ fn saved_servers(app: &App, plugin: &Installed) -> Vec<(String, Option<String>, 
             (name, server.instructions, tools)
         })
         .collect()
+}
+
+/// The tools a plugin's servers offered when they last connected, for the apps' MCP server sheet
+/// and `lorca mcp get`: each one's name, the first line of what it does, and whether its server
+/// marked it read-only then.
+pub fn saved_tools(app: &App, plugin: &Installed) -> Vec<Value> {
+    saved_servers(app, plugin)
+        .into_iter()
+        .flat_map(|(_, _, tools)| tools)
+        .map(|tool| {
+            let about = tool.description.as_deref().and_then(|text| text.lines().map(str::trim).find(|line| !line.is_empty())).unwrap_or_default();
+            json!({
+                "name": tool.name,
+                "title": tool.title.clone().or_else(|| tool.annotations.as_ref().and_then(|a| a.title.clone())),
+                "description": utf8_prefix(about, 300),
+                "read_only": tool.annotations.as_ref().and_then(|a| a.read_only_hint).unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+/// How many tools a plugin's servers offered when they last connected; none before they have.
+pub fn saved_tool_count(app: &App, plugin: &Installed) -> Option<usize> {
+    catalog_path(app, &plugin.manifest.id).is_file().then(|| saved_servers(app, plugin).iter().map(|(_, _, tools)| tools.len()).sum())
 }
 
 /// A tool of a plugin server, which scripts call as `tools.github__create_issue(args)`. The

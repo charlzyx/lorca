@@ -359,11 +359,11 @@ export function SwitchRow(props: {
   );
 }
 
-/** A sentence inside a card, for an empty state. */
-export function NoteRow(props: { text: string }) {
+/** A sentence inside a card, for an empty state, or in a color for what went wrong. */
+export function NoteRow(props: { text: string; tint?: string }) {
   return (
     <div class="row note-row">
-      <span>{props.text}</span>
+      <span style={props.tint ? { color: props.tint } : undefined}>{props.text}</span>
     </div>
   );
 }

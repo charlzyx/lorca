@@ -834,7 +834,7 @@ final class SwitchRow: NSView {
     }
 
     @objc private func clicked(_ gesture: NSClickGestureRecognizer) {
-        guard !toggle.frame.contains(gesture.location(in: self)) else { return }
+        guard toggle.isHidden || !toggle.frame.contains(gesture.location(in: self)) else { return }
         onClick?()
     }
 
@@ -861,6 +861,26 @@ final class SwitchRow: NSView {
         toolTip = tooltip
     }
 
+    /// One of a Runner's MCP servers: its symbol in the color of how it stands, how it stands in
+    /// that color, then where it runs, and its switch, unless it cannot run.
+    func configure(server: McpServer) {
+        let state = server.state
+        let runs = server.problem == nil
+        configure(
+            symbol: server.entry.symbolName, tint: server.isEnabled && runs ? state.color : .tertiaryLabelColor, title: server.name, detail: "",
+            isOn: server.isEnabled, toggleTooltip: server.isEnabled ? L("Turn %@ off", server.name) : L("Turn %@ on", server.name),
+            tooltip: server.entry.about)
+        let line = NSMutableAttributedString(string: state.text, attributes: [.foregroundColor: state.color, .font: Theme.Font.caption])
+        line.append(NSAttributedString(
+            string: " · \(server.entry.address)",
+            attributes: [.foregroundColor: NSColor.tertiaryLabelColor, .font: NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)]))
+        detail.attributedStringValue = line
+        detail.lineBreakMode = .byTruncatingTail
+        name.textColor = server.isEnabled ? .labelColor : .secondaryLabelColor
+        toggle.isHidden = !runs
+        toggle.setAccessibilityLabel(server.name)
+    }
+
     @objc private func toggled() {
         onToggle?(toggle.state == .on)
     }
@@ -885,12 +905,12 @@ final class SwitchRow: NSView {
     }
 }
 
-/// A sentence inside a section card, for an empty state.
+/// A sentence inside a section card, for an empty state, or in a color for what went wrong.
 final class NoteRow: NSView {
-    init(text: String) {
+    init(text: String, tint: NSColor = .secondaryLabelColor) {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        let label = Build.label(text, font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0)
+        let label = Build.label(text, font: Theme.Font.caption, color: tint, lines: 0)
         addSubview(label)
         NSLayoutConstraint.activate([
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),

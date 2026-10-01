@@ -504,7 +504,7 @@ final class InspectorViewController: NSViewController {
 
     @objc private func openPlugin(_ sender: NSClickGestureRecognizer) {
         guard let id = sender.view?.identifier?.rawValue, let bot = pluginBotID.flatMap(store.bot), let runner = store.device(bot.runnerID) else { return }
-        presentAsSheet(PluginViewController(pluginID: id, runner: runner, bot: bot))
+        PluginViewController.present(pluginID: id, runner: runner, bot: bot, from: self)
     }
 
     @objc private func addBot() {

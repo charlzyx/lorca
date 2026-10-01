@@ -80,6 +80,11 @@ class SheetViewController: NSViewController {
         dismissSheet()
     }
 
+    /// A new title, for a sheet that now shows what it just added.
+    func setSheetTitle(_ title: String) {
+        titleLabel.stringValue = title
+    }
+
     /// AppKit sizes a presented sheet once and afterwards only lets it grow with its content.
     /// Hiding content leaves slack that the row stacks pour into their first row, so shrink the
     /// sheet explicitly after showing or hiding anything.

@@ -5,14 +5,22 @@
 import { createSignal, For, onSettled, Show } from "solid-js";
 import { host } from "../../host";
 import { L, Lc } from "../../l10n";
+import { isMcpServer } from "../../model/mcp";
 import { pluginStateColor, type Device, type PluginDetail } from "../../model/models";
 import { onStoreEvent, track } from "../../model/reactive";
 import { errorText, store } from "../../model/store";
 import { Button } from "../controls";
 import { alert, presentSheet, Sheet } from "../overlay";
 import { ActionRow, KeyValueRow, Section } from "../sections";
+import { presentMcpServer } from "./mcpServer";
 
+/** A plugin's sheet, or for one of the Runner's mcp.json servers, the server's own. */
 export function presentPlugin(pluginID: string, runner: Device): void {
+  const installed = runner.plugins.find((plugin) => plugin.id === pluginID);
+  if (installed && isMcpServer(installed)) {
+    void presentMcpServer(runner, installed.name);
+    return;
+  }
   presentSheet((dismiss) => <PluginSheet pluginID={pluginID} runner={runner} dismiss={dismiss} />);
 }
 

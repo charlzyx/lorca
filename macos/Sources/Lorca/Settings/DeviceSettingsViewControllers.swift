@@ -184,26 +184,55 @@ final class ProvidersSettingsViewController: SettingsPaneViewController {
 
 // MARK: - Plugins
 
-/// What the picked Runner has installed, with each plugin's state, and the marketplace.
+/// What the picked Runner has installed, with each plugin's state, and the marketplace; then the
+/// MCP servers of its mcp.json.
 final class PluginsSettingsViewController: DevicePaneViewController {
     private let section = SectionView(title: L("Plugins"))
+    private let mcpSection = SectionView(title: L("MCP Servers"))
+    private let mcpFootnote = Build.label("", font: Theme.Font.caption, color: .tertiaryLabelColor, lines: 0)
+    /// The picked Runner's mcp.json as it last answered, and which Runner that was.
+    private var mcpFile: McpFile?
+    private var mcpFileDeviceID: Device.ID?
+    private var mcpFailure: String?
+    /// What the list was last asked for: the Runner, and how its servers stood.
+    private var mcpKey = ""
+    private var mcpLoads = 0
+    private var mcpReload: DispatchWorkItem?
     var onOpenMarketplace: ((Device.ID) -> Void)?
 
     override func viewDidLoad() {
         title = L("Plugins")
         addSection(section)
         addFootnote(L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first."))
+        addSection(mcpSection)
+        add(mcpFootnote)
         super.viewDidLoad()
+        // This Mac's file, which the CLI reads again on every change, is asked again whenever the
+        // CLI says something changed: an edit that broke it moves no server's state.
+        store.observe(self) { [weak self] event in
+            guard case .rosterChanged = event, let self, self.device?.isThisDevice == true else { return }
+            self.mcpReload?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, let device = self.device else { return }
+                self.loadMcpServers(on: device)
+            }
+            self.mcpReload = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        }
     }
 
     override func reload() {
         section.title = device.map { L("Plugins on %@", $0.name) } ?? L("Plugins")
         if let rows = placeholderRows(for: device) {
             section.setRows(rows)
+            mcpSection.isHidden = true
+            mcpFootnote.isHidden = true
             return
         }
         guard let device else { return }
-        var rows: [NSView] = device.plugins.map { plugin in
+        reloadMcpServers(on: device)
+        // Its mcp.json's servers are listed in their own section.
+        var rows: [NSView] = device.plugins.filter { !$0.isMcpServer }.map { plugin in
             let row = StatusRow()
             row.configure(plugin: plugin)
             row.identifier = NSUserInterfaceItemIdentifier(plugin.id)
@@ -221,7 +250,113 @@ final class PluginsSettingsViewController: DevicePaneViewController {
 
     @objc private func openPlugin(_ sender: NSClickGestureRecognizer) {
         guard let id = sender.view?.identifier?.rawValue, let device else { return }
-        presentAsSheet(PluginViewController(pluginID: id, runner: device, bot: nil))
+        PluginViewController.present(pluginID: id, runner: device, bot: nil, from: self)
+    }
+
+    // MARK: - MCP servers
+
+    /// Asks again when another Device is picked, or a server of this one changes how it stands.
+    private func reloadMcpServers(on device: Device) {
+        mcpSection.isHidden = false
+        mcpFootnote.isHidden = false
+        mcpSection.title = L("MCP Servers on %@", device.name)
+        mcpFootnote.stringValue = L(
+            "Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here, with the lorca mcp command, or in the file itself: Lorca reads it again when it changes.",
+            device.name)
+        let states = device.plugins.filter(\.isMcpServer).map { "\($0.id):\($0.state.rawValue):\($0.detail)" }
+        let key = "\(device.id)|\(states.joined(separator: ","))"
+        if key != mcpKey {
+            mcpKey = key
+            loadMcpServers(on: device)
+        }
+        renderMcpServers(on: device)
+    }
+
+    private func loadMcpServers(on device: Device) {
+        mcpLoads += 1
+        let load = mcpLoads
+        let id = device.id
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let file = try await self.store.mcpServers(on: id)
+                guard load == self.mcpLoads else { return }
+                self.mcpFile = file
+                self.mcpFileDeviceID = id
+                self.mcpFailure = nil
+            } catch {
+                guard load == self.mcpLoads else { return }
+                self.mcpFailure = error.localizedDescription
+            }
+            if let current = self.device, current.id == id { self.renderMcpServers(on: current) }
+        }
+    }
+
+    /// Each server with how it stands and a switch, a row to add one, and on this Mac, the file.
+    private func renderMcpServers(on device: Device) {
+        guard let file = mcpFile, mcpFileDeviceID == device.id else {
+            if let failure = mcpFailure {
+                mcpSection.setRows([NoteRow(text: failure, tint: .systemRed)])
+            } else {
+                mcpSection.setRows([KeyValueRow(key: L("Loading…"), value: "")])
+            }
+            return
+        }
+        var rows: [NSView] = []
+        if let error = file.error {
+            rows.append(NoteRow(text: L("%@ Lorca keeps the servers it read before.", error), tint: .systemRed))
+        }
+        for server in file.servers {
+            let row = SwitchRow()
+            row.configure(server: server)
+            row.onToggle = { [weak self] on in self?.setMcpServer(server, enabled: on, on: device) }
+            row.onClick = { [weak self] in
+                guard let self else { return }
+                McpServerViewController.present(runner: device, name: server.name, from: self)
+            }
+            rows.append(row)
+        }
+        if file.servers.isEmpty, file.error == nil {
+            rows.append(NoteRow(text: L("No MCP servers yet. Add one by the command that starts it or its URL, or paste the JSON from its README.")))
+        }
+        let add = ActionRow(key: L("Custom"), value: "", tint: .secondaryLabelColor, actionTitle: L("Add Server…"))
+        add.onAction = { [weak self] in
+            guard let self else { return }
+            McpServerViewController.present(runner: device, from: self)
+        }
+        rows.append(add)
+        // The file is there once it holds a server.
+        if device.isThisDevice, !file.servers.isEmpty || file.error != nil {
+            let open = ActionRow(key: "mcp.json", value: file.path, tint: .secondaryLabelColor, actionTitle: L("Open"))
+            open.toolTip = file.path
+            open.onAction = {
+                let url = URL(fileURLWithPath: file.path)
+                if !NSWorkspace.shared.open(url) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            }
+            rows.append(open)
+        }
+        mcpSection.setRows(rows)
+    }
+
+    private func setMcpServer(_ server: McpServer, enabled: Bool, on device: Device) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let answered = try await self.store.setMcpServer(server.name, enabled: enabled, on: device.id)
+                if var file = self.mcpFile, let index = file.servers.firstIndex(where: { $0.name == server.name }) {
+                    file.servers[index] = answered
+                    self.mcpFile = file
+                }
+            } catch {
+                if let window = self.view.window {
+                    let alert = NSAlert()
+                    alert.messageText = enabled ? L("Couldn't turn %@ on", server.name) : L("Couldn't turn %@ off", server.name)
+                    alert.informativeText = error.localizedDescription
+                    await alert.beginSheetModal(for: window)
+                }
+            }
+            if let current = self.device, current.id == device.id { self.renderMcpServers(on: current) }
+        }
     }
 }
 

@@ -63,6 +63,17 @@ struct SettingsEntry: Hashable {
         SettingsEntry(.plugins, plugin.name, keywords: [plugin.description, L("plugin mcp marketplace")])
     }
 
+    /// The section a Runner's mcp.json fills, and each server in it, which its row goes by.
+    static func mcpServers(on device: Device) -> SettingsEntry {
+        SettingsEntry(
+            .plugins, L("MCP Servers"), row: L("MCP Servers on %@", device.name),
+            keywords: [L("mcp model context protocol server mcp.json custom command url json claude cursor")])
+    }
+
+    static func mcpServer(_ plugin: InstalledPlugin) -> SettingsEntry {
+        SettingsEntry(.plugins, plugin.name, keywords: [plugin.description, L("mcp server mcp.json")])
+    }
+
     @MainActor static func provider(_ kind: ProviderCredential.Kind) -> SettingsEntry {
         SettingsEntry(
             .providers, kind.name,
@@ -92,9 +103,20 @@ enum SettingsSearch {
         case .advanced: [.relayURL, .cliPort, .onboarding] + (store.hasIdentity == true ? [.deleteAccount] : [])
         case .bots: (device.map { store.bots(on: $0.id) } ?? []).map { .bot($0) }
         case .providers: store.providers.map { .provider($0.kind) }
-        case .plugins: (device?.plugins ?? []).map { .plugin($0) }
+        case .plugins: pluginEntries(on: device)
         case .device: device == nil ? [.machineKey] : [.machineKey, .pairing]
         }
+    }
+
+    /// The Plugins pane's: the plugins, then the MCP Servers section and its servers.
+    private static func pluginEntries(on device: Device?) -> [SettingsEntry] {
+        let plugins = device?.plugins ?? []
+        var entries = plugins.filter { !$0.isMcpServer }.map { SettingsEntry.plugin($0) }
+        if let device, device.isRunner {
+            entries.append(SettingsEntry.mcpServers(on: device))
+            entries += plugins.filter(\.isMcpServer).map { SettingsEntry.mcpServer($0) }
+        }
+        return entries
     }
 
     static func panes(matching query: String, device: Device?, store: AppStore) -> [PaneResult] {

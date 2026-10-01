@@ -63,6 +63,17 @@ final class APIKeyField: NSView {
         window?.makeFirstResponder(field)
     }
 
+    /// What the field holds, for VoiceOver: an API key unless it says otherwise.
+    func setFieldLabel(_ label: String) {
+        secureField.setAccessibilityLabel(label)
+        revealedField.setAccessibilityLabel(label)
+    }
+
+    /// Shows or hides the text, as the eye button does.
+    func setRevealed(_ revealed: Bool) {
+        if revealed != isRevealed { toggleVisibility() }
+    }
+
     /// Empties both fields, so no key stays behind in a closed sheet.
     func clear() {
         secureField.stringValue = ""

@@ -560,6 +560,8 @@ export interface InstalledPlugin {
   icon: string;
   state: PluginState;
   detail: string;
+  /** `mcp.json` for one of the Runner's own MCP servers, which the server sheet edits. */
+  source?: string;
 }
 
 export function pluginSymbol(plugin: { icon: string }): string {

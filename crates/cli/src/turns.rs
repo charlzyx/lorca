@@ -2547,7 +2547,8 @@ impl Tool for SearchPlugins {
         let rows: Vec<Value> = found
             .iter()
             .map(|m| {
-                let status = self.app.plugins.lock().unwrap().status(&m.id);
+                // A server from mcp.json that shares the id is not this plugin.
+                let status = self.app.plugins.lock().unwrap().status(&m.id).filter(|status| status.source.is_none());
                 json!({
                     "id": m.id,
                     "name": m.name,

@@ -42,8 +42,34 @@ irm https://lorca.app/install-cli.ps1 | iex
 | `lorca provider add <name> <base-url>` | 添加一个自定义服务商：任何兼容 OpenAI 或 Anthropic API 的服务器。`--api` 选择 `chat-completions`（默认）、`responses` 或 `messages`；`--model` 指定一个模型，每个模型写一次；`--api-key-stdin` 读取密钥。 |
 | `lorca provider remove <kind>` | 在每台设备上断开一个服务商，或删除一个自定义服务商（例如 `custom:openrouter`，以 `provider list` 显示的为准）。 |
 | `lorca provider list` | 列出已接入的服务商。 |
+| `lorca mcp …` | 管理这台电脑自己的 MCP 服务器；见 [MCP 服务器](#mcp-服务器)。 |
 | `lorca status` | 以 JSON 打印这台设备的状态：设备、智能体、聊天、服务商。 |
-| `lorca doctor` | 检查主目录、身份、端口和中继，并指出哪里有问题。 |
+| `lorca doctor` | 检查主目录、身份、端口、中继和 `mcp.json`，并指出哪里有问题。 |
+
+## MCP 服务器
+
+`lorca mcp` 编辑 Lorca 文件夹里的 `mcp.json`，也就是这台电脑上所有智能体都能使用的[MCP 服务器](/zh/docs/plugins#你自己的-mcp-服务器)。`lorca serve` 正在运行时，改动会立即生效；没有运行时，下次 `lorca serve` 会读取这个文件。
+
+| 命令 | 作用 |
+| --- | --- |
+| `lorca mcp list` | 列出服务器及各自的状态：它的工具、需要的登录，或者没能启动的原因。 |
+| `lorca mcp get <name>` | 连接一个服务器，并显示它的设置和工具。 |
+| `lorca mcp add <name> <command> [args…]` | 添加一个由这台电脑运行的服务器。命令后面的所有内容（包括 flag）都是它的参数；在命令前用 `-e KEY=value` 设置变量，每个变量写一次。 |
+| `lorca mcp add <name> <url>` | 添加一个使用 streamable HTTP 的远程服务器。`-H "Name: value"` 添加请求头，写在 URL 前后都可以。 |
+| `lorca mcp add-json <name> <json>` | 用 JSON 添加服务器，就像 README 或其他应用的配置里写的那样。 |
+| `lorca mcp remove <name>` | 移除一个服务器，连同它的登录信息。 |
+| `lorca mcp enable <name>`、`disable <name>` | 开启或关闭一个服务器。关闭后，智能体看不到它，它也不会启动。 |
+| `lorca mcp sign-in <name>` | 在这台电脑的浏览器里登录一个要求登录的远程服务器。 |
+| `lorca mcp import [file]` | 从其他应用的配置中添加服务器：Claude Desktop、Claude Code、Cursor、Windsurf、VS Code 或 Gemini CLI，或者你指定的文件。 |
+
+```bash
+lorca mcp add notes npx -y @modelcontextprotocol/server-filesystem ~/Notes
+lorca mcp add github -e GITHUB_PERSONAL_ACCESS_TOKEN=ghp_… docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server
+lorca mcp add linear https://mcp.linear.app/mcp
+lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
+```
+
+`--description` 告诉智能体服务器的用途。`add` 在保存后会连接一次服务器，并告诉你它是否启动成功。
 
 ## 无屏幕的 Runner
 
@@ -67,6 +93,6 @@ lorca serve
 
 ## 文件
 
-一切都在 `~/.lorca/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件，以及每个智能体一个的工作区文件夹（里面有它的记忆）。
+一切都在 `~/.lorca/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json` 里你自己的 MCP 服务器，以及每个智能体一个的工作区文件夹（里面有它的记忆）。
 
 macOS 应用把服务的日志写到 `~/Library/Logs/Lorca/cli.log`。

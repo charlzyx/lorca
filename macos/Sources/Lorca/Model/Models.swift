@@ -449,8 +449,11 @@ struct InstalledPlugin: Identifiable, Hashable {
     var icon: String
     var state: State
     var detail: String
+    /// `mcp.json` for one of the Runner's own MCP servers, which the server sheet edits.
+    var source: String? = nil
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
+    var isMcpServer: Bool { source == "mcp.json" }
 
     var stateColor: NSColor {
         switch state {

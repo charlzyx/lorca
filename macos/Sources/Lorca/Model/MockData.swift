@@ -120,6 +120,40 @@ enum MockData {
         [
             InstalledPlugin(id: "github", name: "GitHub", description: "Issues, pull requests, code search, and repositories on GitHub.", version: "1", icon: "chevron.left.forwardslash.chevron.right", state: .ready, detail: "Ready"),
             InstalledPlugin(id: "linear", name: "Linear", description: "Issues, projects, and cycles in Linear.", version: "1", icon: "line.3.horizontal.decrease.circle", state: .needsAuth, detail: "Sign in"),
+        ] + mcpServers().compactMap { $0.isEnabled ? $0.status : nil }
+    }
+
+    /// Workbench's mcp.json: a command, a remote server, one waiting for its sign-in, and one off.
+    static func mcpServers() -> [McpServer] {
+        func plugin(_ id: String, _ description: String, _ icon: String, _ state: InstalledPlugin.State, _ detail: String) -> InstalledPlugin {
+            InstalledPlugin(id: id, name: id, description: description, version: "", icon: icon, state: state, detail: detail, source: "mcp.json")
+        }
+        return [
+            McpServer(
+                name: "filesystem", id: "filesystem", isEnabled: true,
+                entry: McpEntry(["command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "~/Documents/Notes"], "description": "My notes folder"]),
+                status: plugin("filesystem", "My notes folder", "terminal", .ready, "Ready"), toolCount: 4,
+                tools: [
+                    McpTool(name: "read_text_file", about: "Read the complete contents of a file as text.", isReadOnly: true),
+                    McpTool(name: "list_directory", about: "Get a detailed listing of all files and directories in a path.", isReadOnly: true),
+                    McpTool(name: "search_files", about: "Recursively search for files and directories matching a pattern.", isReadOnly: true),
+                    McpTool(name: "write_file", about: "Create a new file or completely overwrite an existing file.", isReadOnly: false),
+                ]),
+            McpServer(
+                name: "deepwiki", id: "deepwiki", isEnabled: true, entry: McpEntry(["type": "http", "url": "https://mcp.deepwiki.com/mcp"]),
+                status: plugin("deepwiki", "Remote MCP server · mcp.deepwiki.com", "globe", .ready, "Ready"), toolCount: 3,
+                tools: [
+                    McpTool(name: "read_wiki_structure", about: "Get a list of documentation topics for a GitHub repository.", isReadOnly: true),
+                    McpTool(name: "read_wiki_contents", about: "View documentation about a GitHub repository.", isReadOnly: true),
+                    McpTool(name: "ask_question", about: "Ask any question about a GitHub repository.", isReadOnly: true),
+                ]),
+            McpServer(
+                name: "sentry", id: "sentry", isEnabled: true, entry: McpEntry(["type": "http", "url": "https://mcp.sentry.dev/mcp"]),
+                status: plugin("sentry", "Remote MCP server · mcp.sentry.dev", "globe", .needsAuth, "Sign in"), signsIn: true),
+            McpServer(
+                name: "postgres", id: "postgres", isEnabled: false,
+                entry: McpEntry(["command": "uvx", "args": ["postgres-mcp", "--access-mode=restricted"], "env": ["DATABASE_URI": "postgresql://localhost/app"], "disabled": true]),
+                status: nil),
         ]
     }
 
