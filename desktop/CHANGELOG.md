@@ -15,6 +15,12 @@ and the update window shows it.
 - `lorca mcp` lists, adds, removes, turns on or off, and signs in to MCP servers from a terminal,
   and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or
   Gemini CLI have on the computer.
+- Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
+  that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
+  server also stops what it started, such as npx's node; a call you stop is called off at the
+  server; servers start side by side, so a slow one holds up no other; and a server's new tools
+  reach bots without a reconnect. A sign-in is never sent to another host when a server's address
+  changes.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

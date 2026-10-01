@@ -372,8 +372,23 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
     use serde_json::json;
     match command {
         McpCommand::List => {
-            let (list, live) = mcp_call(app, "mcp.list", json!({})).await?;
-            print_mcp_list(&list, live);
+            let (mut list, live) = mcp_call(app, "mcp.list", json!({})).await?;
+            if !live {
+                // Without lorca serve nothing here is connected, so each server that is on connects
+                // to say how it stands, side by side.
+                let names: Vec<String> =
+                    list["servers"].as_array().into_iter().flatten().filter(|s| s["enabled"] != false && !s["problem"].is_string()).filter_map(|s| s["name"].as_str().map(str::to_string)).collect();
+                if !names.is_empty() {
+                    println!("Connecting {}…", if names.len() == 1 { names[0].clone() } else { format!("{} servers", names.len()) });
+                    futures::future::join_all(names.iter().map(|name| mcp_call(app, "mcp.reconnect", json!({ "name": name, "fresh": false })))).await;
+                    list = mcp_call(app, "mcp.list", json!({})).await?.0;
+                }
+            }
+            print_mcp_list(&list);
+            // A script can tell that something needs looking at.
+            if mcp_needs_attention(&list) {
+                std::process::exit(1);
+            }
             Ok(())
         }
         McpCommand::Get { name } => {
@@ -652,7 +667,16 @@ fn mcp_state(server: &serde_json::Value) -> String {
     }
 }
 
-fn print_mcp_list(list: &serde_json::Value, live: bool) {
+/// Whether `mcp.json` does not read, or a server that is on cannot run, failed, or needs a
+/// sign-in or setup.
+fn mcp_needs_attention(list: &serde_json::Value) -> bool {
+    list["error"].is_string()
+        || list["servers"].as_array().into_iter().flatten().any(|server| {
+            server["enabled"] != false && (server["problem"].is_string() || matches!(server["status"]["state"].as_str(), Some("error" | "needs_auth" | "needs_setup")))
+        })
+}
+
+fn print_mcp_list(list: &serde_json::Value) {
     let path = list["path"].as_str().unwrap_or("mcp.json");
     if let Some(error) = list["error"].as_str() {
         println!("✘ {error}\n");
@@ -670,9 +694,6 @@ fn print_mcp_list(list: &serde_json::Value, live: bool) {
         let name = server["name"].as_str().unwrap_or_default();
         let target: String = command_line(server).chars().take(90).collect();
         println!("  {name:<width$}  {state:<state_width$}  {target}");
-    }
-    if !live {
-        println!("\nlorca serve is not running, so each state is what Lorca saw last. `lorca mcp get <name>` connects one now.");
     }
 }
 

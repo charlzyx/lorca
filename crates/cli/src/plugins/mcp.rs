@@ -29,7 +29,7 @@ use crate::model::*;
 
 /// How long the user has to answer a permission card before the call is refused.
 pub const PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-/// How long a tool call may run.
+/// How long a tool call may run without the server reporting progress.
 const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 /// How long a server may take to start and answer the MCP handshake. A package runner such as
 /// `npx` may download the server first.
@@ -52,14 +52,26 @@ const MAX_NAMESPACE_INSTRUCTIONS_BYTES: usize = 1024;
 pub struct Server {
     pub plugin_id: String,
     pub name: String,
-    service: RunningService<RoleClient, ClientConfig>,
-    pub tools: Vec<rmcp::model::Tool>,
+    service: RunningService<RoleClient, Client>,
+    /// What the server offers, which it may change while connected (`tools/list_changed`).
+    tools: std::sync::RwLock<Vec<rmcp::model::Tool>>,
     pub instructions: Option<String>,
     /// The OAuth manager behind the transport, to persist tokens it refreshed.
     auth: Option<Arc<tokio::sync::Mutex<AuthorizationManager>>>,
     /// Device-flow tokens are plain bearers. Drop this pooled server before its bearer expires;
     /// the next connection refreshes and persists the rotating token pair itself.
     bearer_expires_at: Option<f64>,
+}
+
+impl Server {
+    pub fn tools(&self) -> Vec<rmcp::model::Tool> {
+        self.tools.read().unwrap().clone()
+    }
+
+    /// Whether the connection is gone: the server's process ended, or its transport closed.
+    fn is_closed(&self) -> bool {
+        self.service.is_closed() || self.service.peer().is_transport_closed()
+    }
 }
 
 /// Connected servers by `plugin/server`, connected on first use and dropped when the plugin
@@ -69,7 +81,9 @@ pub struct Pool {
     /// Bumped by `forget`, per plugin: a connection that started before a change of the
     /// plugin's settings is used for nothing once it answers.
     generations: Mutex<HashMap<String, u64>>,
-    connecting: tokio::sync::Mutex<()>,
+    /// One connection at a time per server, so two calls never start one server twice, while
+    /// a server that is slow to start (`npx` downloading it) holds up no other.
+    connecting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// The HTTP client the MCP transports and the OAuth flow use (rmcp's reqwest, not the
     /// App's).
     http: mcp_http::Client,
@@ -86,7 +100,7 @@ impl Default for Pool {
 impl Pool {
     pub fn new() -> Self {
         let http = mcp_http::Client::builder().timeout(std::time::Duration::from_secs(600)).build().unwrap_or_default();
-        Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: tokio::sync::Mutex::new(()), http, sign_ins: Mutex::new(HashMap::new()) }
+        Pool { servers: Mutex::new(HashMap::new()), generations: Mutex::new(HashMap::new()), connecting: Mutex::new(HashMap::new()), http, sign_ins: Mutex::new(HashMap::new()) }
     }
 
     /// Drops every connection of a plugin, so the next use reconnects with fresh settings.
@@ -101,11 +115,12 @@ impl Pool {
 
     fn cached_server(&self, key: &str) -> Option<Arc<Server>> {
         let mut servers = self.servers.lock().unwrap();
-        let expiring = servers
-            .get(key)
-            .and_then(|server| server.bearer_expires_at)
-            .is_some_and(|expires_at| expires_at <= now_secs() + DEVICE_TOKEN_REFRESH_BUFFER_SECS);
-        if expiring {
+        // A server whose process ended or whose connection dropped starts again, and one whose
+        // device-flow bearer is about to expire connects with a fresh one.
+        let stale = servers.get(key).is_some_and(|server| {
+            server.is_closed() || server.bearer_expires_at.is_some_and(|expires_at| expires_at <= now_secs() + DEVICE_TOKEN_REFRESH_BUFFER_SECS)
+        });
+        if stale {
             servers.remove(key);
             None
         } else {
@@ -119,7 +134,8 @@ impl Pool {
         if let Some(server) = self.cached_server(&key) {
             return Ok(server);
         }
-        let _guard = self.connecting.lock().await;
+        let gate = self.connecting.lock().unwrap().entry(key.clone()).or_default().clone();
+        let _guard = gate.lock().await;
         if let Some(server) = self.cached_server(&key) {
             return Ok(server);
         }
@@ -142,7 +158,7 @@ impl Pool {
                 Err(format!("{}'s settings changed while it connected. Try again.", plugin.manifest.name))
             }
             Ok(server) => {
-                save_catalog(app, &server);
+                save_catalog(app, plugin_id, name, server.instructions.clone(), server.tools());
                 let server = Arc::new(server);
                 self.servers.lock().unwrap().insert(key, server.clone());
                 super::note(app, plugin_id, None);
@@ -184,6 +200,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     implementation.version = crate::config::VERSION.into();
     let mut info = ClientConfig::default();
     info.client_info = implementation;
+    let info = Client { info, app: Arc::downgrade(app), plugin_id: plugin.manifest.id.clone(), server: name.to_string(), generation: app.mcp.generation(&plugin.manifest.id) };
     let mut auth = None;
     let mut bearer_expires_at = None;
     let service = match spec {
@@ -192,7 +209,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // The login shell's environment, so `npx` or `uvx` resolve from the user's PATH, on
             // Windows as files the way a terminal finds them (`npx` is npm's `npx.cmd`).
             let mut cmd = lorca_agent::login_shell::command(&command).await;
-            cmd.args(args.iter().map(|a| fill(a, values)));
+            cmd.args(args.iter().map(|a| expand_home(&fill(a, values))));
             // A variable naming an optional key the user left unset is left out.
             for (key, value) in env {
                 if let Some(value) = fill_if_set(value, values) {
@@ -214,8 +231,25 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // a batch file refuses an argument with a line break.
             let program = std::path::Path::new(cmd.as_std().get_program()).display().to_string();
             let starting = if program == command { program } else { format!("{command} ({program})") };
-            let transport = TokioChildProcess::new(cmd).map_err(|e| format!("Cannot start {starting}: {e}"))?;
-            info.serve(transport).await.map_err(|e| format!("{command} did not answer the MCP handshake: {e}"))?
+            // The server and what it starts in turn (npx starts node, uvx starts python) stop
+            // together: a process group on macOS and Linux, a job object on Windows.
+            let mut wrapped = process_wrap::tokio::CommandWrap::from(cmd);
+            #[cfg(unix)]
+            wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+            #[cfg(windows)]
+            wrapped.wrap(process_wrap::tokio::JobObject);
+            wrapped.wrap(process_wrap::tokio::KillOnDrop);
+            let (transport, stderr) =
+                TokioChildProcess::builder(wrapped).stderr(std::process::Stdio::piped()).spawn().map_err(|e| format!("Cannot start {starting}: {e}"))?;
+            let said = Stderr::follow(stderr, &plugin.manifest.id);
+            match info.serve(transport).await {
+                Ok(service) => service,
+                // What a server printed before it stopped usually says why.
+                Err(error) => {
+                    let words = said.last_words().await.unwrap_or_else(|| error.to_string());
+                    return Err(format!("{command} did not answer the MCP handshake: {words}"));
+                }
+            }
         }
         ServerSpec::Http { url, headers, auth: auth_spec } => {
             // `${VAR}` in an mcp.json server's URL is the environment's.
@@ -236,7 +270,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 Some(AuthSpec::Oauth { token_variable: Some(variable), .. }) => values.get(variable).cloned(),
                 _ => None,
             };
-            let tokens = app.plugins.lock().unwrap().secret(&plugin.manifest.id, &format!("oauth:{name}"));
+            let tokens = app.plugins.lock().unwrap().sign_in_secret(&plugin.manifest.id, "oauth", name);
             match (pasted, auth_spec, tokens) {
                 (Some(token), _, _) => {
                     let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config.auth_header(token));
@@ -279,7 +313,12 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 (None, Some(AuthSpec::Oauth { optional: true, .. }), None) => {
                     let transport = StreamableHttpClientTransport::with_client(app.mcp.http.clone(), config);
                     match info.serve(transport).await {
-                        Ok(service) => service,
+                        Ok(service) => {
+                            // A server that once asked for a sign-in and now lets Lorca in no
+                            // longer reads Sign in.
+                            app.plugins.lock().unwrap().forget_challenge(&app.config, &plugin.manifest.id, name);
+                            service
+                        }
                         Err(error) => match auth_challenge(&error) {
                             Some(challenge) => {
                                 app.plugins.lock().unwrap().note_challenge(&app.config, &plugin.manifest.id, name, &challenge);
@@ -307,7 +346,118 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     let mut tools = service.list_all_tools().await.map_err(|e| format!("{} could not list its tools: {e}", plugin.manifest.name))?;
     tools.retain(|t| !plugin.manifest.tools.hide.iter().any(|h| pattern_matches(h, &t.name)));
     tracing::info!(plugin = %plugin.manifest.id, server = name, tools = tools.len(), "connected an MCP server");
-    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools, instructions, auth, bearer_expires_at })
+    Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools: std::sync::RwLock::new(tools), instructions, auth, bearer_expires_at })
+}
+
+/// Lorca as an MCP client: its name and version, and what it does when a connected server says
+/// its tools changed.
+pub struct Client {
+    info: ClientConfig,
+    app: std::sync::Weak<App>,
+    plugin_id: String,
+    server: String,
+    /// The plugin's generation when the connection began: a connection from before a change of
+    /// its settings refreshes nothing.
+    generation: u64,
+}
+
+impl rmcp::ClientHandler for Client {
+    fn get_info(&self) -> ClientConfig {
+        self.info.clone()
+    }
+
+    async fn on_tool_list_changed(&self, context: rmcp::service::NotificationContext<RoleClient>) {
+        let Some(app) = self.app.upgrade() else { return };
+        let (plugin_id, server, generation) = (self.plugin_id.clone(), self.server.clone(), self.generation);
+        // From a task of its own: the connection answers the listing while this is handled.
+        tokio::spawn(async move { refresh_tools(&app, &plugin_id, &server, generation, &context.peer).await });
+    }
+}
+
+/// Lists a connected server's tools again after it said they changed, for the pooled connection
+/// and the next turns' listing.
+async fn refresh_tools(app: &Arc<App>, plugin_id: &str, server: &str, generation: u64, peer: &rmcp::service::Peer<RoleClient>) {
+    let plugin = app.plugins.lock().unwrap().get(plugin_id).cloned();
+    let Some(plugin) = plugin.filter(|_| app.mcp.generation(plugin_id) == generation) else { return };
+    let mut tools = match peer.list_all_tools().await {
+        Ok(tools) => tools,
+        Err(error) => {
+            tracing::warn!(%error, plugin = plugin_id, server, "listing a server's changed tools");
+            return;
+        }
+    };
+    tools.retain(|t| !plugin.manifest.tools.hide.iter().any(|h| pattern_matches(h, &t.name)));
+    tracing::info!(plugin = plugin_id, server, tools = tools.len(), "an MCP server changed its tools");
+    let instructions = match app.mcp.cached_server(&format!("{plugin_id}/{server}")) {
+        Some(pooled) => {
+            *pooled.tools.write().unwrap() = tools.clone();
+            pooled.instructions.clone()
+        }
+        None => peer.peer_info().and_then(|info| info.instructions.clone()),
+    };
+    save_catalog(app, plugin_id, server, instructions, tools);
+}
+
+/// What a stdio server writes to stderr: read for as long as it runs, so it never blocks on a
+/// full pipe, logged, and its last lines kept for when it stops before the handshake.
+struct Stderr {
+    lines: Arc<Mutex<std::collections::VecDeque<String>>>,
+    reading: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Stderr {
+    const KEPT: usize = 40;
+
+    fn follow(stderr: Option<tokio::process::ChildStderr>, plugin_id: &str) -> Stderr {
+        let lines = Arc::new(Mutex::new(std::collections::VecDeque::new()));
+        let reading = stderr.map(|stderr| {
+            let (lines, plugin_id) = (lines.clone(), plugin_id.to_string());
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let mut line = Vec::new();
+                loop {
+                    line.clear();
+                    match reader.read_until(b'\n', &mut line).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let text = String::from_utf8_lossy(&line).trim_end().to_string();
+                            tracing::debug!(plugin = %plugin_id, "{text}");
+                            let mut lines = lines.lock().unwrap();
+                            if lines.len() == Self::KEPT {
+                                lines.pop_front();
+                            }
+                            lines.push_back(text);
+                        }
+                    }
+                }
+            })
+        });
+        Stderr { lines, reading }
+    }
+
+    /// The server's last lines, once it has had a moment to finish writing them.
+    async fn last_words(self) -> Option<String> {
+        if let Some(reading) = self.reading {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), reading).await;
+        }
+        let lines = self.lines.lock().unwrap();
+        last_words(lines.iter().map(String::as_str))
+    }
+}
+
+/// The last few lines a program wrote before it stopped, on one line, as a plugin's state shows
+/// it: blank lines, stack frames, and the caret under a source line left out, and a long tail cut
+/// from the front, since the cause usually comes last.
+fn last_words<'a>(lines: impl DoubleEndedIterator<Item = &'a str>) -> Option<String> {
+    const MAX_CHARS: usize = 400;
+    let mut words: Vec<&str> = lines.rev().map(str::trim).filter(|line| !line.starts_with("at ") && !line.trim_start_matches('^').trim().is_empty()).take(4).collect();
+    words.reverse();
+    let words = words.join(" · ");
+    match words.chars().count().checked_sub(MAX_CHARS) {
+        None | Some(0) => (!words.is_empty()).then_some(words),
+        Some(over) => Some(format!("…{}", words.chars().skip(over + 1).collect::<String>())),
+    }
 }
 
 /// Why a remote server did not connect, naming it by its origin alone: the state goes into the
@@ -1048,15 +1198,15 @@ fn catalog_path(app: &App, plugin_id: &str) -> std::path::PathBuf {
 }
 
 /// Keeps what a server just offered, for the next turns' listings.
-fn save_catalog(app: &App, server: &Server) {
-    let path = catalog_path(app, &server.plugin_id);
+fn save_catalog(app: &App, plugin_id: &str, server: &str, instructions: Option<String>, tools: Vec<rmcp::model::Tool>) {
+    let path = catalog_path(app, plugin_id);
     let mut saved: SavedCatalog = crate::config::read_json(&path).unwrap_or_default();
-    let fresh = SavedServer { instructions: server.instructions.clone(), tools: server.tools.clone() };
-    let changed = saved.servers.get(&server.name).is_none_or(|old| old.instructions != fresh.instructions || old.tools != fresh.tools);
+    let fresh = SavedServer { instructions, tools };
+    let changed = saved.servers.get(server).is_none_or(|old| old.instructions != fresh.instructions || old.tools != fresh.tools);
     if changed {
-        saved.servers.insert(server.name.clone(), fresh);
+        saved.servers.insert(server.to_string(), fresh);
         if let Err(error) = crate::config::write_json_private(&path, &saved) {
-            tracing::warn!(%error, plugin = %server.plugin_id, "saving a plugin's tool list");
+            tracing::warn!(%error, plugin = %plugin_id, "saving a plugin's tool list");
         }
     }
 }
@@ -1243,7 +1393,7 @@ impl PluginCatalog {
                 _ = cancel.cancelled() => return problems,
             };
             match server {
-                Ok(server) => self.add_tools(plugin, &server.name, server.instructions.as_deref(), &server.tools),
+                Ok(server) => self.add_tools(plugin, &server.name, server.instructions.as_deref(), &server.tools()),
                 Err(error) => {
                     tracing::warn!(%error, plugin = %plugin.manifest.id, server = %server_name, "connecting a plugin server for a script");
                     problems.push(error);
@@ -1425,7 +1575,7 @@ async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -
         _ = cancel.cancelled() => return Access::Stopped,
         server = app.mcp.server(app, &tool.plugin_id, &tool.server_name) => server.ok(),
     };
-    let live_tool = live.as_ref().and_then(|server| server.tools.iter().find(|candidate| candidate.name == tool.tool.name).cloned());
+    let live_tool = live.as_ref().and_then(|server| server.tools().into_iter().find(|candidate| candidate.name == tool.tool.name));
     if live_tool.as_ref().and_then(|live| live.annotations.as_ref()).and_then(|annotations| annotations.read_only_hint) == Some(true) {
         return Access::ReadOnly;
     }
@@ -1671,15 +1821,35 @@ impl Tool for PluginTool {
         let mut params = CallToolRequestParams::default();
         params.name = tool.clone().into();
         params.arguments = args.as_object().cloned();
-        let call = server.service.call_tool(params);
-        let result = tokio::select! {
-            result = tokio::time::timeout(CALL_TIMEOUT, call) => result.map_err(|_| ToolError(format!("{tool} took too long")))?,
+        // A call the user stops, or one that runs out of time, is called off at the server too
+        // (`notifications/cancelled`), so it stops the work rather than finishing it unseen.
+        let request = rmcp::model::ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(params));
+        let options = rmcp::service::PeerRequestOptions::with_timeout(CALL_TIMEOUT).reset_timeout_on_progress();
+        let call = server.service.send_cancellable_request(request, options);
+        let handle = tokio::select! {
+            handle = call => handle.map_err(|e| ToolError(format!("{tool} failed: {e}")))?,
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
+        };
+        let (peer, id) = (handle.peer.clone(), handle.id.clone());
+        let response = tokio::select! {
+            response = handle.await_response() => response,
+            _ = cancel.cancelled() => {
+                let cancelled = rmcp::model::CancelledNotification::new(rmcp::model::CancelledNotificationParam::new(Some(id), Some("Stopped".into())));
+                let _ = peer.send_notification(cancelled.into()).await;
+                return Err(ToolError("Stopped".into()));
+            }
         };
         if let Some(auth) = &server.auth {
             persist_refreshed(&self.app, &self.plugin_id, &server.name, auth).await;
         }
-        let result = result.map_err(|e| ToolError(format!("{tool} failed: {e}")))?;
+        let result = match response {
+            Ok(rmcp::model::ServerResult::CallToolResult(result)) => result,
+            Ok(_) => return Err(ToolError(format!("{tool} answered with something other than a result"))),
+            Err(rmcp::ServiceError::Timeout { .. }) => return Err(ToolError(format!("{tool} took too long"))),
+            // The next call starts the server again.
+            Err(error) if server.is_closed() => return Err(ToolError(format!("{} stopped running: {error}", self.plugin_name))),
+            Err(error) => return Err(ToolError(format!("{tool} failed: {error}"))),
+        };
         let is_error = result.is_error.unwrap_or(false);
         let mut content = model_content(&result);
         if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
@@ -1694,38 +1864,32 @@ impl Tool for PluginTool {
     }
 }
 
-/// A plugin result as text and images: text blocks cut at `MAX_RESULT_CHARS` in all, other
-/// blocks as JSON, and the structured result when there are no blocks. What an error says, and
-/// what hooks read.
+/// A plugin result as text and images: text, embedded text, and resource links as text cut at
+/// `MAX_RESULT_CHARS` in all; images, embedded ones too, as images; audio and other binary data
+/// named, never carried as base64; and the structured result when there are no blocks. What an
+/// error says, and what hooks read.
 fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
+    use rmcp::model::ResourceContents;
     let mut content: Vec<ContentPart> = Vec::new();
     let mut text_len = 0;
     for block in &result.content {
         match block {
-            ContentBlock::Text(text) => {
-                let mut text = text.text.clone();
-                if text_len + text.len() > MAX_RESULT_CHARS {
-                    let mut cut = MAX_RESULT_CHARS.saturating_sub(text_len);
-                    while cut > 0 && !text.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
-                    text.truncate(cut);
-                    text.push_str("\n[truncated]");
-                }
-                text_len += text.len();
-                content.push(ContentPart::text(text));
-            }
+            ContentBlock::Text(text) => push_text(&mut content, &mut text_len, text.text.clone()),
             ContentBlock::Image(image) => content.push(ContentPart::Image { data: image.data.clone(), mime_type: image.mime_type.clone() }),
-            ContentBlock::Resource(resource) => {
-                if let Ok(text) = serde_json::to_string(&resource.resource) {
-                    content.push(ContentPart::text(text));
+            ContentBlock::Audio(audio) => push_text(&mut content, &mut text_len, format!("[{} audio, left out]", audio.mime_type)),
+            ContentBlock::Resource(embedded) => match &embedded.resource {
+                ResourceContents::TextResourceContents { text, .. } => push_text(&mut content, &mut text_len, text.clone()),
+                ResourceContents::BlobResourceContents { mime_type: Some(mime), blob, .. } if mime.starts_with("image/") => {
+                    content.push(ContentPart::Image { data: blob.clone(), mime_type: mime.clone() })
                 }
-            }
-            other => {
-                if let Ok(text) = serde_json::to_string(other) {
-                    content.push(ContentPart::text(text));
+                ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
+                    push_text(&mut content, &mut text_len, format!("[{uri}: {}, left out]", mime_type.as_deref().unwrap_or("binary data")))
                 }
-            }
+                other => push_text(&mut content, &mut text_len, serde_json::to_string(other).unwrap_or_default()),
+            },
+            ContentBlock::ResourceLink(link) => push_text(&mut content, &mut text_len, format!("[{} ({})]", link.uri, link.name)),
+            #[allow(unreachable_patterns)]
+            other => push_text(&mut content, &mut text_len, serde_json::to_string(other).unwrap_or_default()),
         }
     }
     if content.is_empty() {
@@ -1735,6 +1899,20 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
         }
     }
     content
+}
+
+/// Adds a result's text, cut where the result's text reaches `MAX_RESULT_CHARS`.
+fn push_text(content: &mut Vec<ContentPart>, text_len: &mut usize, mut text: String) {
+    if *text_len + text.len() > MAX_RESULT_CHARS {
+        let mut cut = MAX_RESULT_CHARS.saturating_sub(*text_len);
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n[truncated]");
+    }
+    *text_len += text.len();
+    content.push(ContentPart::text(text));
 }
 
 /// Saves tokens the transport refreshed, so the next connection does not start from a stale
@@ -2008,6 +2186,53 @@ mod tests {
             socket.write_all(reply.as_bytes()).await.unwrap();
         });
         (format!("http://{address}/token"), seen_rx)
+    }
+
+    #[test]
+    fn a_program_that_stopped_says_why_in_its_last_lines() {
+        let node = "/srv/index.js:3\n    throw new Error(\"GITHUB_TOKEN is not set\");\n    ^\n\nError: GITHUB_TOKEN is not set\n    at Object.<anonymous> (/srv/index.js:3:11)\n    at Module._compile (node:internal/modules/cjs/loader:1554:14)\n\nNode.js v22.14.0";
+        assert_eq!(last_words(node.lines()).as_deref(), Some("/srv/index.js:3 · throw new Error(\"GITHUB_TOKEN is not set\"); · Error: GITHUB_TOKEN is not set · Node.js v22.14.0"));
+        let python = "Traceback (most recent call last):\n  File \"/srv/server.py\", line 1, in <module>\n    import httpx\nModuleNotFoundError: No module named 'httpx'";
+        assert!(last_words(python.lines()).unwrap().ends_with("import httpx · ModuleNotFoundError: No module named 'httpx'"));
+        let chatty: Vec<String> = (1..=10).map(|n| format!("line {n}")).collect();
+        assert_eq!(last_words(chatty.iter().map(String::as_str)).as_deref(), Some("line 7 · line 8 · line 9 · line 10"));
+        let long = last_words([format!("Error: {}", "x".repeat(500)).as_str()].into_iter()).unwrap();
+        assert!(long.starts_with('…') && long.ends_with('x') && long.chars().count() == 400, "a long tail keeps its end");
+        assert_eq!(last_words(["", "  ", "    at frame (x.js:1:1)"].into_iter()), None);
+    }
+
+    #[test]
+    fn results_reach_the_model_without_binary_data() {
+        let result: rmcp::model::CallToolResult = serde_json::from_value(json!({ "content": [
+            { "type": "text", "text": "hello" },
+            { "type": "audio", "data": "QVVESU8=", "mimeType": "audio/wav" },
+            { "type": "resource", "resource": { "uri": "file:///a.txt", "mimeType": "text/plain", "text": "embedded" } },
+            { "type": "resource", "resource": { "uri": "file:///a.pdf", "mimeType": "application/pdf", "blob": "JVBERi0=" } },
+            { "type": "resource", "resource": { "uri": "file:///a.png", "mimeType": "image/png", "blob": "iVBORw0=" } },
+            { "type": "resource_link", "uri": "file:///b.md", "name": "b.md" }
+        ] }))
+        .unwrap();
+        let content = model_content(&result);
+        let texts: Vec<&str> = content.iter().filter_map(|part| part.as_text()).collect();
+        assert_eq!(texts, ["hello", "[audio/wav audio, left out]", "embedded", "[file:///a.pdf: application/pdf, left out]", "[file:///b.md (b.md)]"]);
+        assert!(content.iter().any(|part| matches!(part, ContentPart::Image { mime_type, .. } if mime_type == "image/png")), "an embedded image is an image");
+        let shown = format!("{content:?}");
+        assert!(!shown.contains("QVVESU8=") && !shown.contains("JVBERi0="), "audio and other binary data never reach the model as text");
+    }
+
+    #[tokio::test]
+    async fn a_server_that_stops_before_the_handshake_says_why() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (command, args) = if cfg!(windows) {
+            ("cmd", vec!["/d", "/c", "echo Error: GITHUB_TOKEN is not set 1>&2 & exit 1"])
+        } else {
+            ("sh", vec!["-c", "echo 'Error: GITHUB_TOKEN is not set' >&2; exit 1"])
+        };
+        let manifest = super::super::Manifest::parse(&json!({ "id": "boom", "name": "Boom", "servers": { "main": { "type": "stdio", "command": command, "args": args } } })).unwrap();
+        super::super::install(app, manifest, "inline").unwrap();
+        let error = app.mcp.server(app, "boom", "main").await.err().unwrap();
+        assert!(error.contains("did not answer the MCP handshake: Error: GITHUB_TOKEN is not set"), "{error}");
     }
 
     #[test]

@@ -14,9 +14,9 @@ The file is read with its objects' keys in order (`Json`), each entry made canon
 
 ## Values and sign-in
 
-`${VAR}` in a command, its args, env, and `cwd`, a URL, and headers reads the login shell's environment, then the CLI's own, as Claude's and Cursor's files mean it, and `${VAR:-default}` takes the default for an empty or unset variable; a header or env value naming an unset variable with no default is left out. A command starts in its `cwd` (`~` is the home folder), which must be a folder already, else in the plugin's folder, made when it first starts.
+`${VAR}` in a command, its args, env, and `cwd`, a URL, and headers reads the login shell's environment, then the CLI's own, as Claude's and Cursor's files mean it, and `${VAR:-default}` takes the default for an empty or unset variable; a header or env value naming an unset variable with no default is left out. `~/` at the start of the command, an argument, or `cwd` is the home folder. A command starts in its `cwd`, which must be a folder already, else in the plugin's folder, made when it first starts.
 
-A remote entry with no `Authorization` header signs in only when asked (`AuthSpec::Oauth { optional }`): it connects without credentials, and a 401 keeps the server's `WWW-Authenticate` challenge in the secrets (`challenge:mcp`), so the plugin reads `needs_auth` across restarts until a [sign-in](plugins.md#plugins), the same as a marketplace plugin's. rmcp's client speaks streamable HTTP only; a failure at a URL ending in `/sse`, the older transport, says that the server's streamable URL usually ends in `/mcp`.
+A remote entry with no `Authorization` header signs in only when asked (`AuthSpec::Oauth { optional }`): it connects without credentials, and a 401 keeps the server's `WWW-Authenticate` challenge in the secrets (`challenge:mcp`), so the plugin reads `needs_auth` across restarts until a [sign-in](plugins.md#plugins), the same as a marketplace plugin's, or until it lets Lorca in without one. The challenge and the tokens belong to the server's origin, so an entry pointed at another host starts out signed out. rmcp's client speaks streamable HTTP only; a failure at a URL ending in `/sse`, the older transport, says that the server's streamable URL usually ends in `/mcp`.
 
 ## Managing it
 
@@ -30,7 +30,7 @@ The `mcp.*` methods run on the Runner `runner_id` names, sealed to it ([Protocol
 - `mcp.sign_in`: the sign-in, in the browser on the Runner.
 - `mcp.parse`, always here: the servers pasted JSON holds, as a whole config (`mcpServers`, `servers`, OpenCode's `mcp`, Zed's `context_servers`), servers by name, a README's bare `"name": { … }`, or one server, with comments and trailing commas allowed.
 
-`plugins.uninstall` of such a plugin removes its entry, and a marketplace install refuses an id the file has. `lorca mcp list`, `get`, `add`, `add-json`, `remove`, `enable`, `disable`, `sign-in`, and `import` ([CLI](runtime.md)) go through the running `lorca serve`, else run in that process, which then starts a server only to check it; `add` and `get` connect the server and say how it went. `import` takes another app's config file, or with none, each of Claude Desktop's, Claude Code's, Cursor's, Windsurf's, VS Code's, and Gemini CLI's that the computer has, skipping names `mcp.json` has.
+`plugins.uninstall` of such a plugin removes its entry, and a marketplace install refuses an id the file has. `lorca mcp list`, `get`, `add`, `add-json`, `remove`, `enable`, `disable`, `sign-in`, and `import` ([CLI](runtime.md)) go through the running `lorca serve`, else run in that process, which then starts a server only to check it; `add` and `get` connect the server and say how it went, and `list`, with no `lorca serve` to ask, connects each server that is on, side by side, first. `list` exits with 1 when the file does not read or a server that is on cannot run, failed, or needs a sign-in, so a script can check. `import` takes another app's config file, or with none, each of Claude Desktop's, Claude Code's, Cursor's, Windsurf's, VS Code's, and Gemini CLI's that the computer has, skipping names `mcp.json` has.
 
 ## In the apps
 

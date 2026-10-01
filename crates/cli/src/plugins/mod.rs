@@ -222,6 +222,15 @@ pub fn slug(name: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// `https://mcp.example.com` for any URL there, or the URL as written when it is not one yet
+/// (`${DOCS_URL}`).
+fn origin_of(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(parsed) if parsed.host_str().is_some() => parsed.origin().ascii_serialization(),
+        _ => url.to_string(),
+    }
+}
+
 /// A placeholder's variable and its default: `${NAME}`, or `${NAME:-default}` as a shell writes
 /// it, which `mcp.json` files use.
 fn placeholder(inner: &str) -> (&str, Option<&str>) {
@@ -368,6 +377,34 @@ impl Store {
         self.secrets.get(id).and_then(|s| s.get(key)).cloned()
     }
 
+    /// A remote server's saved sign-in (`oauth`) or the challenge it answered with (`challenge`),
+    /// while the server is where it was then: tokens a server issued never go to another host,
+    /// and a server moved to another host starts out signed out. One saved before sign-ins
+    /// named their host counts as here.
+    pub fn sign_in_secret(&self, id: &str, kind: &str, server: &str) -> Option<Value> {
+        let saved = self.secret(id, &format!("{kind}:{server}"))?;
+        match saved.get("origin").and_then(Value::as_str) {
+            Some(origin) if Some(origin) != self.server_origin(id, server).as_deref() => None,
+            _ => Some(saved),
+        }
+    }
+
+    /// Where a remote server lives, as its sign-ins name it.
+    fn server_origin(&self, id: &str, server: &str) -> Option<String> {
+        match self.get(id)?.manifest.servers.get(server)? {
+            ServerSpec::Http { url, .. } => Some(origin_of(url)),
+            ServerSpec::Stdio { .. } => None,
+        }
+    }
+
+    /// `value` with the origin of the server it belongs to.
+    fn stamped(&self, id: &str, server: &str, mut value: Value) -> Value {
+        if let (Some(origin), Some(fields)) = (self.server_origin(id, server), value.as_object_mut()) {
+            fields.insert("origin".into(), json!(origin));
+        }
+        value
+    }
+
     fn set_secret(&mut self, id: &str, key: &str, value: Option<Value>) {
         let entry = self.secrets.entry(id.to_string()).or_default();
         match value {
@@ -430,8 +467,8 @@ impl Store {
         match spec {
             ServerSpec::Http { auth: Some(AuthSpec::Oauth { token_variable, optional, .. }), .. } => {
                 let pasted = token_variable.as_ref().map(|v| values.contains_key(v)).unwrap_or(false);
-                let asked = !*optional || self.secret(id, &format!("challenge:{server}")).is_some();
-                !pasted && asked && self.secret(id, &format!("oauth:{server}")).is_none()
+                let asked = !*optional || self.sign_in_secret(id, "challenge", server).is_some();
+                !pasted && asked && self.sign_in_secret(id, "oauth", server).is_none()
             }
             _ => false,
         }
@@ -440,13 +477,26 @@ impl Store {
     /// Keeps the challenge a server that signs in only when asked answered with, so the plugin
     /// reads Sign in from then on, across restarts, until it is signed in.
     pub fn note_challenge(&mut self, config: &config::Config, id: &str, server: &str, challenge: &str) {
-        if self.secret(id, &format!("challenge:{server}")).is_some() {
+        if self.sign_in_secret(id, "challenge", server).is_some() {
             return;
         }
         // An object, so `values` never takes it for a variable.
-        self.set_secret(id, &format!("challenge:{server}"), Some(json!({ "header": challenge })));
+        let challenge = self.stamped(id, server, json!({ "header": challenge }));
+        self.set_secret(id, &format!("challenge:{server}"), Some(challenge));
         if let Err(error) = self.save(config) {
             tracing::warn!(%error, "saving a server's sign-in challenge");
+        }
+    }
+
+    /// Forgets the challenge of a server that has since let Lorca in without a sign-in, so it no
+    /// longer reads Sign in.
+    pub fn forget_challenge(&mut self, config: &config::Config, id: &str, server: &str) {
+        if self.secret(id, &format!("challenge:{server}")).is_none() {
+            return;
+        }
+        self.set_secret(id, &format!("challenge:{server}"), None);
+        if let Err(error) = self.save(config) {
+            tracing::warn!(%error, "forgetting a server's sign-in challenge");
         }
     }
 }
@@ -566,6 +616,7 @@ pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) 
     if store.get(id).is_none() {
         return Err("Unknown plugin".into());
     }
+    let tokens = tokens.map(|tokens| store.stamped(id, server, tokens));
     store.set_secret(id, &format!("oauth:{server}"), tokens);
     store.notes.remove(id);
     store.save(&app.config).map_err(|e| e.to_string())
@@ -611,9 +662,9 @@ pub fn detail(app: &Arc<App>, id: &str) -> Result<Value, String> {
                 ServerSpec::Http { url, auth, .. } => {
                     let waiting = store.codes.get(id).filter(|code| &code.server == name);
                     // A server that signs in only when asked shows its sign-in once it has asked.
-                    let tokens = store.secret(id, &format!("oauth:{name}")).is_some();
+                    let tokens = store.sign_in_secret(id, "oauth", name).is_some();
                     let oauth = match auth {
-                        Some(AuthSpec::Oauth { optional: true, .. }) => tokens || store.secret(id, &format!("challenge:{name}")).is_some(),
+                        Some(AuthSpec::Oauth { optional: true, .. }) => tokens || store.sign_in_secret(id, "challenge", name).is_some(),
                         Some(AuthSpec::Oauth { .. }) => true,
                         _ => false,
                     };
@@ -879,6 +930,42 @@ mod tests {
         let mine = Manifest::parse(&json!({ "id": "mine", "name": "Mine", "servers": { "api": { "type": "http", "url": "https://example.com/mcp" } } })).unwrap();
         install(app, mine, "inline").unwrap();
         assert!(refresh_installed(app, &crate::marketplace::bundled().plugins).is_empty());
+    }
+
+    #[test]
+    fn a_sign_in_stays_with_the_host_it_was_made_for() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let manifest = Manifest::parse(&json!({ "id": "docs", "name": "Docs", "servers": { "api": { "type": "http", "url": "https://docs.test/mcp", "auth": { "type": "oauth" } } } })).unwrap();
+        install(app, manifest, "inline").unwrap();
+        let move_to = |url: &str| {
+            let mut store = app.plugins.lock().unwrap();
+            let plugin = store.installed.iter_mut().find(|p| p.manifest.id == "docs").unwrap();
+            if let Some(ServerSpec::Http { url: current, .. }) = plugin.manifest.servers.get_mut("api") {
+                *current = url.to_string();
+            }
+        };
+        let state = || app.plugins.lock().unwrap().status("docs").unwrap().state;
+        assert_eq!(state(), "needs_auth");
+        set_oauth(app, "docs", "api", Some(json!({ "client_id": "c", "tokens": { "access_token": "a" } }))).unwrap();
+        assert_eq!(app.plugins.lock().unwrap().sign_in_secret("docs", "oauth", "api").unwrap()["origin"], json!("https://docs.test"));
+        assert_eq!(state(), "ready");
+        move_to("https://DOCS.test:443/v2/mcp");
+        assert_eq!(state(), "ready", "another path on the same host keeps the sign-in");
+        move_to("https://elsewhere.test/mcp");
+        assert!(app.plugins.lock().unwrap().sign_in_secret("docs", "oauth", "api").is_none(), "tokens never reach another host");
+        assert_eq!(state(), "needs_auth");
+        move_to("https://docs.test/mcp");
+        assert_eq!(state(), "ready", "back where it was made, the sign-in counts again");
+        // A sign-in saved before sign-ins named their host still counts.
+        app.plugins.lock().unwrap().set_secret("docs", "oauth:api", Some(json!({ "client_id": "c", "tokens": { "access_token": "a" } })));
+        move_to("https://elsewhere.test/mcp");
+        assert_eq!(state(), "ready");
+        // So does a challenge: one a server answered with is that server's.
+        let mut store = app.plugins.lock().unwrap();
+        store.note_challenge(&app.config, "docs", "chat", "Bearer");
+        assert!(store.secret("docs", "challenge:chat").is_some());
+        assert_eq!(origin_of("${DOCS_URL}"), "${DOCS_URL}", "a URL named by a variable is compared as written");
     }
 
     #[test]

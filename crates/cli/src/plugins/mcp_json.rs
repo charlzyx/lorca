@@ -954,8 +954,8 @@ pub fn known_sources() -> Vec<(&'static str, PathBuf)> {
 pub fn server_out(store: &Store, server: &FileServer, tool_count: Option<usize>) -> Value {
     let canonical_entry = canonical(&server.entry).unwrap_or_else(|_| server.entry.clone());
     let remote = server.config.as_ref().map(ServerConfig::is_remote).ok();
-    let signed_in = store.secret(&server.id, &format!("oauth:{SERVER}")).is_some();
-    let asked = store.secret(&server.id, &format!("challenge:{SERVER}")).is_some();
+    let signed_in = store.sign_in_secret(&server.id, "oauth", SERVER).is_some();
+    let asked = store.sign_in_secret(&server.id, "challenge", SERVER).is_some();
     let signs_in = matches!(&server.config, Ok(ServerConfig { kind: Kind::Http { oauth: Some(_), .. }, .. })) && (signed_in || asked);
     json!({
         "name": server.name,

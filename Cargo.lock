@@ -1840,6 +1840,7 @@ dependencies = [
  "lorca-provider-auth",
  "notify",
  "open",
+ "process-wrap",
  "rand 0.8.8",
  "regex",
  "reqwest 0.12.28",

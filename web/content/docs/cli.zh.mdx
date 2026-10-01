@@ -52,7 +52,7 @@ irm https://lorca.app/install-cli.ps1 | iex
 
 | 命令 | 作用 |
 | --- | --- |
-| `lorca mcp list` | 列出服务器及各自的状态：它的工具、需要的登录，或者没能启动的原因。 |
+| `lorca mcp list` | 列出服务器及各自的状态：它的工具、需要的登录，或者没能启动的原因。`lorca serve` 没有运行时，会先逐个连接。有服务器需要处理时，以状态码 1 退出。 |
 | `lorca mcp get <name>` | 连接一个服务器，并显示它的设置和工具。 |
 | `lorca mcp add <name> <command> [args…]` | 添加一个由这台电脑运行的服务器。命令后面的所有内容（包括 flag）都是它的参数；在命令前用 `-e KEY=value` 设置变量，每个变量写一次。 |
 | `lorca mcp add <name> <url>` | 添加一个使用 streamable HTTP 的远程服务器。`-H "Name: value"` 添加请求头，写在 URL 前后都可以。 |

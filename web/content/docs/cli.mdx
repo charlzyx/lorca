@@ -52,7 +52,7 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 
 | Command | What it does |
 | --- | --- |
-| `lorca mcp list` | Lists the servers and how each stands: its tools, a sign-in it needs, or why it did not start. |
+| `lorca mcp list` | Lists the servers and how each stands: its tools, a sign-in it needs, or why it did not start. Without `lorca serve` running, it connects each one first. It exits with 1 when a server needs attention. |
 | `lorca mcp get <name>` | Connects a server and shows its settings and tools. |
 | `lorca mcp add <name> <command> [args…]` | Adds a server this computer runs. Everything after the command is its arguments, flags included; `-e KEY=value` sets a variable, once per variable, before the command. |
 | `lorca mcp add <name> <url>` | Adds a remote server that speaks streamable HTTP. `-H "Name: value"` adds a header, before or after the URL. |
