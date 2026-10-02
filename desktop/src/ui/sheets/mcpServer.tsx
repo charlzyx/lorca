@@ -140,6 +140,27 @@ function PairsEditor(props: {
   );
 }
 
+/** Every label the form shows in one mode or another. */
+const formLabels = () => [L("Name"), L("JSON"), L("Type"), L("Command"), L("Environment"), L("URL"), L("Headers"), L("About")];
+
+/** A label of the form. Each holds every label the form can show, unseen behind its own, so the
+ * label column is as wide as the widest whichever fields show, as the Mac sheet's fixed label width
+ * does: switching between Command and URL, or Form and JSON, moves no field. */
+function FormLabel(props: { text: string; top?: boolean }) {
+  return (
+    <span class={["custom-form-label", "mcp-form-label", { "pairs-label": !!props.top }]}>
+      <span>{props.text}</span>
+      <For each={formLabels()}>
+        {(text) => (
+          <span class="mcp-form-label-size" aria-hidden="true">
+            {text}
+          </span>
+        )}
+      </For>
+    </span>
+  );
+}
+
 /** What pasted JSON came to: the servers in it, or why it could not be read. */
 type Reading = { kind: "empty" } | { kind: "reading" } | { kind: "read"; servers: ParsedServer[] } | { kind: "failed"; message: string };
 
@@ -487,7 +508,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
       </div>
       <div class="custom-provider-form mcp-form">
         <Show when={!several()}>
-          <span class="custom-form-label">{L("Name")}</span>
+          <FormLabel text={L("Name")} />
           <div class="form-control">
             <TextField value={name()} placeholder="github" disabled={busy()} autofocus={!saved()} label={L("Name")} onInput={setName} />
           </div>
@@ -498,7 +519,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
           when={mode() === "form"}
           fallback={
             <>
-              <span class="custom-form-label">{L("JSON")}</span>
+              <FormLabel text={L("JSON")} />
               <div class="form-control">
                 <TextArea
                   value={json()}
@@ -521,7 +542,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
             </>
           }
         >
-          <span class="custom-form-label">{L("Type")}</span>
+          <FormLabel text={L("Type")} />
           <div class="form-control">
             <Segmented
               label={L("Type")}
@@ -537,7 +558,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
             when={remote()}
             fallback={
               <>
-                <span class="custom-form-label">{L("Command")}</span>
+                <FormLabel text={L("Command")} />
                 <div class="form-control" onPaste={pasteJSON}>
                   <TextField
                     value={form().command}
@@ -550,7 +571,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
                 </div>
                 <span />
                 <div class="field-note">{runnerNote()}</div>
-                <span class="custom-form-label pairs-label">{L("Environment")}</span>
+                <FormLabel text={L("Environment")} top />
                 <div class="form-control">
                   <PairsEditor
                     pairs={form().env}
@@ -565,13 +586,13 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
               </>
             }
           >
-            <span class="custom-form-label">{L("URL")}</span>
+            <FormLabel text={L("URL")} />
             <div class="form-control" onPaste={pasteJSON}>
               <TextField value={form().url} placeholder="https://mcp.example.com/mcp" monospaced disabled={busy()} label={L("URL")} onInput={(url) => update({ url })} />
             </div>
             <span />
             <div class="field-note">{L("Streamable HTTP. When the server asks for a sign-in, Lorca signs in with OAuth; or send a token in a header.")}</div>
-            <span class="custom-form-label pairs-label">{L("Headers")}</span>
+            <FormLabel text={L("Headers")} top />
             <div class="form-control">
               <PairsEditor
                 pairs={form().headers}
@@ -584,7 +605,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
               />
             </div>
           </Show>
-          <span class="custom-form-label">{L("About")}</span>
+          <FormLabel text={L("About")} />
           <div class="form-control">
             <TextField
               value={form().description}

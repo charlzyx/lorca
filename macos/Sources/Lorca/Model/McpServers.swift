@@ -315,7 +315,9 @@ struct McpForm {
 
     init(entry: McpEntry) {
         isRemote = entry.isRemote
-        command = entry.command.map { McpCommandLine.join([$0] + entry.args) } ?? ""
+        // No command yet is an empty field, not the quoted empty word `""`.
+        let words = [entry.command ?? ""] + entry.args
+        command = words == [""] ? "" : McpCommandLine.join(words)
         env = entry.env
         url = entry.url ?? ""
         headers = entry.headers

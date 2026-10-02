@@ -43,6 +43,9 @@ test("the form edits an entry and keeps the fields it does not show", () => {
   expect(remote).toEqual({ type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer x" }, cwd: "~/work", alwaysAllow: ["read"], disabled: true });
   // An SSE server stays one.
   expect(entryOf(formOf({ type: "sse", url: "https://x.test/sse" }), { type: "sse", url: "https://x.test/sse" }).type).toBe("sse");
+  // No command yet stays an empty field through the JSON view and back, not `""`.
+  expect(formOf(entryOf(formOf({}))).command).toBe("");
+  expect(formOf({ command: "", args: ["--flag"] }).command).toBe('"" --flag');
 });
 
 test("what stops a save, in words", () => {

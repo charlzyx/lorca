@@ -2105,6 +2105,20 @@ body.resizing * {
   padding-top: 5px;
 }
 
+/* Each label holds every label the form can show, stacked unseen behind its own, so the label
+   column keeps the widest one's width whichever fields show. */
+.mcp-form-label {
+  display: grid;
+}
+
+.mcp-form-label > * {
+  grid-area: 1 / 1;
+}
+
+.mcp-form-label-size {
+  visibility: hidden;
+}
+
 .pairs {
   display: flex;
   flex-direction: column;

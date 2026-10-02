@@ -205,9 +205,11 @@ export interface McpForm {
 }
 
 export function formOf(entry: McpEntry): McpForm {
+  // No command yet is an empty field, not the quoted empty word `""`.
+  const words = [entry.command ?? "", ...(entry.args ?? [])];
   return {
     remote: isRemote(entry),
-    command: entry.command === undefined ? "" : joinCommandLine([entry.command, ...(entry.args ?? [])]),
+    command: words.length === 1 && words[0] === "" ? "" : joinCommandLine(words),
     env: Object.entries(entry.env ?? {}),
     url: entry.url ?? "",
     headers: Object.entries(entry.headers ?? {}),

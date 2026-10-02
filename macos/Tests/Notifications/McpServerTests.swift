@@ -49,6 +49,10 @@ final class McpServerTests: XCTestCase {
         XCTAssertEqual(http.url, "https://mcp.example.com/mcp")
         XCTAssertNil(http.command)
         XCTAssertTrue(http.isRemote)
+
+        // No command yet stays an empty field through the JSON view and back, not `""`.
+        XCTAssertEqual(McpForm(entry: McpForm(entry: McpEntry()).entry()).command, "")
+        XCTAssertEqual(McpForm(entry: McpEntry(["command": "", "args": ["--flag"]])).command, "\"\" --flag")
     }
 
     func testWhatStopsASave() {
