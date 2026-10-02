@@ -525,6 +525,23 @@ impl Sessions {
     }
 }
 
+/// What a bot's commands get beyond the user's shell: this Runner's own `lorca` first on `PATH`,
+/// and `LORCA_HOME` and `LORCA_PORT` pointing it at this Runner, so `lorca mcp add` adds a server
+/// here, whatever other install of Lorca the shell would find first. The apps keep the CLI alone
+/// in a `bin` folder of their resources; one renamed is not put on `PATH`.
+pub fn bot_shell_extras(app: &App) -> lorca_agent::login_shell::Extras {
+    let path_first = std::env::current_exe()
+        .ok()
+        .filter(|exe| exe.file_stem().and_then(|stem| stem.to_str()).is_some_and(|stem| stem.eq_ignore_ascii_case("lorca")))
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .into_iter()
+        .collect();
+    lorca_agent::login_shell::Extras {
+        variables: vec![("LORCA_HOME".into(), app.config.home.clone().into_os_string()), ("LORCA_PORT".into(), app.config.port.to_string().into())],
+        path_first,
+    }
+}
+
 /// A turn's reach into the sessions: a bot reaches the ones it started, in the chat it runs in.
 pub struct TurnSessions {
     app: Arc<App>,

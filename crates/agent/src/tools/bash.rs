@@ -47,11 +47,12 @@ pub struct BashTool {
     shell: Option<String>,
     sessions: Option<Arc<dyn BashSessions>>,
     waiting_after: Duration,
+    extras: Arc<crate::login_shell::Extras>,
 }
 
 impl BashTool {
     pub fn new(cwd: PathBuf) -> Self {
-        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER }
+        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER, extras: Arc::default() }
     }
 
     /// Runs each command in a terminal session `sessions` keeps, so a command waiting for input
@@ -62,6 +63,13 @@ impl BashTool {
     }
 
     /// How long a command may print nothing before its call returns with the session id.
+    /// Variables over the login shell's environment for every command, and folders first on
+    /// its PATH (`login_shell::Extras`).
+    pub fn with_extras(mut self, extras: crate::login_shell::Extras) -> Self {
+        self.extras = Arc::new(extras);
+        self
+    }
+
     pub fn waiting_after(mut self, after: Duration) -> Self {
         self.waiting_after = after;
         self
@@ -211,10 +219,11 @@ impl Tool for BashTool {
         }
         let shell = self.shell.as_deref().ok_or_else(|| ToolError(NO_SHELL.into()))?;
         if let Some(sessions) = self.terminal() {
-            return super::bash_session::run(shell, &command, &self.cwd, timeout, sessions, id, self.waiting_after, cancel, on_update).await;
+            return super::bash_session::run(shell, &command, &self.cwd, timeout, &self.extras, sessions, id, self.waiting_after, cancel, on_update).await;
         }
 
         let mut cmd = crate::login_shell::command(shell).await;
+        self.extras.apply(&mut cmd);
         cmd.arg("-c").arg(&command).current_dir(&self.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         {
@@ -317,6 +326,25 @@ impl Tool for BashTool {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn a_host_puts_its_own_command_first_and_its_variables_in() {
+        let dir = std::env::temp_dir().join(format!("lorca-bash-extras-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("lorca");
+        std::fs::write(&script, "#!/bin/sh\necho \"this Runner's lorca on $LORCA_PORT\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let extras = crate::login_shell::Extras { variables: vec![("LORCA_PORT".into(), "4899".into())], path_first: vec![dir.clone()] };
+        let tool = BashTool::new(std::env::temp_dir()).with_extras(extras);
+        let result = tool.execute("1", json!({ "command": "lorca" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        let text = result.text_content();
+        assert!(text.contains("this Runner's lorca on 4899"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn runs_and_reports_exit_code() {

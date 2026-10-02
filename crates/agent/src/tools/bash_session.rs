@@ -568,7 +568,7 @@ fn new_id() -> String {
 impl BashSession {
     /// Starts `command` under `shell -c` in `cwd`, on a new pseudo-terminal that is the
     /// command's controlling terminal. `timeout` (seconds) kills it when it runs that long.
-    pub async fn spawn(shell: &str, command: &str, cwd: &Path, timeout: Option<f64>) -> std::io::Result<Arc<BashSession>> {
+    pub async fn spawn(shell: &str, command: &str, cwd: &Path, timeout: Option<f64>, extras: &crate::login_shell::Extras) -> std::io::Result<Arc<BashSession>> {
         use std::os::fd::AsRawFd;
         use std::process::Stdio;
         use tokio::io::unix::AsyncFd;
@@ -576,6 +576,7 @@ impl BashSession {
 
         let (master, slave) = open_pty()?;
         let mut cmd = crate::login_shell::command(shell).await;
+        extras.apply(&mut cmd);
         cmd.arg("-c")
             .arg(command)
             .current_dir(cwd)
@@ -695,7 +696,7 @@ impl BashSession {
 
 #[cfg(not(unix))]
 impl BashSession {
-    pub async fn spawn(_shell: &str, _command: &str, _cwd: &Path, _timeout: Option<f64>) -> std::io::Result<Arc<BashSession>> {
+    pub async fn spawn(_shell: &str, _command: &str, _cwd: &Path, _timeout: Option<f64>, _extras: &crate::login_shell::Extras) -> std::io::Result<Arc<BashSession>> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "interactive terminals are not available on this platform"))
     }
 }
@@ -997,13 +998,14 @@ pub(crate) async fn run(
     command: &str,
     cwd: &Path,
     timeout: Option<f64>,
+    extras: &crate::login_shell::Extras,
     sessions: &Arc<dyn BashSessions>,
     call_id: &str,
     waiting_after: Duration,
     cancel: CancellationToken,
     on_update: ToolUpdateFn,
 ) -> Result<ToolResult, ToolError> {
-    let session = BashSession::spawn(shell, command, cwd, timeout).await.map_err(|e| ToolError(format!("Failed to start {shell}: {e}")))?;
+    let session = BashSession::spawn(shell, command, cwd, timeout, extras).await.map_err(|e| ToolError(format!("Failed to start {shell}: {e}")))?;
     sessions.insert(call_id, session.clone());
     let mut last_update = Instant::now() - Duration::from_secs(1);
     let idle = Idle { after: waiting_after, needs_output: false };

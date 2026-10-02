@@ -51,10 +51,11 @@ pub fn coding_tools(cwd: impl Into<PathBuf>) -> Vec<Arc<dyn Tool>> {
 
 /// The seven tools, with `bash` running each command in a terminal session `sessions` keeps,
 /// plus `bash_input` and `bash_output` to reach a command that is still running. On Windows
-/// `bash` runs on pipes and the two are left out.
-pub fn coding_tools_with_sessions(cwd: impl Into<PathBuf>, sessions: Arc<dyn BashSessions>) -> Vec<Arc<dyn Tool>> {
+/// `bash` runs on pipes and the two are left out. `extras` go over the login shell's environment
+/// for every command.
+pub fn coding_tools_with_sessions(cwd: impl Into<PathBuf>, sessions: Arc<dyn BashSessions>, extras: crate::login_shell::Extras) -> Vec<Arc<dyn Tool>> {
     let cwd: PathBuf = cwd.into();
-    let mut tools = with_bash(BashTool::with_sessions(cwd.clone(), sessions.clone()), cwd);
+    let mut tools = with_bash(BashTool::with_sessions(cwd.clone(), sessions.clone()).with_extras(extras), cwd);
     if cfg!(unix) {
         tools.push(Arc::new(BashInputTool::new(sessions.clone())));
         tools.push(Arc::new(BashOutputTool::new(sessions)));

@@ -259,6 +259,11 @@ fn stays_in_lorca(command: &str, workdir: &Path, folders: &[PathBuf], home: Opti
     let moves = stages.iter().any(|stage| command_and_args(stage).is_some_and(|(name, _)| matches!(name.as_str(), "cd" | "pushd" | "popd")));
     stages.iter().all(|stage| {
         if let Some((name, args)) = command_and_args(stage) {
+            // The lorca command changes the Runner and the account (its MCP servers, sign-ins,
+            // and Devices), not files in Lorca's folders: the review judges it wherever it runs.
+            if matches!(name.as_str(), "lorca" | "lorca.exe") {
+                return false;
+            }
             let bare_move = matches!(name.as_str(), "cd" | "pushd") && !matches!(args.as_slice(), [dir] if dir != "-");
             if bare_move || matches!(name.as_str(), "popd" | "sudo" | "doas" | "su" | "pkexec") || sends_data_out(&name, &args) {
                 return false;
@@ -693,8 +698,20 @@ fn safe_command(command: &str, args: &[String]) -> bool {
         }),
         "find" => !args.iter().any(|arg| matches!(arg.as_str(), "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir")),
         "git" => safe_git(args),
+        "lorca" | "lorca.exe" => safe_lorca(args),
         _ => false,
     }
+}
+
+/// `lorca` that only reads: its help and version, and the MCP servers listed or one shown. A
+/// flag after `--` belongs to a server's command (`lorca mcp add x -- npx --help` adds one).
+fn safe_lorca(args: &[String]) -> bool {
+    let own: Vec<&str> = args.iter().map(String::as_str).take_while(|arg| *arg != "--").collect();
+    if own.iter().any(|arg| matches!(*arg, "--help" | "-h" | "--version" | "-V")) {
+        return true;
+    }
+    let words: Vec<&str> = own.into_iter().filter(|arg| !arg.starts_with('-')).collect();
+    matches!(words.as_slice(), ["help", ..] | ["mcp"] | ["mcp", "help", ..] | ["mcp", "list"] | ["mcp", "get", _])
 }
 
 fn safe_git(args: &[String]) -> bool {
@@ -837,6 +854,28 @@ mod tests {
             "printf %s \"$AWS_ACCESS_KEY_ID\"",
         ] {
             assert!(!read_only(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn the_lorca_command_is_reviewed_unless_it_only_reads() {
+        for command in ["lorca --help", "lorca mcp", "lorca mcp list", "lorca mcp get github", "lorca mcp add --help", "lorca --version", "lorca mcp list | grep github"] {
+            assert!(read_only(command), "{command}");
+        }
+        let home = Path::new("/home/me");
+        let folders = [PathBuf::from("/home/me/.lorca")];
+        let workspace = Path::new("/home/me/.lorca/workspaces/bot-1");
+        for command in [
+            "lorca mcp add memory npx -y @modelcontextprotocol/server-memory",
+            "lorca mcp add x -- npx --help",
+            r#"lorca mcp add-json memory '{"command": "npx"}'"#,
+            "lorca mcp remove github",
+            "lorca identity new",
+            "/Applications/Lorca.app/Contents/Resources/bin/lorca mcp remove github",
+            "cd ~/.lorca && lorca mcp reload",
+        ] {
+            assert!(!read_only(command), "{command}");
+            assert!(!stays_in_lorca(command, workspace, &folders, Some(home)), "it changes the Runner, whatever folder it runs in: {command}");
         }
     }
 

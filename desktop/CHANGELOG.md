@@ -21,6 +21,9 @@ and the update window shows it.
 - `lorca mcp` lists, adds, removes, turns on or off, hides tools of, reloads, and signs in to or out
   of MCP servers from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude
   Code, Cursor, Windsurf, VS Code, or Gemini CLI have on the computer.
+- Bots can add an MCP server the marketplace lacks, as its README gives it: the `lorca` command is
+  in their shell, pointed at their Runner, and Auto-review checks each change it makes, asking you
+  when you didn't ask for it.
 - Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
   that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
   server also stops what it started, such as npx's node; a call you stop is called off at the
