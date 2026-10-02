@@ -196,10 +196,11 @@ async fn stored_values_reach_later_scripts_and_failed_scripts_write_nothing() {
 #[tokio::test]
 async fn exit_ends_early_and_output_keeps_its_order() {
     let codemode = tool(vec![]);
-    let result = run(&codemode, "console.log('a', { b: 1 });\nimage('data:image/png;base64,AAAA');\ntext(2);\nexit();\ntext('never');").await;
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    let result = run(&codemode, &format!("console.log('a', {{ b: 1 }});\nimage('data:image/png;base64,{png}');\ntext(2);\nexit();\ntext('never');")).await;
     assert!(!result.is_error);
     assert_eq!(result.content[1], ContentPart::text("a {\"b\":1}"));
-    assert_eq!(result.content[2], ContentPart::Image { data: "AAAA".into(), mime_type: "image/png".into() });
+    assert_eq!(result.content[2], ContentPart::Image { data: png.into(), mime_type: "image/png".into() });
     assert_eq!(result.content[3], ContentPart::text("2"));
     assert_eq!(result.content.len(), 4);
     let remote = run(&codemode, "image('https://example.com/a.png');").await;
@@ -421,16 +422,30 @@ async fn a_script_cannot_flood_the_host() {
 #[tokio::test]
 async fn images_the_model_cannot_take_are_left_out() {
     let codemode = tool(vec![]);
-    let code = "image('data:image/svg+xml;base64,PHN2Zz4=');\nimage('data:image/png;base64,not base64!');\nimage({ type: 'image', data: 'AAAA' });\n\
-                for (let i = 0; i < 11; i++) image('data:image/png;base64,AAAA');";
+    // A JPEG labeled PNG keeps the type its bytes say, as providers refuse a mismatch, and
+    // wrapped base64 loses its line breaks.
+    let code = "image('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=');\nimage('data:image/png;base64,not base64!');\n\
+                image({ type: 'image', data: 'AAAA' });\nimage('data:image/png;base64,/9j/4AAQSkZJRgAB');\n\
+                for (let i = 0; i < 10; i++) image('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4\\n2mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');";
     let result = run(&codemode, code).await;
-    let images = result.content.iter().filter(|part| matches!(part, ContentPart::Image { .. })).count();
+    let types: Vec<&str> = result.content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
     let text = text_of(&result);
-    assert_eq!(images, 10, "{text}");
-    assert!(text.contains("image/svg+xml is not an image type the model takes"), "{text}");
+    assert_eq!(types.len(), 10, "{text}");
+    assert_eq!((types[0], types[1]), ("image/jpeg", "image/png"), "{text}");
+    assert_eq!(text.matches("it is not a PNG, JPEG, GIF, or WebP image").count(), 2, "an SVG, and data that is no image: {text}");
     assert!(text.contains("its data is not base64"), "{text}");
-    assert!(text.contains("application/octet-stream is not an image type"), "{text}");
     assert!(text.contains("at most 10 images"), "{text}");
+}
+
+#[tokio::test]
+async fn an_unknown_tool_names_the_closest_ones() {
+    let codemode = tool(vec![Probe::tool("github__create_issue", Mode::Echo), Probe::tool("fails", Mode::Fail)]);
+    let close = text_of(&run(&codemode, "await tools.github_create_issue({});").await);
+    assert!(close.contains("Unknown tool \"github_create_issue\". Did you mean tools.github__create_issue?"), "{close}");
+    let cased = text_of(&run(&codemode, "await tools.Fails({});").await);
+    assert!(cased.contains("Did you mean tools.fails?"), "{cased}");
+    let listed = text_of(&run(&codemode, "await tools.zzz({});").await);
+    assert!(listed.contains("Unknown tool \"zzz\". The tools are fails, github__create_issue."), "a short catalog is listed whole: {listed}");
 }
 
 #[tokio::test]

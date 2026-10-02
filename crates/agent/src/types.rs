@@ -24,6 +24,29 @@ impl ContentPart {
     }
 }
 
+/// The largest image, decoded, that goes to a model inline.
+pub const MAX_INLINE_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// The type of an image a model can take inline, or why it cannot: base64 data of a PNG, JPEG,
+/// GIF, or WebP image of at most 5 MB. The type is what the image's first bytes say, not how it
+/// was labeled. Providers refuse a whole request over any other image, and a refused image left
+/// in a chat fails every later turn.
+pub fn inline_image_type(data: &str) -> Result<&'static str, String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok().filter(|bytes| !bytes.is_empty()).ok_or("its data is not base64")?;
+    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+        return Err(format!("it is over {} MB", MAX_INLINE_IMAGE_BYTES / (1024 * 1024)));
+    }
+    match bytes.as_slice() {
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => Ok("image/png"),
+        // JPEG-LS starts as a JPEG does, and no provider takes it.
+        [0xFF, 0xD8, 0xFF, marker, ..] if !matches!(marker, 0xF7 | 0xF8) => Ok("image/jpeg"),
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Ok("image/gif"),
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => Ok("image/webp"),
+        _ => Err("it is not a PNG, JPEG, GIF, or WebP image".into()),
+    }
+}
+
 /// A tool call the assistant asked for.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolCall {

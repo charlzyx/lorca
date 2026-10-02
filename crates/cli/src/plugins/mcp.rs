@@ -345,7 +345,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
     let resources = service.peer_info().is_some_and(|info| info.capabilities.resources.is_some());
     // Every tool the server offers: which ones bots see is read as they are listed, so showing a
     // hidden one needs no reconnecting.
-    let tools = service.list_all_tools().await.map_err(|e| format!("{} could not list its tools: {e}", plugin.manifest.name))?;
+    let tools = all_tools(service.peer()).await.map_err(|e| format!("{} could not list its tools: {e}", plugin.manifest.name))?;
     tracing::info!(plugin = %plugin.manifest.id, server = name, tools = tools.len(), resources, "connected an MCP server");
     Ok(Server { plugin_id: plugin.manifest.id.clone(), name: name.to_string(), service, tools: std::sync::RwLock::new(tools), instructions, resources, auth, bearer_expires_at })
 }
@@ -382,7 +382,7 @@ async fn refresh_tools(app: &Arc<App>, plugin_id: &str, server: &str, generation
     if !installed || app.mcp.generation(plugin_id) != generation {
         return;
     }
-    let tools = match peer.list_all_tools().await {
+    let tools = match all_tools(peer).await {
         Ok(tools) => tools,
         Err(error) => {
             tracing::warn!(%error, plugin = plugin_id, server, "listing a server's changed tools");
@@ -401,6 +401,27 @@ async fn refresh_tools(app: &Arc<App>, plugin_id: &str, server: &str, generation
         },
     };
     save_catalog(app, plugin_id, server, SavedServer { instructions, tools, resources });
+}
+
+/// Pages of a server's tool list one connection reads at most.
+const MAX_TOOL_PAGES: usize = 100;
+
+/// Every tool a server lists, page by page. A list ends at a page with no cursor, an empty one,
+/// or one the server handed out before: following those would ask for the same page forever.
+async fn all_tools(peer: &rmcp::service::Peer<RoleClient>) -> Result<Vec<rmcp::model::Tool>, rmcp::ServiceError> {
+    let mut tools = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut cursor = None;
+    for _ in 0..MAX_TOOL_PAGES {
+        let page = peer.list_tools(Some(rmcp::model::PaginatedRequestParams::default().with_cursor(cursor))).await?;
+        tools.extend(page.tools);
+        match page.next_cursor.filter(|next| !next.is_empty() && seen.insert(next.clone())) {
+            Some(next) => cursor = Some(next),
+            None => return Ok(tools),
+        }
+    }
+    tracing::warn!(tools = tools.len(), "an MCP server's tool list ran past {MAX_TOOL_PAGES} pages; keeping what it listed");
+    Ok(tools)
 }
 
 /// What a stdio server writes to stderr: read for as long as it runs, so it never blocks on a
@@ -606,6 +627,20 @@ async fn auth_server_metadata(app: &Arc<App>, metadata_url: &str, name: &str) ->
     serde_json::from_slice(&body).map_err(|e| format!("{name}'s authorization server metadata does not read: {e}"))
 }
 
+/// A token response without the optional fields a server sent empty or null, as some send
+/// `"scope": ""` for a token with no scope. Kept, an empty scope is asked for again at every
+/// refresh.
+fn tidy_tokens(tokens: &Value) -> Value {
+    let mut tokens = tokens.clone();
+    if let Some(fields) = tokens.as_object_mut() {
+        fields.retain(|key, value| {
+            let optional = matches!(key.as_str(), "scope" | "refresh_token" | "id_token" | "expires_in" | "refresh_token_expires_in");
+            !(optional && (value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty())))
+        });
+    }
+    tokens
+}
+
 /// An authorization manager holding tokens saved by an earlier sign-in. With `metadata_url`, the
 /// authorization server is the one that document describes, never one found by discovery.
 async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value, metadata_url: Option<&str>) -> Result<AuthorizationManager, String> {
@@ -615,7 +650,7 @@ async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value, metadata_url
         let mut manager = AuthorizationManager::new(url).await.map_err(|e| e.to_string())?;
         manager.with_client(app.mcp.http.clone()).map_err(|e| e.to_string())?;
         manager.set_metadata(auth_server_metadata(app, metadata_url, url).await?);
-        let tokens = serde_json::from_value(stored["tokens"].clone()).map_err(|e| format!("The saved sign-in is unreadable: {e}"))?;
+        let tokens = serde_json::from_value(tidy_tokens(&stored["tokens"])).map_err(|e| format!("The saved sign-in is unreadable: {e}"))?;
         let saved = rmcp::transport::auth::InMemoryCredentialStore::new();
         saved.save(rmcp::transport::auth::StoredCredentials::new(client_id.to_string(), Some(tokens), Vec::new(), None)).await.map_err(|e| e.to_string())?;
         manager.set_credential_store(saved);
@@ -624,7 +659,7 @@ async fn restore_manager(app: &Arc<App>, url: &str, stored: &Value, metadata_url
             false => Err("Restoring the sign-in".into()),
         };
     }
-    let tokens = serde_json::from_value(stored["tokens"].clone()).map_err(|e| format!("The saved sign-in is unreadable: {e}"))?;
+    let tokens = serde_json::from_value(tidy_tokens(&stored["tokens"])).map_err(|e| format!("The saved sign-in is unreadable: {e}"))?;
     let mut state = OAuthState::new(url, Some(app.mcp.http.clone())).await.map_err(|e| e.to_string())?;
     state.set_credentials(client_id, tokens).await.map_err(|e| format!("Restoring the sign-in: {e}"))?;
     state.into_authorization_manager().ok_or_else(|| "Restoring the sign-in".to_string())
@@ -1287,7 +1322,7 @@ async fn complete_sign_in(mut state: OAuthState, callback: &str, name: &str) -> 
     state.handle_callback_url(callback).await.map_err(|e| format!("{name} rejected the sign-in: {e}"))?;
     let (client_id, tokens) = state.get_credentials().await.map_err(|e| e.to_string())?;
     let tokens = tokens.ok_or("The sign-in produced no tokens")?;
-    Ok(json!({ "client_id": client_id, "tokens": tokens, "signed_in_at": now_secs() }))
+    Ok(json!({ "client_id": client_id, "tokens": tidy_tokens(&json!(tokens)), "signed_in_at": now_secs() }))
 }
 
 /// A sign-in in this Runner's own browser, back to its own loopback.
@@ -2190,8 +2225,8 @@ fn needs_more_access(app: &Arc<App>, plugin_id: &str, server: &str, required: &s
     super::note(app, plugin_id, None);
 }
 
-/// A read resource for the model and for scripts: text as text, images as images, and other
-/// binary contents saved to a private file the result names, never carried as base64.
+/// A read resource for the model and for scripts: text as text, images a model takes as images,
+/// and other binary contents saved to a private file the result names, never carried as base64.
 fn read_contents(read: Value) -> (Vec<ContentPart>, Value) {
     let mut content = Vec::new();
     let mut text_len = 0;
@@ -2204,16 +2239,18 @@ fn read_contents(read: Value) -> (Vec<ContentPart>, Value) {
                 push_text(&mut content, &mut text_len, text.to_string());
                 contents.push(json!({ "uri": uri, "mimeType": mime, "text": text }));
             }
-            (None, Some(blob)) if mime.starts_with("image/") => {
-                content.push(ContentPart::Image { data: blob.to_string(), mime_type: mime.to_string() });
-                contents.push(json!({ "uri": uri, "mimeType": mime, "blob": blob }));
-            }
-            (None, Some(blob)) => match save_blob(uri, blob) {
-                Ok((path, size)) => {
-                    push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, {size} bytes, saved to {}]", path.display()));
-                    contents.push(json!({ "uri": uri, "mimeType": mime, "path": path.display().to_string() }));
+            (None, Some(blob)) => match mime.starts_with("image/").then(|| model_image(blob).ok()).flatten() {
+                Some(image) => {
+                    content.push(image);
+                    contents.push(json!({ "uri": uri, "mimeType": mime, "blob": blob }));
                 }
-                Err(error) => push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, which could not be saved: {error}]")),
+                None => match save_blob(uri, blob) {
+                    Ok((path, size)) => {
+                        push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, {size} bytes, saved to {}]", path.display()));
+                        contents.push(json!({ "uri": uri, "mimeType": mime, "path": path.display().to_string() }));
+                    }
+                    Err(error) => push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, which could not be saved: {error}]")),
+                },
             },
             (None, None) => {}
         }
@@ -2237,9 +2274,9 @@ fn save_blob(uri: &str, blob: &str) -> Result<(std::path::PathBuf, usize), Strin
 }
 
 /// A plugin result as text and images: text, embedded text, and resource links as text cut at
-/// `MAX_RESULT_CHARS` in all; images, embedded ones too, as images; audio and other binary data
-/// named, never carried as base64; and the structured result when there are no blocks. What an
-/// error says, and what hooks read.
+/// `MAX_RESULT_CHARS` in all; images a model takes, embedded ones too, as images; other images,
+/// audio, and other binary data named, never carried as base64; and the structured result when
+/// there are no blocks. What an error says, and what hooks read.
 fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
     use rmcp::model::ResourceContents;
     let mut content: Vec<ContentPart> = Vec::new();
@@ -2247,13 +2284,17 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
     for block in &result.content {
         match block {
             ContentBlock::Text(text) => push_text(&mut content, &mut text_len, text.text.clone()),
-            ContentBlock::Image(image) => content.push(ContentPart::Image { data: image.data.clone(), mime_type: image.mime_type.clone() }),
+            ContentBlock::Image(image) => match model_image(&image.data) {
+                Ok(part) => content.push(part),
+                Err(why) => push_text(&mut content, &mut text_len, format!("[{} image, left out: {why}]", image.mime_type)),
+            },
             ContentBlock::Audio(audio) => push_text(&mut content, &mut text_len, format!("[{} audio, left out]", audio.mime_type)),
             ContentBlock::Resource(embedded) => match &embedded.resource {
                 ResourceContents::TextResourceContents { text, .. } => push_text(&mut content, &mut text_len, text.clone()),
-                ResourceContents::BlobResourceContents { mime_type: Some(mime), blob, .. } if mime.starts_with("image/") => {
-                    content.push(ContentPart::Image { data: blob.clone(), mime_type: mime.clone() })
-                }
+                ResourceContents::BlobResourceContents { uri, mime_type: Some(mime), blob, .. } if mime.starts_with("image/") => match model_image(blob) {
+                    Ok(part) => content.push(part),
+                    Err(why) => push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, left out: {why}]")),
+                },
                 ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
                     push_text(&mut content, &mut text_len, format!("[{uri}: {}, left out]", mime_type.as_deref().unwrap_or("binary data")))
                 }
@@ -2271,6 +2312,13 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
         }
     }
     content
+}
+
+/// An image of a result as a model takes it, typed by what its bytes say, or why it cannot go:
+/// providers refuse a whole request over an image they do not take, and the chat would fail at
+/// every later turn.
+fn model_image(data: &str) -> Result<ContentPart, String> {
+    lorca_agent::types::inline_image_type(data).map(|mime_type| ContentPart::Image { data: data.to_string(), mime_type: mime_type.into() })
 }
 
 /// Adds a result's text, cut where the result's text reaches `MAX_RESULT_CHARS`.
@@ -2294,7 +2342,7 @@ async fn persist_refreshed(app: &Arc<App>, plugin_id: &str, server: &str, auth: 
     if let Ok((client_id, Some(tokens))) = credentials {
         let key = format!("oauth:{server}");
         let saved = app.plugins.lock().unwrap().secret(plugin_id, &key);
-        let fresh = json!({ "client_id": client_id, "tokens": tokens, "signed_in_at": now_secs() });
+        let fresh = json!({ "client_id": client_id, "tokens": tidy_tokens(&json!(tokens)), "signed_in_at": now_secs() });
         if saved.as_ref().map(|s| s["tokens"] != fresh["tokens"]).unwrap_or(true) {
             let _ = super::set_oauth(app, plugin_id, server, Some(fresh));
         }
@@ -2575,6 +2623,11 @@ mod tests {
         assert_eq!(last_words(["", "  ", "    at frame (x.js:1:1)"].into_iter()), None);
     }
 
+    /// A 1×1 PNG, an SVG, and the first bytes of a JPEG, in base64.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const SVG: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=";
+    const JPEG: &str = "/9j/4AAQSkZJRgAB";
+
     #[test]
     fn results_reach_the_model_without_binary_data() {
         let result: rmcp::model::CallToolResult = serde_json::from_value(json!({ "content": [
@@ -2582,16 +2635,89 @@ mod tests {
             { "type": "audio", "data": "QVVESU8=", "mimeType": "audio/wav" },
             { "type": "resource", "resource": { "uri": "file:///a.txt", "mimeType": "text/plain", "text": "embedded" } },
             { "type": "resource", "resource": { "uri": "file:///a.pdf", "mimeType": "application/pdf", "blob": "JVBERi0=" } },
-            { "type": "resource", "resource": { "uri": "file:///a.png", "mimeType": "image/png", "blob": "iVBORw0=" } },
-            { "type": "resource_link", "uri": "file:///b.md", "name": "b.md" }
+            { "type": "resource", "resource": { "uri": "file:///a.png", "mimeType": "image/png", "blob": PNG } },
+            { "type": "resource_link", "uri": "file:///b.md", "name": "b.md" },
+            { "type": "image", "data": SVG, "mimeType": "image/svg+xml" },
+            { "type": "image", "data": JPEG, "mimeType": "image/png" },
+            { "type": "resource", "resource": { "uri": "file:///c.png", "mimeType": "image/png", "blob": "iVBORw0=" } }
         ] }))
         .unwrap();
         let content = model_content(&result);
         let texts: Vec<&str> = content.iter().filter_map(|part| part.as_text()).collect();
-        assert_eq!(texts, ["hello", "[audio/wav audio, left out]", "embedded", "[file:///a.pdf: application/pdf, left out]", "[file:///b.md (b.md)]"]);
-        assert!(content.iter().any(|part| matches!(part, ContentPart::Image { mime_type, .. } if mime_type == "image/png")), "an embedded image is an image");
+        assert_eq!(
+            texts,
+            [
+                "hello",
+                "[audio/wav audio, left out]",
+                "embedded",
+                "[file:///a.pdf: application/pdf, left out]",
+                "[file:///b.md (b.md)]",
+                "[image/svg+xml image, left out: it is not a PNG, JPEG, GIF, or WebP image]",
+                "[file:///c.png: image/png, left out: it is not a PNG, JPEG, GIF, or WebP image]"
+            ]
+        );
+        let types: Vec<&str> = content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
+        assert_eq!(types, ["image/png", "image/jpeg"], "an embedded image is an image, and an image has the type its bytes say");
         let shown = format!("{content:?}");
-        assert!(!shown.contains("QVVESU8=") && !shown.contains("JVBERi0="), "audio and other binary data never reach the model as text");
+        assert!(!shown.contains("QVVESU8=") && !shown.contains("JVBERi0=") && !shown.contains(SVG), "audio and other binary data never reach the model as text");
+    }
+
+    /// A server at the other end of `io` that answers the handshake and lists one tool a page,
+    /// with the next cursor `next` gives for the cursor it was asked with. Counts its pages.
+    fn paging_server(io: tokio::io::DuplexStream, next: fn(Option<&str>) -> Option<String>, pages: Arc<std::sync::atomic::AtomicUsize>) {
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let (read, mut write) = tokio::io::split(io);
+            let mut lines = tokio::io::BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let message: Value = serde_json::from_str(&line).unwrap();
+                let result = match message["method"].as_str() {
+                    Some("initialize") => {
+                        json!({ "protocolVersion": message["params"]["protocolVersion"], "capabilities": { "tools": {} }, "serverInfo": { "name": "pager", "version": "1" } })
+                    }
+                    Some("tools/list") => {
+                        let page = pages.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let mut result = json!({ "tools": [{ "name": format!("tool{page}"), "inputSchema": { "type": "object" } }] });
+                        if let Some(cursor) = next(message["params"]["cursor"].as_str()) {
+                            result["nextCursor"] = json!(cursor);
+                        }
+                        result
+                    }
+                    _ => continue,
+                };
+                if write.write_all(format!("{}\n", json!({ "jsonrpc": "2.0", "id": message["id"], "result": result })).as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn a_tool_list_ends_where_its_server_stops_paging() {
+        use rmcp::ServiceExt;
+        async fn list(next: fn(Option<&str>) -> Option<String>) -> (usize, usize) {
+            let (client, server) = tokio::io::duplex(64 * 1024);
+            let pages = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            paging_server(server, next, pages.clone());
+            let service = ().serve(client).await.unwrap();
+            let tools = tokio::time::timeout(std::time::Duration::from_secs(20), all_tools(service.peer())).await.expect("the listing ends").unwrap();
+            (tools.len(), pages.load(std::sync::atomic::Ordering::SeqCst))
+        }
+        assert_eq!(list(|_| None).await, (1, 1));
+        assert_eq!(list(|cursor| (cursor.is_none()).then(|| "2".into())).await, (2, 2), "a list of two pages");
+        assert_eq!(list(|_| Some(String::new())).await, (1, 1), "an empty cursor ends the list");
+        assert_eq!(list(|_| Some("again".into())).await, (2, 2), "a cursor handed out before ends it too");
+        let endless = list(|cursor| Some(format!("{}", cursor.and_then(|cursor| cursor.parse::<u32>().ok()).unwrap_or(0) + 1))).await;
+        assert_eq!(endless, (MAX_TOOL_PAGES, MAX_TOOL_PAGES), "a server that pages forever is read so far");
+    }
+
+    #[test]
+    fn empty_token_fields_are_left_out() {
+        let tidy = tidy_tokens(&json!({ "access_token": "a", "token_type": "Bearer", "scope": "", "refresh_token": " ", "id_token": null, "expires_in": null, "refresh_token_expires_in": 60 }));
+        assert_eq!(tidy, json!({ "access_token": "a", "token_type": "Bearer", "refresh_token_expires_in": 60 }));
+        let tokens: rmcp::transport::auth::OAuthTokenResponse = serde_json::from_value(tidy).expect("rmcp reads what is left");
+        assert!(serde_json::to_value(tokens).unwrap().get("scope").is_none(), "no empty scope to ask for again at a refresh");
+        assert_eq!(tidy_tokens(&json!({ "access_token": "a", "scope": "repo read:org" }))["scope"], json!("repo read:org"));
     }
 
     #[tokio::test]
@@ -2664,8 +2790,9 @@ mod tests {
         let pdf = base64::engine::general_purpose::STANDARD.encode(b"%PDF-1.7 tiny");
         let (content, structured) = read_contents(json!({ "contents": [
             { "uri": "file:///a.md", "mimeType": "text/markdown", "text": "# A" },
-            { "uri": "file:///b.png", "mimeType": "image/png", "blob": "iVBORw0=" },
-            { "uri": "file:///docs/report.pdf", "mimeType": "application/pdf", "blob": pdf }
+            { "uri": "file:///b.png", "mimeType": "image/png", "blob": PNG },
+            { "uri": "file:///docs/report.pdf", "mimeType": "application/pdf", "blob": pdf },
+            { "uri": "file:///logo.svg", "mimeType": "image/svg+xml", "blob": SVG }
         ] }));
         assert_eq!(content[0].as_text(), Some("# A"));
         assert!(matches!(&content[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"));
@@ -2673,7 +2800,10 @@ mod tests {
         assert!(saved.ends_with("-report.pdf") && content[2].as_text().unwrap().contains("13 bytes, saved to"), "{:?}", content[2]);
         assert_eq!(std::fs::read(&saved).unwrap(), b"%PDF-1.7 tiny");
         assert!(structured["contents"][2].get("blob").is_none(), "scripts get the file, not the base64");
+        let logo = structured["contents"][3]["path"].as_str().unwrap().to_string();
+        assert!(logo.ends_with("-logo.svg") && content[3].as_text().unwrap().contains("saved to"), "an image no model takes is saved like other binary contents: {:?}", content[3]);
         let _ = std::fs::remove_file(saved);
+        let _ = std::fs::remove_file(logo);
     }
 
     /// A server at a local port that answers every request with `status` and no body, counting

@@ -56,7 +56,8 @@ pub(crate) enum Event {
     /// A tool call (`global` false) or a host global, with its arguments as JSON.
     Call { id: u64, global: bool, name: String, args: Option<String> },
     Text(String),
-    Image { data: String, mime_type: String },
+    /// An image's base64 data, whatever type the script gave it: the host reads its type from the bytes.
+    Image(String),
     /// The script returned: its value as JSON, and the keys it stored as a JSON array of
     /// `[key, json]` and `[key]` for a deletion.
     Done { value: Option<String>, writes: String },
@@ -217,7 +218,7 @@ fn setup(ctx: &Ctx<'_>, script: &Script, events: mpsc::Sender<Event>, finished: 
         let event = match kind.as_str() {
             "call" | "global" => Event::Call { id: id as u64, global: kind == "global", name: text, args: extra.0 },
             "text" => Event::Text(text),
-            "image" => Event::Image { data: text, mime_type: extra.0.unwrap_or_else(|| "application/octet-stream".into()) },
+            "image" => Event::Image(text),
             "done" => {
                 finished.store(true, Ordering::Relaxed);
                 Event::Done { value: extra.0, writes: text }

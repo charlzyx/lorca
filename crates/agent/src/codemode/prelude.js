@@ -11,7 +11,8 @@
 // `bridge(kind, id, text, extra)` takes primitives only:
 // - ("call", id, name, argsJson?) and ("global", id, name, argsJson?) ask the host to run a tool
 //   or a global; the host answers through `settle`.
-// - ("text", 0, text) and ("image", 0, base64, mimeType) append output.
+// - ("text", 0, text) and ("image", 0, base64) append output; the host reads an image's type
+//   from its bytes.
 // - ("done", 0, writesJson, valueJson?) and ("failed", 0, errorJson) end the script.
 //
 // Evaluates to `(bridge, toolsJson, globalsJson, storeJson, limitsJson) => { settle, run, stalled }`.
@@ -32,6 +33,7 @@
 	const toWellFormed = String.prototype.toWellFormed;
 	const replaceString = String.prototype.replace;
 	const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+	const WHITESPACE = /\s+/g;
 	const ErrorCtor = Error;
 	const TypeErrorCtor = TypeError;
 	const RangeErrorCtor = RangeError;
@@ -295,7 +297,8 @@
 		if (scheme !== "data" || comma === -1 || header.slice(1).every((part) => part.toLowerCase() !== "base64")) {
 			throw new TypeErrorCtor("invalid image output. Pass a base64 data URI instead");
 		}
-		if (!finished) send("image", 0, url.slice(comma + 1), header[0] || "application/octet-stream");
+		// Wrapped base64 arrives with line breaks, which are not part of the data.
+		if (!finished) send("image", 0, apply(replaceString, url.slice(comma + 1), [WHITESPACE, ""]));
 	}
 
 	function exit() {

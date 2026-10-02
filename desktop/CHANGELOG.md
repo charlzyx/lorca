@@ -25,9 +25,11 @@ and the update window shows it.
   that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
   server also stops what it started, such as npx's node; a call you stop is called off at the
   server; servers start side by side, so a slow one holds up no other; a server's new tools reach
-  bots without a reconnect; and a remote server that is busy for a moment is tried again. A
-  sign-in is never sent to another host when a server's address changes, and a plugin's sheet now
-  has Sign Out beside Sign in again.
+  bots without a reconnect; and a remote server that is busy for a moment is tried again. A server
+  whose tool list never ends no longer hangs while it connects, and an image a tool returns that no
+  model takes, such as an SVG, is named instead of failing every later turn of the chat. A bot that
+  calls a tool by a wrong name hears the closest right ones. A sign-in is never sent to another
+  host when a server's address changes, and a plugin's sheet now has Sign Out beside Sign in again.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

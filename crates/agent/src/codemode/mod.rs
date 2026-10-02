@@ -277,8 +277,6 @@ const WIND_DOWN: Duration = Duration::from_secs(10);
 /// arguments. Past the first or the third, the script stops.
 const MAX_OUTPUT_CHARS: usize = 16 * 1024 * 1024;
 const MAX_IMAGES: usize = 10;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
-const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 const MAX_PENDING_CALLS: usize = 1000;
 const MAX_ARGUMENT_CHARS: usize = 8 * 1024 * 1024;
 /// The largest output budget an options line may ask for: the result is a chat row, which must
@@ -449,6 +447,35 @@ impl<'a> Run<'a> {
         self.known.lock().unwrap().get(name).cloned()
     }
 
+    /// Why a call names no tool, with the known tools whose names come closest, after pi:
+    /// `tools.Bash` suggests `tools.bash`, and `tools.github_create_issue`
+    /// `tools.github__create_issue`. A short catalog is listed whole instead.
+    fn unknown_tool(&self, name: &str) -> String {
+        let mut names: Vec<String> = self.known.lock().unwrap().values().map(|entry| to_identifier(entry.tool.name())).collect();
+        names.sort();
+        names.dedup();
+        let comparable = |name: &str| name.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        let wanted = comparable(name);
+        let mut close: Vec<&String> = names.iter().filter(|known| comparable(known) == wanted).collect();
+        if close.is_empty() && !wanted.is_empty() {
+            close = names
+                .iter()
+                .filter(|known| {
+                    let known = comparable(known);
+                    !known.is_empty() && (known.contains(&wanted) || wanted.contains(&known))
+                })
+                .collect();
+        }
+        let mut message = format!("Unknown tool \"{name}\".");
+        if !close.is_empty() {
+            message.push_str(&format!(" Did you mean {}?", close.iter().take(5).map(|known| format!("tools.{known}")).collect::<Vec<_>>().join(", ")));
+        } else if !names.is_empty() && names.len() <= 20 {
+            message.push_str(&format!(" The tools are {}.", names.join(", ")));
+        }
+        message.push_str(" ALL_TOOLS lists every tool, and searchTools(query) finds one by what it does.");
+        message
+    }
+
     async fn resolve(&self, name: &str) -> Option<Entry> {
         if let Some(entry) = self.lookup(name) {
             return Some(entry);
@@ -555,10 +582,10 @@ impl<'a> Run<'a> {
                         }
                         output.push(ContentPart::text(text));
                     }
-                    Some(Event::Image { data, mime_type }) => match check_image(&data, &mime_type, images) {
-                        Ok(()) => {
+                    Some(Event::Image(data)) => match check_image(&data, images) {
+                        Ok(mime_type) => {
                             images += 1;
-                            output.push(ContentPart::Image { data, mime_type });
+                            output.push(ContentPart::Image { data, mime_type: mime_type.into() });
                         }
                         Err(why) => output.push(ContentPart::text(format!("[An image was left out: {why}]"))),
                     },
@@ -628,7 +655,7 @@ impl<'a> Run<'a> {
     async fn call(&self, name: &str, call_id: String, args: Value, record: Option<usize>) -> Reply {
         let started = Instant::now();
         let Some(entry) = self.resolve(name).await else {
-            let message = format!("Unknown tool \"{name}\". Use a name from the declarations, ALL_TOOLS, or searchTools().");
+            let message = self.unknown_tool(name);
             self.update(record, |call| {
                 call.status = CallStatus::Error;
                 call.error = Some(clipped(&message, ERROR_PREVIEW_CHARS));
@@ -856,23 +883,14 @@ fn read_arguments(name: &str, json: Option<&str>, absent: Value) -> Result<Value
     }
 }
 
-/// An image the result can carry: a type every provider takes, valid base64, and not too many or
-/// too large. The error says why it was left out.
-fn check_image(data: &str, mime_type: &str, images: usize) -> Result<(), String> {
+/// The type of an image the result can carry, as its bytes say whatever the script labeled it:
+/// one every provider takes, in valid base64, and not too many or too large. The error says why
+/// it was left out.
+fn check_image(data: &str, images: usize) -> Result<&'static str, String> {
     if images >= MAX_IMAGES {
         return Err(format!("a script's output holds at most {MAX_IMAGES} images"));
     }
-    if !IMAGE_TYPES.contains(&mime_type) {
-        return Err(format!("{mime_type} is not an image type the model takes (PNG, JPEG, GIF, or WebP)"));
-    }
-    let valid = data.len().is_multiple_of(4) && data.bytes().enumerate().all(|(index, byte)| byte.is_ascii_alphanumeric() || byte == b'+' || byte == b'/' || (byte == b'=' && index + 2 >= data.len()));
-    if !valid || data.is_empty() {
-        return Err("its data is not base64".into());
-    }
-    if data.len() / 4 * 3 > MAX_IMAGE_BYTES {
-        return Err(format!("it is over {} MB", MAX_IMAGE_BYTES / (1024 * 1024)));
-    }
-    Ok(())
+    crate::types::inline_image_type(data)
 }
 
 /// A successful script's `store()` writes, from `[[key, json], [key], …]`. Anything else is an
