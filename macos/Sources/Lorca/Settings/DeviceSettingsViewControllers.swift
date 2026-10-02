@@ -262,7 +262,7 @@ final class PluginsSettingsViewController: DevicePaneViewController {
         mcpFootnote.isHidden = false
         mcpSection.title = L("MCP Servers on %@", device.name)
         mcpFootnote.stringValue = L(
-            "Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here, with the lorca mcp command, or in the file itself: Lorca reads it again when it changes.",
+            "Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload.",
             device.name)
         let states = device.plugins.filter(\.isMcpServer).map { "\($0.id):\($0.state.rawValue):\($0.detail)" }
         let key = "\(device.id)|\(states.joined(separator: ","))"
@@ -326,17 +326,40 @@ final class PluginsSettingsViewController: DevicePaneViewController {
             McpServerViewController.present(runner: device, from: self)
         }
         rows.append(add)
-        // The file is there once it holds a server.
-        if device.isThisDevice, !file.servers.isEmpty || file.error != nil {
-            let open = ActionRow(key: "mcp.json", value: file.path, tint: .secondaryLabelColor, actionTitle: L("Open"))
-            open.toolTip = file.path
-            open.onAction = {
-                let url = URL(fileURLWithPath: file.path)
-                if !NSWorkspace.shared.open(url) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-            }
-            rows.append(open)
+        // Reload reads an edit made outside Lorca; Open shows the file here once it is there,
+        // which it is once it holds a server.
+        let opens = device.isThisDevice && (!file.servers.isEmpty || file.error != nil)
+        let fileRow = ActionRow(key: "mcp.json", value: file.path, tint: .secondaryLabelColor, actionTitle: L("Reload"), secondActionTitle: opens ? L("Open") : nil)
+        fileRow.toolTip = file.path
+        fileRow.onAction = { [weak self] in self?.reloadMcpFile(on: device) }
+        fileRow.onSecondAction = {
+            let url = URL(fileURLWithPath: file.path)
+            if !NSWorkspace.shared.open(url) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
         }
+        rows.append(fileRow)
         mcpSection.setRows(rows)
+    }
+
+    /// Has the Runner read its mcp.json again, after an edit made outside Lorca.
+    private func reloadMcpFile(on device: Device) {
+        mcpLoads += 1
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let file = try await self.store.reloadMcpFile(on: device.id)
+                self.mcpFile = file
+                self.mcpFileDeviceID = device.id
+                self.mcpFailure = nil
+            } catch {
+                if let window = self.view.window {
+                    let alert = NSAlert()
+                    alert.messageText = L("Couldn't reload mcp.json")
+                    alert.informativeText = error.localizedDescription
+                    await alert.beginSheetModal(for: window)
+                }
+            }
+            if let current = self.device, current.id == device.id { self.renderMcpServers(on: current) }
+        }
     }
 
     private func setMcpServer(_ server: McpServer, enabled: Bool, on device: Device) {

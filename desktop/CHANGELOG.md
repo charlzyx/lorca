@@ -10,17 +10,19 @@ and the update window shows it.
   the command that runs it or its URL, or paste its JSON from a README or another app's settings,
   and edit, turn off, or remove it. Each server shows how it stands and the tools it offers, with
   Sign in when it asks for one, and every bot on that computer can use it. Lorca keeps them in
-  `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use, and picks up
-  edits you make to the file. Pick another Runner in Settings to manage its servers.
-- `lorca mcp` lists, adds, removes, turns on or off, and signs in to MCP servers from a terminal,
-  and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or
-  Gemini CLI have on the computer.
+  `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use; after
+  editing the file by hand, click Reload. Servers that offer resources, such as files or records,
+  give bots tools to list and read them. Pick another Runner in Settings to manage its servers.
+- `lorca mcp` lists, adds, removes, turns on or off, reloads, and signs in to or out of MCP servers
+  from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor,
+  Windsurf, VS Code, or Gemini CLI have on the computer.
 - Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
   that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
   server also stops what it started, such as npx's node; a call you stop is called off at the
-  server; servers start side by side, so a slow one holds up no other; and a server's new tools
-  reach bots without a reconnect. A sign-in is never sent to another host when a server's address
-  changes.
+  server; servers start side by side, so a slow one holds up no other; a server's new tools reach
+  bots without a reconnect; and a remote server that is busy for a moment is tried again. A
+  sign-in is never sent to another host when a server's address changes, and a plugin's sheet now
+  has Sign Out beside Sign in again.
 - Custom providers: Add Provider… in Settings' Providers pane adds OpenAI, OpenRouter, Gemini,
   Groq, Together AI, Ollama, LM Studio, or any other server that speaks OpenAI's Chat Completions
   or Responses API or Anthropic's Messages API, such as a gateway or a model server on your

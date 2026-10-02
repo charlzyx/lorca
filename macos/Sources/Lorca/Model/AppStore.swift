@@ -768,6 +768,13 @@ final class AppStore {
         _ = try await client.request("plugins.connect", ["runner_id": runnerID, "plugin_id": pluginID])
     }
 
+    /// Forgets a plugin server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// plugin's next use asks for a sign-in again.
+    func signOutPlugin(_ pluginID: String, server: String, on runnerID: Device.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("plugins.sign_out", ["runner_id": runnerID, "plugin_id": pluginID, "server": server])
+    }
+
     // MARK: - MCP servers
 
     /// The demo's mcp.json files, by Runner.
@@ -882,6 +889,35 @@ final class AppStore {
 
     /// Connects a server and waits for it: from scratch (`fresh`), or taking a connection it has
     /// or one under way. Its state says how it went.
+    /// Has a Runner read its mcp.json again, after an edit made outside Lorca, and answers the file
+    /// as it reads now.
+    func reloadMcpFile(on runnerID: Device.ID) async throws -> McpFile {
+        if isMock { return try await mcpServers(on: runnerID) }
+        return McpFile(json: try await mcpReply("mcp.reload", ["runner_id": runnerID]))
+    }
+
+    /// Forgets a remote server's sign-in on its Runner. Nothing is revoked at the server; the
+    /// server's next use asks for a sign-in again.
+    func signOutMcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            var server = servers[index]
+            server.isSignedIn = false
+            if var status = server.status {
+                status.state = .needsAuth
+                status.detail = "Sign in"
+                server.status = status
+            }
+            servers[index] = server
+            setMockMcpServers(servers, on: runnerID)
+            return server
+        }
+        return try mcpServer(in: try await mcpReply("mcp.sign_out", ["runner_id": runnerID, "name": name]))
+    }
+
     func reconnectMcpServer(_ name: String, fresh: Bool, on runnerID: Device.ID) async throws -> McpServer {
         if isMock {
             try await Task.sleep(nanoseconds: 900_000_000)

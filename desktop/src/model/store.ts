@@ -929,6 +929,13 @@ export class AppStore {
     await this.request("plugins.connect", { runner_id: runnerID, plugin_id: pluginID });
   }
 
+  /** Forgets a plugin server's sign-in on its Runner. Nothing is revoked at the server; the
+   * plugin's next use asks for a sign-in again. */
+  async signOutPlugin(pluginID: string, runnerID: string, server: string): Promise<void> {
+    if (this.isMock) return;
+    await this.request("plugins.sign_out", { runner_id: runnerID, plugin_id: pluginID, server });
+  }
+
   // MARK: - MCP servers
 
   /** The demo's mcp.json files, by Runner. */
@@ -1024,6 +1031,26 @@ export class AppStore {
       return this.mcpServer(name, runnerID);
     }
     return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.reconnect", { runner_id: runnerID, name, fresh })).server);
+  }
+
+  /** Reads the Runner's mcp.json again, after an edit made outside Lorca, and answers the file as
+   * it reads now. */
+  async reloadMcpServers(runnerID: string): Promise<McpFile> {
+    if (this.isMock) return this.mcpServers(runnerID);
+    return toMcpFile(await this.request("mcp.reload", { runner_id: runnerID }));
+  }
+
+  /** Forgets a remote server's sign-in on its Runner; its next use asks for one again. */
+  async signOutMcpServer(runnerID: string, name: string): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const server = servers.find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      const signedOut: McpServer = { ...server, signedIn: false, status: server.status && { ...server.status, state: "needs_auth", detail: "Sign in" } };
+      this.setMockMcpServers(runnerID, servers.map((each) => (each.name === name ? signedOut : each)));
+      return signedOut;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.sign_out", { runner_id: runnerID, name })).server);
   }
 
   /** The servers pasted JSON holds, in any app's spelling; the CLI on this computer reads it. */

@@ -1243,7 +1243,29 @@ mod runner {
                     plugin_of(&store, server).map(|plugin| plugin.manifest.id.clone()).ok_or_else(|| server.problem().unwrap_or_else(|| format!("{name} is turned off.")))?
                 };
                 let started = super::super::mcp::connect_oauth(app, &id, SERVER, None).await?;
+                // `wait` answers once the sign-in has ended, as `lorca mcp sign-in` waits.
+                if let (true, Some(done)) = (body["wait"] == true, started.done) {
+                    let deadline = super::super::sign_in::TIMEOUT + std::time::Duration::from_secs(30);
+                    match tokio::time::timeout(deadline, done).await {
+                        Ok(Ok(Ok(()))) => {}
+                        Ok(Ok(Err(error))) => return Err(error),
+                        _ => return Err(format!("The {name} sign-in did not finish.")),
+                    }
+                    return get(app, &name);
+                }
                 Ok(json!({ "message": started.message }))
+            }
+            // Forgets the sign-in, even of a server that is off. Nothing is revoked at the server.
+            "mcp.sign_out" => {
+                let name = name()?;
+                let id = app.plugins.lock().unwrap().mcp.server(&name).map(|server| server.id.clone()).ok_or_else(|| format!("No server named {name} in mcp.json."))?;
+                super::super::sign_out(app, &id, Some(SERVER))?;
+                get(app, &name)
+            }
+            // The file as it is now, after an edit made outside Lorca.
+            "mcp.reload" => {
+                reload(app);
+                Ok(list(app))
             }
             other => Err(format!("Unknown request {other}")),
         }
@@ -1259,94 +1281,14 @@ mod runner {
         settle(app, changes);
     }
 
-    /// Follows the file while `lorca serve` runs, through the system's file events: an edit by
-    /// hand, by an editor, or by another `lorca` reaches the Runner as soon as it is written.
-    fn watch(app: &Arc<App>) {
-        let path = path(app);
-        let (changed, mut heard) = tokio::sync::mpsc::unbounded_channel();
-        let watcher = match follow(&path, move || {
-            let _ = changed.send(());
-        }) {
-            Ok(watcher) => watcher,
-            Err(error) => {
-                tracing::warn!(%error, "cannot follow mcp.json: an edit made outside Lorca reaches it when lorca serve starts again");
-                return;
-            }
-        };
-        let app = app.clone();
-        tokio::spawn(async move {
-            // The system stops telling once the watcher is dropped.
-            let _watcher = watcher;
-            while heard.recv().await.is_some() {
-                // An editor may write in more than one step; read what it settled on.
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                while heard.try_recv().is_ok() {}
-                let unchanged = {
-                    let store = app.plugins.lock().unwrap();
-                    std::fs::read(&path).ok() == store.mcp.bytes
-                };
-                if !unchanged {
-                    reload(&app);
-                }
-            }
-        });
-    }
-
-    /// Calls `changed`, on the watcher's own thread, whenever the system says `path` may have been
-    /// written, created, renamed, or removed, for as long as the watcher it answers with lives. It
-    /// follows the file's folder, since an editor that saves by renaming a new file over the old
-    /// one leaves a watch on the file itself behind, and for a link, the folder of what it names.
-    pub(super) fn follow(path: &Path, changed: impl Fn() + Send + 'static) -> notify::Result<notify::RecommendedWatcher> {
-        use notify::Watcher;
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let mut folders = vec![(dir.clone(), path.file_name().map(ToOwned::to_owned))];
-        if let Ok(link) = std::fs::read_link(path) {
-            let target = dir.join(link);
-            if let Some(folder) = target.parent() {
-                folders.push((folder.to_path_buf(), target.file_name().map(ToOwned::to_owned)));
-            }
-        }
-        let names: Vec<std::ffi::OsString> = folders.iter().filter_map(|(_, name)| name.clone()).collect();
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            let Ok(event) = event else { return };
-            // A full queue, or FSEvents giving up on details, says to look again.
-            let ours = event.need_rescan() || event.paths.iter().any(|path| path.file_name().is_some_and(|name| names.iter().any(|ours| ours == name)));
-            if ours && writes(&event.kind) {
-                changed();
-            }
-        })?;
-        for (index, (folder, _)) in folders.iter().enumerate() {
-            match watcher.watch(folder, notify::RecursiveMode::NonRecursive) {
-                Ok(()) => {}
-                // What a link names may be gone; the link's own folder still hears it come back.
-                Err(error) if index > 0 => tracing::warn!(%error, folder = %folder.display(), "cannot follow the folder mcp.json links to"),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(watcher)
-    }
-
-    /// Whether an event may have changed a file's bytes. Opening and reading it, which inotify
-    /// reports too and every reload does, or touching its metadata does not, so a reload never
-    /// hears itself.
-    fn writes(kind: &notify::EventKind) -> bool {
-        use notify::event::{AccessKind, AccessMode, EventKind, ModifyKind};
-        match kind {
-            EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
-            EventKind::Access(_) | EventKind::Modify(ModifyKind::Metadata(_)) => false,
-            _ => true,
-        }
-    }
-
     /// At `lorca serve`'s start: a server added while Lorca was not running connects once to list
-    /// its tools, and the file is followed from then on.
+    /// its tools. An edit to the file made outside Lorca waits for `mcp.reload`.
     pub fn start(app: &Arc<App>) {
         SERVING.store(true, Ordering::Relaxed);
         let ids: Vec<String> = app.plugins.lock().unwrap().installed().iter().filter(|p| p.source == SOURCE).map(|p| p.manifest.id.clone()).collect();
         for id in ids {
             super::super::mcp::prefetch_tools(app, &id);
         }
-        watch(app);
     }
 }
 
@@ -1562,74 +1504,5 @@ mod tests {
         let gone = store.take_mcp(McpFile::parse(b"{}".to_vec()));
         assert_eq!(gone.gone, ["docs"]);
         assert!(store.installed().is_empty() && store.mcp.error.is_none());
-    }
-
-    /// Waits for the watcher to say the file changed, then lets the rest of that change's events
-    /// arrive, so the next step hears only what it does.
-    #[cfg(feature = "runner")]
-    fn heard(events: &std::sync::mpsc::Receiver<()>) -> bool {
-        let heard = events.recv_timeout(std::time::Duration::from_secs(10)).is_ok();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        while events.try_recv().is_ok() {}
-        heard
-    }
-
-    #[cfg(feature = "runner")]
-    #[test]
-    fn the_systems_events_say_when_the_file_changed() {
-        let dir = std::env::temp_dir().join(format!("lorca-mcp-watch-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("mcp.json");
-        std::fs::write(&path, "{}").unwrap();
-        // FSEvents can still hand a new watch a change made just before it began.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let (tx, events) = std::sync::mpsc::channel();
-        let watcher = runner::follow(&path, move || {
-            let _ = tx.send(());
-        })
-        .unwrap();
-
-        // Reading the file, as every reload does, and writing another file in its folder (the
-        // database's, say) are not changes to it.
-        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
-        std::fs::write(dir.join("lorca.sqlite3-wal"), "x").unwrap();
-        assert!(events.recv_timeout(std::time::Duration::from_millis(700)).is_err(), "only a change to mcp.json is heard");
-
-        std::fs::write(&path, r#"{"mcpServers": {}}"#).unwrap();
-        assert!(heard(&events), "a write");
-        // An editor that saves by renaming a new file over the old one.
-        std::fs::write(dir.join("mcp.json.tmp"), r#"{"mcpServers": {"a": {"command": "x"}}}"#).unwrap();
-        std::fs::rename(dir.join("mcp.json.tmp"), &path).unwrap();
-        assert!(heard(&events), "a save by rename");
-        std::fs::remove_file(&path).unwrap();
-        assert!(heard(&events), "a removal");
-        std::fs::write(&path, "{}").unwrap();
-        assert!(heard(&events), "the file made again");
-
-        drop(watcher);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[cfg(all(feature = "runner", unix))]
-    #[test]
-    fn a_linked_file_is_followed_where_it_lives() {
-        let root = std::env::temp_dir().join(format!("lorca-mcp-link-{}", uuid::Uuid::new_v4()));
-        let (home, dotfiles) = (root.join("home"), root.join("dotfiles"));
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&dotfiles).unwrap();
-        std::fs::write(dotfiles.join("lorca-mcp.json"), "{}").unwrap();
-        let path = home.join("mcp.json");
-        std::os::unix::fs::symlink("../dotfiles/lorca-mcp.json", &path).unwrap();
-        let (tx, events) = std::sync::mpsc::channel();
-        let watcher = runner::follow(&path, move || {
-            let _ = tx.send(());
-        })
-        .unwrap();
-
-        std::fs::write(dotfiles.join("lorca-mcp.json"), r#"{"mcpServers": {}}"#).unwrap();
-        assert!(heard(&events), "a write to the file the link names");
-
-        drop(watcher);
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -610,6 +610,37 @@ pub fn set_variables(app: &Arc<App>, id: &str, variables: &BTreeMap<String, Stri
     Ok(status)
 }
 
+/// Forgets the sign-in of a plugin's OAuth servers, or of the one named: the saved tokens and a
+/// device code waiting for one. A server that is off is no plugin now, but its sign-in is
+/// forgotten all the same. Nothing is revoked at the server, which honors a token until it
+/// expires; the next use asks for a sign-in again.
+pub fn sign_out(app: &Arc<App>, id: &str, server: Option<&str>) -> Result<Option<PluginStatus>, String> {
+    let status = {
+        let mut store = app.plugins.lock().unwrap();
+        let servers: Vec<String> = match store.get(id) {
+            Some(plugin) => plugin
+                .manifest
+                .servers
+                .iter()
+                .filter(|(name, spec)| server.is_none_or(|server| server == name.as_str()) && matches!(spec, ServerSpec::Http { auth: Some(AuthSpec::Oauth { .. }), .. }))
+                .map(|(name, _)| name.clone())
+                .collect(),
+            None => server.map(|server| vec![server.to_string()]).unwrap_or_default(),
+        };
+        for name in &servers {
+            store.set_secret(id, &format!("oauth:{name}"), None);
+        }
+        store.codes.remove(id);
+        store.notes.remove(id);
+        store.save(&app.config).map_err(|e| e.to_string())?;
+        store.status(id)
+    };
+    #[cfg(feature = "runner")]
+    app.mcp.forget(id);
+    announce(app);
+    Ok(status)
+}
+
 /// Keeps OAuth tokens for a server, or drops them.
 pub fn set_oauth(app: &Arc<App>, id: &str, server: &str, tokens: Option<Value>) -> Result<(), String> {
     let mut store = app.plugins.lock().unwrap();
@@ -816,6 +847,7 @@ pub async fn serve_request(app: &Arc<App>, verb: &str, body: &Value, requested_b
         }
         "plugins.sign_in.cancel" => mcp::cancel_sign_in(app, &plugin_id()?, body["sign_in"].as_str().ok_or("missing sign_in")?),
         "plugins.detail" => detail(app, &plugin_id()?),
+        "plugins.sign_out" => Ok(json!(sign_out(app, &plugin_id()?, body["server"].as_str())?)),
         "permission.answer" => {
             let message_id = body["message_id"].as_str().ok_or("missing message_id")?;
             let decision = body["decision"].as_str().and_then(mcp::Decision::parse).ok_or("decision is allow, always, or deny")?;

@@ -162,8 +162,18 @@ final class PluginViewController: SheetViewController {
                     key: key,
                     value: server.signedIn ? L("Signed in") : L("Not signed in"),
                     tint: server.signedIn ? .systemGreen : .secondaryLabelColor,
-                    actionTitle: server.signedIn ? L("Sign in again") : L("Sign in"))
-                row.onAction = { [weak self] in self?.connect() }
+                    actionTitle: server.signedIn ? L("Sign Out") : L("Sign in"),
+                    secondActionTitle: server.signedIn ? L("Sign in again") : nil)
+                let signedIn = server.signedIn
+                let serverName = server.name
+                row.onAction = { [weak self] in
+                    if signedIn {
+                        self?.signOut(server: serverName)
+                    } else {
+                        self?.connect()
+                    }
+                }
+                row.onSecondAction = { [weak self] in self?.connect() }
                 return row
             })
 
@@ -221,6 +231,20 @@ final class PluginViewController: SheetViewController {
                 self.load()
             } catch {
                 self.alert(L("Couldn't start the sign-in"), error.localizedDescription)
+            }
+        }
+    }
+
+    /// Forgets a server's sign-in on the Runner; the plugin's next use asks again.
+    private func signOut(server: String) {
+        let name = runner.plugins.first { $0.id == pluginID }?.name ?? pluginID
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.store.signOutPlugin(self.pluginID, server: server, on: self.runner.id)
+                self.load()
+            } catch {
+                self.alert(L("Couldn't sign out of %@", name), error.localizedDescription)
             }
         }
     }

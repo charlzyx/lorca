@@ -62,9 +62,9 @@ Any [MCP](https://modelcontextprotocol.io) server can be a plugin: a command the
 
 **Settings › Plugins** lists them under **MCP Servers** for the Runner picked in the toolbar. **Add Server…** takes a name and either the command (with its environment variables) or the URL (with its headers). Paste the JSON a server's README gives, or a whole `mcpServers` block from Claude Desktop or Cursor, into any field, and the sheet reads it; several servers are added at once. Once saved, the sheet shows whether the server started and the tools it offered, with **Reconnect**, a switch that turns it off, and **Remove**. A server you turn off keeps its settings and sign-in, and no bot sees it.
 
-A remote server that needs an account asks for it when Lorca first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
+A remote server that needs an account asks for it when Lorca first connects: the server reads **Needs a sign-in**, and **Sign in**, on its sheet or on a card a bot posts, signs in with OAuth as for a marketplace plugin, and **Sign Out** on its sheet forgets the sign-in. A server that takes a token instead gets it in a header, such as `Authorization: Bearer …`.
 
-The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. Lorca reads it again as soon as you save it:
+The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the format Claude Desktop, Cursor, and Claude Code use, so you can copy one from their configs or edit the file by hand. After editing it, click **Reload** on its row in **Settings › Plugins**, or run `lorca mcp reload`:
 
 ```json
 {
@@ -90,4 +90,4 @@ The servers live in `mcp.json` in Lorca's folder (`~/.lorca/mcp.json`), in the f
 
 `${VAR}` reads a variable from your shell's environment, and `${VAR:-default}` falls back to the default; a header or variable whose value is not set is left out. `description` tells bots what the server is for, `cwd` is the folder a command starts in, and `"oauth": false` stops a remote server from signing in. Lorca keeps the fields it does not know, and the order you wrote.
 
-Bots call a server's tools by its name, `notes__read_file`, and reading tools run at once while the rest go through [Auto-review](/docs/auto-review), as for any plugin. The [command line](/docs/cli#mcp-servers) manages the same file: `lorca mcp add`, `list`, `get`, `remove`, and `import` from another app.
+Bots call a server's tools by its name, `notes__read_file`, and reading tools run at once while the rest go through [Auto-review](/docs/auto-review), as for any plugin. A server that offers resources, such as files or records, also gets tools to list and read them, `notes__list_mcp_resources` and `notes__read_mcp_resource`; binary resources are saved to a file the bot can open. The [command line](/docs/cli#mcp-servers) manages the same file: `lorca mcp add`, `list`, `get`, `remove`, `reload`, `sign-out`, and `import` from another app.

@@ -556,10 +556,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let runner_id = string(&params, "runner_id")?;
             crate::plugins::on_runner(app, &runner_id, "plugins.detail", json!({ "plugin_id": string(&params, "plugin_id")? })).await
         }
+        // Forgets a plugin's sign-in on its Runner: every OAuth server's, or `server`'s.
+        "plugins.sign_out" => {
+            let runner_id = string(&params, "runner_id")?;
+            crate::plugins::on_runner(app, &runner_id, "plugins.sign_out", json!({ "plugin_id": string(&params, "plugin_id")?, "server": params["server"] })).await
+        }
         // A Runner's mcp.json: its servers, here or through a sealed request to that Runner.
         // `mcp.parse` reads pasted JSON on this Device.
         "mcp.parse" => crate::plugins::mcp_json::parse_reply(params["text"].as_str().unwrap_or_default()),
-        "mcp.list" | "mcp.get" | "mcp.save" | "mcp.remove" | "mcp.set_enabled" | "mcp.reconnect" | "mcp.sign_in" => {
+        "mcp.list" | "mcp.get" | "mcp.save" | "mcp.remove" | "mcp.set_enabled" | "mcp.reconnect" | "mcp.sign_in" | "mcp.sign_out" | "mcp.reload" => {
             let runner_id = opt_string(&params, "runner_id");
             // Boxed: a connection's future is large, and a caller may hold this one on its stack.
             Box::pin(crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), method, params)).await

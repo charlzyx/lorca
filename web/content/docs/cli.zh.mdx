@@ -48,7 +48,7 @@ irm https://lorca.app/install-cli.ps1 | iex
 
 ## MCP 服务器
 
-`lorca mcp` 编辑 Lorca 文件夹里的 `mcp.json`，也就是这台电脑上所有智能体都能使用的[MCP 服务器](/zh/docs/plugins#你自己的-mcp-服务器)。`lorca serve` 正在运行时，改动会立即生效；没有运行时，下次 `lorca serve` 会读取这个文件。
+`lorca mcp` 编辑 Lorca 文件夹里的 `mcp.json`，也就是这台电脑上所有智能体都能使用的[MCP 服务器](/zh/docs/plugins#你自己的-mcp-服务器)。`lorca serve` 正在运行时，改动会立即生效；没有运行时，下次 `lorca serve` 会读取这个文件。手动编辑文件后，运行 `lorca mcp reload`。
 
 | 命令 | 作用 |
 | --- | --- |
@@ -60,6 +60,8 @@ irm https://lorca.app/install-cli.ps1 | iex
 | `lorca mcp remove <name>` | 移除一个服务器，连同它的登录信息。 |
 | `lorca mcp enable <name>`、`disable <name>` | 开启或关闭一个服务器。关闭后，智能体看不到它，它也不会启动。 |
 | `lorca mcp sign-in <name>` | 在这台电脑的浏览器里登录一个要求登录的远程服务器。 |
+| `lorca mcp sign-out <name>` | 忘掉一个远程服务器的登录。下次使用时它会再次要求登录。 |
+| `lorca mcp reload` | 手动编辑 `mcp.json` 之后，让正在运行的 `lorca serve` 重新读取它。 |
 | `lorca mcp import [file]` | 从其他应用的配置中添加服务器：Claude Desktop、Claude Code、Cursor、Windsurf、VS Code 或 Gemini CLI，或者你指定的文件。 |
 
 ```bash

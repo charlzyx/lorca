@@ -48,7 +48,7 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 
 ## MCP servers
 
-`lorca mcp` edits `mcp.json` in Lorca's folder, the [MCP servers](/docs/plugins#your-own-mcp-servers) every bot on this computer can use. With `lorca serve` running, the change reaches it at once; without it, the next `lorca serve` reads the file.
+`lorca mcp` edits `mcp.json` in Lorca's folder, the [MCP servers](/docs/plugins#your-own-mcp-servers) every bot on this computer can use. With `lorca serve` running, the change reaches it at once; without it, the next `lorca serve` reads the file. After editing the file by hand, run `lorca mcp reload`.
 
 | Command | What it does |
 | --- | --- |
@@ -60,6 +60,8 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `lorca mcp remove <name>` | Removes a server, with its sign-in. |
 | `lorca mcp enable <name>`, `disable <name>` | Turns a server on or off. Off, bots don't see it and it never starts. |
 | `lorca mcp sign-in <name>` | Signs in to a remote server that asks for it, in this computer's browser. |
+| `lorca mcp sign-out <name>` | Forgets a remote server's sign-in. Its next use asks for one again. |
+| `lorca mcp reload` | Has the running `lorca serve` read `mcp.json` again, after you edit the file by hand. |
 | `lorca mcp import [file]` | Adds the servers from another app's config: Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI, or the file you name. |
 
 ```bash

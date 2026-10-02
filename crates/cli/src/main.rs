@@ -163,6 +163,10 @@ enum McpCommand {
     Disable { name: String },
     /// Sign in to a remote server that asks for it, in this computer's browser.
     SignIn { name: String },
+    /// Forget the sign-in of a remote server. Its next use asks for a sign-in again.
+    SignOut { name: String },
+    /// Read mcp.json again after editing it by hand, so the running lorca serve takes the change.
+    Reload,
     /// Add the servers from another app's MCP config: Claude Desktop, Claude Code, Cursor,
     /// Windsurf, VS Code, or Gemini CLI. With no file, from every one of them this computer has.
     Import { file: Option<PathBuf> },
@@ -435,24 +439,28 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             Ok(())
         }
         McpCommand::SignIn { name } => {
-            let (started, _) = mcp_call(app, "mcp.sign_in", json!({ "name": name })).await?;
-            println!("{}", started["message"].as_str().unwrap_or("Opened the sign-in page."));
-            eprintln!("Finish signing in in the browser…");
-            // The sign-in ends in the process that started it: wait here for how it went.
-            let deadline = std::time::Instant::now() + lorca::plugins::sign_in::TIMEOUT + std::time::Duration::from_secs(10);
-            while std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let (got, _) = mcp_call(app, "mcp.get", json!({ "name": name })).await?;
-                let server = &got["server"];
-                if server["signed_in"] == true && server["status"]["state"] != "connecting" {
-                    println!("✔ Signed in to {name}.");
-                    return Ok(());
-                }
-                if server["status"]["state"] == "error" {
-                    anyhow::bail!("{}", server["status"]["detail"].as_str().unwrap_or("The sign-in failed."));
-                }
+            eprintln!("Opening the {name} sign-in page in the browser. Finish signing in there…");
+            // The sign-in ends in the process that started it, which answers once it has.
+            mcp_call(app, "mcp.sign_in", json!({ "name": name, "wait": true })).await?;
+            println!("✔ Signed in to {name}.");
+            Ok(())
+        }
+        McpCommand::SignOut { name } => {
+            mcp_call(app, "mcp.sign_out", json!({ "name": name })).await?;
+            println!("Signed out of {name}. Its next use asks for a sign-in again.");
+            Ok(())
+        }
+        McpCommand::Reload => {
+            let (list, live) = mcp_call(app, "mcp.reload", json!({})).await?;
+            if live {
+                println!("lorca serve read mcp.json again.");
+            } else {
+                println!("lorca serve is not running; it reads mcp.json when it starts.");
             }
-            anyhow::bail!("Timed out waiting for the browser.")
+            if let Some(error) = list["error"].as_str() {
+                anyhow::bail!("{error}");
+            }
+            Ok(())
         }
         McpCommand::Import { file } => mcp_import(app, file).await,
     }

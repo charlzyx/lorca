@@ -515,7 +515,7 @@ function PluginsPane() {
         <McpServersSection device={device()!} />
         <Footnote
           text={L(
-            "Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here, with the lorca mcp command, or in the file itself: Lorca reads it again when it changes.",
+            "Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload.",
             device()!.name,
           )}
         />
@@ -524,8 +524,9 @@ function PluginsPane() {
   );
 }
 
-/** A Runner's mcp.json: each server with how it stands and a switch, a row to add one, and on this
- * computer, the file itself. The list follows the servers' states in the Runner's roster. */
+/** A Runner's mcp.json: each server with how it stands and a switch, a row to add one, and the file
+ * itself, with Reload for an edit made outside Lorca (and on this computer, Open). The list follows
+ * the servers' states in the Runner's roster. */
 function McpServersSection(props: { device: Device }) {
   const [file, setFile] = createSignal<McpFile | null>(null);
   const [failure, setFailure] = createSignal<string | null>(null);
@@ -550,8 +551,8 @@ function McpServersSection(props: { device: Device }) {
       void load(key.split("|")[0]!);
     },
   );
-  // This computer's file, which the CLI reads again on every change, is asked again whenever the
-  // CLI says something changed: an edit that broke it moves no server's state.
+  // This computer's file is asked again whenever the CLI says something changed, as a reload
+  // from a terminal (`lorca mcp reload`) does: a file that no longer reads moves no server's state.
   onSettled(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const stop = onStoreEvent((event) => {
@@ -585,6 +586,17 @@ function McpServersSection(props: { device: Device }) {
       await files.showInFolder(path);
     }
   };
+  // The Runner reads the file only when asked, after an edit made outside Lorca.
+  const reload = async () => {
+    const runnerID = props.device.id;
+    loads += 1;
+    try {
+      const next = await store.reloadMcpServers(runnerID);
+      if (props.device.id === runnerID) setFile(next);
+    } catch (error) {
+      void alert({ message: L("Couldn't reload mcp.json"), informative: errorText(error) });
+    }
+  };
   return (
     <Section title={L("MCP Servers on %@", props.device.name)} style="heading">
       <Show when={file()} fallback={<KeyValueRow label={failure() ?? L("Loading…")} value="" tint={failure() ? "var(--red)" : "var(--label-2)"} />}>
@@ -604,10 +616,18 @@ function McpServersSection(props: { device: Device }) {
               <NoteRow text={L("No MCP servers yet. Add one by the command that starts it or its URL, or paste the JSON from its README.")} />
             </Show>
             <ActionRow label={L("Custom")} tint="var(--label-2)" actionTitle={L("Add Server…")} onAction={() => void presentMcpServer(props.device)} />
-            {/* The file is there once it holds a server. */}
-            <Show when={props.device.isThisDevice && (current().servers.length > 0 || current().error)}>
-              <ActionRow label="mcp.json" value={current().path} tint="var(--label-2)" monospaced tooltip={current().path} actionTitle={L("Open")} onAction={() => void openFile(current().path)} />
-            </Show>
+            {/* Open once the file is there, which it is once it holds a server. */}
+            <ActionRow
+              label="mcp.json"
+              value={current().path}
+              tint="var(--label-2)"
+              monospaced
+              tooltip={current().path}
+              actionTitle={L("Reload")}
+              onAction={() => void reload()}
+              secondActionTitle={props.device.isThisDevice && (current().servers.length > 0 || current().error) ? L("Open") : undefined}
+              onSecondAction={() => void openFile(current().path)}
+            />
           </>
         )}
       </Show>

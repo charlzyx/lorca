@@ -389,8 +389,9 @@ final class McpServerViewController: SheetViewController {
         }
         var rows: [NSView] = [stateRow]
         if server.signsIn, server.isSignedIn, !server.needsSignIn {
-            let account = ActionRow(key: L("Account"), value: L("Signed in"), tint: .systemGreen, actionTitle: L("Sign in again"))
-            account.onAction = { [weak self] in self?.signIn() }
+            let account = ActionRow(key: L("Account"), value: L("Signed in"), tint: .systemGreen, actionTitle: L("Sign Out"), secondActionTitle: L("Sign in again"))
+            account.onAction = { [weak self] in self?.signOut() }
+            account.onSecondAction = { [weak self] in self?.signIn() }
             rows.append(account)
         }
         if server.problem == nil {
@@ -455,6 +456,23 @@ final class McpServerViewController: SheetViewController {
                 self.load()
             } catch {
                 self.alert(L("Couldn't start the sign-in"), error.localizedDescription)
+            }
+        }
+    }
+
+    /// Forgets the sign-in on the Runner. Nothing is revoked at the server; its next use asks again.
+    private func signOut() {
+        guard let current = saved else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let answered = try await self.store.signOutMcpServer(current.name, on: self.runner.id)
+                guard !self.isClosed else { return }
+                self.saved = answered
+                self.render()
+                self.updateControls()
+            } catch {
+                self.alert(L("Couldn't sign out of %@", current.name), error.localizedDescription)
             }
         }
     }

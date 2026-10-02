@@ -246,6 +246,9 @@ export function ActionRow(props: {
   actionCopied?: boolean;
   /** Gets the click, whose target a menu can pop up under. */
   onAction?: (event: MouseEvent) => void;
+  /** An action before the main one, when the row has two. */
+  secondActionTitle?: string;
+  onSecondAction?: () => void;
 }) {
   return (
     <div class="row action-row" data-label={props.label} title={props.tooltip}>
@@ -253,6 +256,9 @@ export function ActionRow(props: {
       <span class={["row-value", "truncate", { mono: !!props.monospaced, selectable: !!props.monospaced }]} style={props.tint ? { color: props.tint } : undefined}>
         {props.value ?? ""}
       </span>
+      <Show when={props.secondActionTitle}>
+        <LinkButton onClick={() => props.onSecondAction?.()}>{props.secondActionTitle}</LinkButton>
+      </Show>
       <Show when={props.actionTitle}>
         <LinkButton class={props.actionCopied ? "copied" : undefined} onClick={(event) => props.onAction?.(event)}>
           <Show when={props.actionCopied}>

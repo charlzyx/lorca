@@ -561,15 +561,18 @@ final class PopUpRow: NSView {
 }
 
 
-/// Key on the left, a status value on the right, and an inline text action after it.
+/// Key on the left, a status value on the right, and an inline text action after it, with a
+/// second action before that one when the row has two.
 final class ActionRow: NSView {
     private let key: NSTextField
     private let value: NSTextField
     private let button = CopyFeedbackButton()
+    private let secondButton = NSButton()
     var onAction: (() -> Void)?
+    var onSecondAction: (() -> Void)?
 
     /// A monospaced value is something to copy (a sign-in code), so it is also selectable.
-    init(key keyText: String, value valueText: String, tint: NSColor, actionTitle: String?, monospaced: Bool = false) {
+    init(key keyText: String, value valueText: String, tint: NSColor, actionTitle: String?, secondActionTitle: String? = nil, monospaced: Bool = false) {
         key = Build.label(keyText, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
         value = Build.label(
             valueText,
@@ -595,16 +598,34 @@ final class ActionRow: NSView {
         addSubview(key)
         addSubview(value)
         addSubview(button)
-        NSLayoutConstraint.activate([
+        var constraints = [
             heightAnchor.constraint(greaterThanOrEqualToConstant: 32),
             key.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
             key.centerYAnchor.constraint(equalTo: centerYAnchor),
             value.leadingAnchor.constraint(greaterThanOrEqualTo: key.trailingAnchor, constant: 10),
             value.centerYAnchor.constraint(equalTo: centerYAnchor),
-            button.leadingAnchor.constraint(equalTo: value.trailingAnchor, constant: actionTitle == nil ? 0 : 8),
             button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
             button.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+        ]
+        if let secondActionTitle {
+            secondButton.title = secondActionTitle
+            secondButton.isBordered = false
+            secondButton.font = .systemFont(ofSize: 12, weight: .medium)
+            secondButton.contentTintColor = .controlAccentColor
+            secondButton.target = self
+            secondButton.action = #selector(secondTapped)
+            secondButton.translatesAutoresizingMaskIntoConstraints = false
+            secondButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            addSubview(secondButton)
+            constraints += [
+                secondButton.leadingAnchor.constraint(equalTo: value.trailingAnchor, constant: 8),
+                secondButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                button.leadingAnchor.constraint(equalTo: secondButton.trailingAnchor, constant: 10),
+            ]
+        } else {
+            constraints.append(button.leadingAnchor.constraint(equalTo: value.trailingAnchor, constant: actionTitle == nil ? 0 : 8))
+        }
+        NSLayoutConstraint.activate(constraints)
     }
 
     @available(*, unavailable)
@@ -625,6 +646,10 @@ final class ActionRow: NSView {
 
     @objc private func tapped() {
         onAction?()
+    }
+
+    @objc private func secondTapped() {
+        onSecondAction?()
     }
 }
 

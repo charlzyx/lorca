@@ -335,6 +335,18 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
     }
   };
 
+  /** Forgets the sign-in on the Runner. Nothing is revoked at the server; its next use asks again. */
+  const signOut = async () => {
+    const current = saved();
+    if (!current) return;
+    try {
+      const answered = await store.signOutMcpServer(runner.id, current.name);
+      if (!closed) setSaved(answered);
+    } catch (error) {
+      void alert({ message: L("Couldn't sign out of %@", current.name), informative: errorText(error) });
+    }
+  };
+
   const setEnabled = async (on: boolean) => {
     const current = saved();
     if (!current) return;
@@ -447,7 +459,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
         ) : undefined
       }
     >
-      <Show when={saved()}>{(server) => <ServerStatus server={server()} runner={runner} connecting={connecting()} busy={busy()} onReconnect={() => void connect(true)} onSignIn={() => void signIn()} onEnable={(on) => void setEnabled(on)} />}</Show>
+      <Show when={saved()}>{(server) => <ServerStatus server={server()} runner={runner} connecting={connecting()} busy={busy()} onReconnect={() => void connect(true)} onSignIn={() => void signIn()} onSignOut={() => void signOut()} onEnable={(on) => void setEnabled(on)} />}</Show>
       <div class="mcp-mode">
         <Segmented
           label={L("Edit as")}
@@ -622,6 +634,7 @@ function ServerStatus(props: {
   busy: boolean;
   onReconnect: () => void;
   onSignIn: () => void;
+  onSignOut: () => void;
   onEnable: (on: boolean) => void;
 }) {
   const state = () => (props.connecting ? { text: L("Connecting…"), color: "var(--accent)" } : mcpState(props.server));
@@ -653,6 +666,9 @@ function ServerStatus(props: {
             </span>
             <LinkButton disabled={props.busy} onClick={props.onSignIn}>
               {L("Sign in again")}
+            </LinkButton>
+            <LinkButton disabled={props.busy} onClick={props.onSignOut}>
+              {L("Sign Out")}
             </LinkButton>
           </div>
         </Show>

@@ -132,6 +132,16 @@ function PluginSheet(props: { pluginID: string; runner: Device; dismiss: () => v
     }
   };
 
+  /** Forgets a server's sign-in on the Runner; the plugin's next use asks again. */
+  const signOut = async (server: string) => {
+    try {
+      await store.signOutPlugin(props.pluginID, props.runner.id, server);
+      void load();
+    } catch (error) {
+      void alert({ message: L("Couldn't sign out of %@", name), informative: errorText(error) });
+    }
+  };
+
   const confirmRemove = async () => {
     const answer = await alert({
       message: L("Remove %@ from %@?", name, props.runner.name),
@@ -207,8 +217,10 @@ function PluginSheet(props: { pluginID: string; runner: Device; dismiss: () => v
                       label={label()}
                       value={server().signedIn ? L("Signed in") : L("Not signed in")}
                       tint={server().signedIn ? "var(--green)" : "var(--label-2)"}
-                      actionTitle={server().signedIn ? L("Sign in again") : L("Sign in")}
-                      onAction={() => void connect()}
+                      actionTitle={server().signedIn ? L("Sign Out") : L("Sign in")}
+                      onAction={() => void (server().signedIn ? signOut(server().name) : connect())}
+                      secondActionTitle={server().signedIn ? L("Sign in again") : undefined}
+                      onSecondAction={() => void connect()}
                     />
                   }
                 >
