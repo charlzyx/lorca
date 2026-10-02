@@ -896,6 +896,23 @@ final class AppStore {
         return McpFile(json: try await mcpReply("mcp.reload", ["runner_id": runnerID]))
     }
 
+    /// Offers one of a server's tools to bots, or keeps it from them, in the Runner's mcp.json. The
+    /// server keeps its connection.
+    func setMcpTool(_ tool: String, shown: Bool, server name: String, on runnerID: Device.ID) async throws -> McpServer {
+        if isMock {
+            var servers = mockMcpServers(runnerID)
+            guard let index = servers.firstIndex(where: { $0.name == name }) else {
+                throw CLIClient.RequestError(message: L("No server named %@ in mcp.json.", name))
+            }
+            if let toolIndex = servers[index].tools?.firstIndex(where: { $0.name == tool }) {
+                servers[index].tools?[toolIndex].isHidden = !shown
+            }
+            setMockMcpServers(servers, on: runnerID)
+            return servers[index]
+        }
+        return try mcpServer(in: try await mcpReply("mcp.hide_tool", ["runner_id": runnerID, "name": name, "tool": tool, "hidden": !shown]))
+    }
+
     /// Forgets a remote server's sign-in on its Runner. Nothing is revoked at the server; the
     /// server's next use asks for a sign-in again.
     func signOutMcpServer(_ name: String, on runnerID: Device.ID) async throws -> McpServer {

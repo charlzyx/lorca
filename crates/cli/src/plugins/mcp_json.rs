@@ -218,6 +218,10 @@ pub struct ServerConfig {
     pub kind: Kind,
     pub description: String,
     pub enabled: bool,
+    /// Seconds a call may go without an answer or progress (`timeout`).
+    pub timeout: Option<u64>,
+    /// The tools shown or hidden, from `toolExposure` and a hidden `exposure`.
+    pub tools: Vec<super::ToolRule>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -229,12 +233,63 @@ pub enum Kind {
     Http { url: String, headers: Vec<(String, String)>, sse: bool, oauth: Option<OAuth> },
 }
 
-/// A preregistered OAuth client, for a server that registers none on the fly.
+/// How a remote server signs in, when its entry says: a preregistered client for a server that
+/// registers none on the fly, with the redirect it was registered with, the name to register
+/// under, the scopes to ask for, and the authorization server's metadata when discovery is wrong.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OAuth {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub scopes: Vec<String>,
+    pub client_name: Option<String>,
+    pub callback_port: Option<u16>,
+    pub callback_url: Option<String>,
+    pub auth_server_metadata_url: Option<String>,
+}
+
+/// Whether `url` is plain http to this computer, as a redirect a browser comes back to is.
+fn is_loopback_http(url: &reqwest::Url) -> bool {
+    url.scheme() == "http" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+}
+
+/// An entry's `timeout`: seconds, as pi writes it, or milliseconds when it is 1000 or more, as
+/// Gemini CLI writes it.
+fn timeout_of(value: &Json) -> Result<u64, String> {
+    let number = match value {
+        Json::Number(n) => n.as_f64(),
+        Json::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|n| n.is_finite() && *n > 0.0)
+    .ok_or("timeout is a number of seconds.")?;
+    Ok(if number >= 1000.0 { (number / 1000.0).ceil() as u64 } else { number.ceil() as u64 })
+}
+
+/// An entry's `toolExposure` and `exposure`, as pi writes them: `hidden` keeps a tool, or with
+/// `exposure`, every tool not named otherwise, from bots; `codemode`, `deferred`, and `direct` all
+/// show it, since Lorca's bots reach every plugin tool from a script.
+fn tool_rules(entry: &Json) -> Result<Vec<super::ToolRule>, String> {
+    let hidden = |value: &Json, field: &str| match value.as_str() {
+        Some("hidden") => Ok(true),
+        Some("codemode" | "codemode-deferred" | "deferred" | "direct") => Ok(false),
+        _ => Err(format!("{field} is hidden, codemode, deferred, or direct.")),
+    };
+    let mut rules = Vec::new();
+    match entry.get("toolExposure") {
+        Some(Json::Object(fields)) => {
+            for (pattern, value) in fields {
+                rules.push(super::ToolRule { pattern: pattern.clone(), hidden: hidden(value, &format!("toolExposure.{pattern}"))? });
+            }
+        }
+        Some(_) => return Err("toolExposure is an object of tool names and exposures.".into()),
+        None => {}
+    }
+    if let Some(value) = entry.get("exposure") {
+        if hidden(value, "exposure")? {
+            rules.push(super::ToolRule { pattern: "*".into(), hidden: true });
+        }
+    }
+    Ok(rules)
 }
 
 /// The keys of an entry in the order Lorca writes them, after the ones the entry already has.
@@ -450,12 +505,37 @@ impl ServerConfig {
                 Some(Json::Bool(false)) => None,
                 Some(object @ Json::Object(_)) => {
                     let field = |a: &str, b: &str| object.get(a).or_else(|| object.get(b)).and_then(Json::as_str).map(str::to_string).filter(|v| !v.trim().is_empty());
-                    let scopes = match object.get("scopes") {
+                    // `scopes` as a list or a string, or pi's `scope`, a string.
+                    let scopes = match object.get("scopes").or_else(|| object.get("scope")) {
                         Some(Json::String(text)) => text.split_whitespace().map(str::to_string).collect(),
                         Some(list) => strings(list, "oauth.scopes")?,
                         None => Vec::new(),
                     };
-                    Some(OAuth { client_id: field("clientId", "client_id"), client_secret: field("clientSecret", "client_secret"), scopes })
+                    let callback_port = match object.get("callbackPort").or_else(|| object.get("callback_port")) {
+                        Some(value) => Some(scalar(value).and_then(|text| text.parse::<u16>().ok()).filter(|port| *port > 0).ok_or("oauth.callbackPort is a port number.")?),
+                        None => None,
+                    };
+                    let callback_url = field("callbackUrl", "callback_url");
+                    if let Some(callback) = &callback_url {
+                        if !reqwest::Url::parse(callback).is_ok_and(|url| is_loopback_http(&url)) {
+                            return Err("oauth.callbackUrl is http on localhost, 127.0.0.1, or [::1].".into());
+                        }
+                    }
+                    let auth_server_metadata_url = field("authServerMetadataUrl", "auth_server_metadata_url");
+                    if let Some(metadata) = &auth_server_metadata_url {
+                        if !reqwest::Url::parse(metadata).is_ok_and(|url| url.scheme() == "https" || is_loopback_http(&url)) {
+                            return Err("oauth.authServerMetadataUrl is an https URL.".into());
+                        }
+                    }
+                    Some(OAuth {
+                        client_id: field("clientId", "client_id"),
+                        client_secret: field("clientSecret", "client_secret"),
+                        scopes,
+                        client_name: field("clientName", "client_name"),
+                        callback_port,
+                        callback_url,
+                        auth_server_metadata_url,
+                    })
                 }
                 Some(Json::Bool(true)) | None => {
                     // An entry that sends its own credentials signs in with them.
@@ -480,6 +560,8 @@ impl ServerConfig {
             kind,
             description: text("description").unwrap_or_default().trim().to_string(),
             enabled: entry.get("disabled") != Some(&Json::Bool(true)),
+            timeout: entry.get("timeout").map(timeout_of).transpose()?,
+            tools: tool_rules(entry)?,
         })
     }
 
@@ -490,7 +572,9 @@ impl ServerConfig {
     /// The server as a plugin manifest declares one.
     pub fn spec(&self) -> ServerSpec {
         match &self.kind {
-            Kind::Stdio { command, args, env, cwd } => ServerSpec::Stdio { command: command.clone(), args: args.clone(), env: env.iter().cloned().collect(), cwd: cwd.clone() },
+            Kind::Stdio { command, args, env, cwd } => {
+                ServerSpec::Stdio { command: command.clone(), args: args.clone(), env: env.iter().cloned().collect(), cwd: cwd.clone(), timeout: self.timeout }
+            }
             Kind::Http { url, headers, oauth, .. } => ServerSpec::Http {
                 url: url.clone(),
                 headers: headers.iter().cloned().collect(),
@@ -504,7 +588,12 @@ impl ServerConfig {
                     device_authorization_endpoint: None,
                     token_endpoint: None,
                     optional: true,
+                    client_name: oauth.client_name.clone(),
+                    callback_port: oauth.callback_port,
+                    callback_url: oauth.callback_url.clone(),
+                    auth_server_metadata_url: oauth.auth_server_metadata_url.clone(),
                 }),
+                timeout: self.timeout,
             },
         }
     }
@@ -580,7 +669,7 @@ impl FileServer {
                 servers: BTreeMap::from([(SERVER.to_string(), config.spec())]),
                 variables: Vec::new(),
                 skills: Vec::new(),
-                tools: ToolHints::default(),
+                tools: ToolHints { exposure: config.tools.clone(), ..ToolHints::default() },
             },
             source: SOURCE.into(),
             installed_at: 0.0,
@@ -787,9 +876,12 @@ impl Store {
                 fresh.push(plugin);
             }
         }
+        // Which tools a server shows is read as its tools are listed, so a change to that alone
+        // leaves its connection and its tool list as they are.
+        let unhinted = |manifest: &Manifest| Manifest { tools: ToolHints::default(), ..manifest.clone() };
         let changed: Vec<String> = fresh
             .iter()
-            .filter(|plugin| !before.iter().any(|old| old.manifest == plugin.manifest))
+            .filter(|plugin| !before.iter().any(|old| unhinted(&old.manifest) == unhinted(&plugin.manifest)))
             .map(|plugin| plugin.manifest.id.clone())
             .collect();
         let gone: Vec<String> = before
@@ -1112,6 +1204,43 @@ mod runner {
         Ok(())
     }
 
+    /// Shows or hides one of a server's tools from bots, in the entry's `toolExposure` as pi
+    /// writes it: hiding names the tool `hidden`; showing drops that, and names it `codemode` when
+    /// a pattern would still hide it. The tool list stays as it is, so nothing reconnects.
+    pub fn hide_tool(app: &Arc<App>, name: &str, tool: &str, hidden: bool) -> Result<(), String> {
+        let file = current(app)?;
+        let server = file.server(name).ok_or_else(|| format!("No server named {name} in mcp.json."))?;
+        let mut entry = server.entry.clone();
+        let mut exposure = match entry.get("toolExposure") {
+            Some(Json::Object(fields)) => fields.clone(),
+            Some(_) => return Err("toolExposure is an object of tool names and exposures.".into()),
+            None => Vec::new(),
+        };
+        exposure.retain(|(key, _)| key != tool);
+        if hidden {
+            exposure.push((tool.to_string(), Json::String("hidden".into())));
+        } else {
+            let mut probe = entry.clone();
+            probe.set("toolExposure", Json::Object(exposure.clone()));
+            let hints = ToolHints { exposure: tool_rules(&probe)?, ..Default::default() };
+            if hints.hides(tool) {
+                exposure.push((tool.to_string(), Json::String("codemode".into())));
+            }
+        }
+        if exposure.is_empty() {
+            entry.remove("toolExposure");
+        } else {
+            entry.set("toolExposure", Json::Object(exposure));
+        }
+        let mut doc = file.doc.clone();
+        if let Some((_, slot)) = McpFile::entries_mut(&mut doc).iter_mut().find(|(key, _)| key == name) {
+            *slot = entry;
+        }
+        let changes = write(app, &doc)?;
+        settle(app, changes);
+        Ok(())
+    }
+
     /// Connects a server and waits for it, so the apps and `lorca mcp get` show whether it starts
     /// and what it offers. `fresh` drops its connection first, as the apps' Reconnect does;
     /// otherwise a connection it has, or one under way, is the answer. Its state says how it went.
@@ -1226,6 +1355,12 @@ mod runner {
             "mcp.set_enabled" => {
                 let name = name()?;
                 set_enabled(app, &name, body["enabled"].as_bool().ok_or("missing enabled")?)?;
+                get(app, &name)
+            }
+            "mcp.hide_tool" => {
+                let name = name()?;
+                let tool = body["tool"].as_str().filter(|tool| !tool.is_empty()).ok_or("missing tool")?;
+                hide_tool(app, &name, tool, body["hidden"].as_bool().ok_or("missing hidden")?)?;
                 get(app, &name)
             }
             "mcp.reconnect" => {
@@ -1469,6 +1604,74 @@ mod tests {
         assert!(parse_servers("[]").unwrap_err().contains("expected an object"));
         assert!(parse_servers(r#"{"theme": "dark"}"#).unwrap_err().contains("No MCP servers"));
         assert!(parse_servers("").is_err());
+    }
+
+    #[test]
+    fn timeouts_tools_and_sign_in_settings_read_as_pi_writes_them() {
+        let read = |text: &str| ServerConfig::read(&canonical(&json(text)).unwrap());
+        // Seconds as pi writes them, milliseconds as Gemini CLI does.
+        assert_eq!(read(r#"{"command": "x", "timeout": 90}"#).unwrap().timeout, Some(90));
+        assert_eq!(read(r#"{"command": "x", "timeout": 600000}"#).unwrap().timeout, Some(600));
+        assert!(read(r#"{"command": "x", "timeout": 0}"#).unwrap_err().contains("timeout"));
+        assert_eq!(read(r#"{"command": "x", "timeout": 30}"#).unwrap().spec().call_timeout(), std::time::Duration::from_secs(30));
+        assert_eq!(read(r#"{"command": "x"}"#).unwrap().spec().call_timeout(), super::super::CALL_TIMEOUT);
+
+        // An exact name decides first, then the first pattern; a hidden exposure hides the rest.
+        let hints = |text: &str| ToolHints { exposure: read(text).unwrap().tools, ..ToolHints::default() };
+        let github = hints(r#"{"command": "x", "toolExposure": {"get_*": "codemode", "delete_*": "hidden", "delete_draft": "direct"}}"#);
+        assert!(github.hides("delete_repo") && !github.hides("delete_draft") && !github.hides("get_issue") && !github.hides("search"));
+        let only = hints(r#"{"command": "x", "exposure": "hidden", "toolExposure": {"search": "direct"}}"#);
+        assert!(!only.hides("search") && only.hides("anything_else"));
+        assert!(read(r#"{"command": "x", "toolExposure": {"a": "invisible"}}"#).unwrap_err().contains("hidden, codemode"));
+
+        // How a remote server signs in.
+        let config = read(
+            r#"{"url": "https://mcp.example.com/mcp", "oauth": {"clientId": "c", "clientSecret": "${SECRET}", "callbackPort": 8765, "clientName": "Claude Code", "scope": "read write", "authServerMetadataUrl": "https://auth.example.com/.well-known/openid-configuration"}}"#,
+        )
+        .unwrap();
+        let ServerSpec::Http { auth: Some(AuthSpec::Oauth { client_id, client_secret, callback_port, client_name, scopes, auth_server_metadata_url, optional, .. }), .. } = config.spec() else {
+            panic!("an http server that signs in")
+        };
+        assert_eq!((client_id.as_deref(), client_secret.as_deref(), callback_port, client_name.as_deref()), (Some("c"), Some("${SECRET}"), Some(8765), Some("Claude Code")));
+        assert_eq!(scopes, ["read", "write"]);
+        assert!(optional && auth_server_metadata_url.as_deref() == Some("https://auth.example.com/.well-known/openid-configuration"));
+        assert!(read(r#"{"url": "https://x.test/mcp", "oauth": {"callbackUrl": "https://example.com/cb"}}"#).unwrap_err().contains("callbackUrl"));
+        assert!(read(r#"{"url": "https://x.test/mcp", "oauth": {"callbackUrl": "http://localhost:9000/oauth/done"}}"#).is_ok());
+        assert!(read(r#"{"url": "https://x.test/mcp", "oauth": {"authServerMetadataUrl": "http://auth.example.com/meta"}}"#).unwrap_err().contains("https"));
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn a_tool_is_hidden_and_shown_in_the_entrys_tool_exposure() {
+        let home = std::env::temp_dir().join(format!("lorca-mcp-hide-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("mcp.json"), r#"{"mcpServers": {"docs": {"command": "x", "toolExposure": {"delete_*": "hidden"}}}}"#).unwrap();
+        let app = crate::app::App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let exposure = || McpFile::read(&home.join("mcp.json")).server("docs").unwrap().entry.get("toolExposure").map(Value::from).unwrap_or_default();
+        hide_tool(&app, "docs", "search", true).unwrap();
+        assert_eq!(exposure(), serde_json::json!({ "delete_*": "hidden", "search": "hidden" }));
+        // Shown, a tool a pattern still hides is named so the name decides.
+        hide_tool(&app, "docs", "delete_draft", false).unwrap();
+        assert_eq!(exposure(), serde_json::json!({ "delete_*": "hidden", "search": "hidden", "delete_draft": "codemode" }));
+        hide_tool(&app, "docs", "search", false).unwrap();
+        assert_eq!(exposure(), serde_json::json!({ "delete_*": "hidden", "delete_draft": "codemode" }));
+        let store = app.plugins.lock().unwrap();
+        let hints = &store.get("docs").unwrap().manifest.tools;
+        assert!(hints.hides("delete_page") && !hints.hides("delete_draft") && !hints.hides("search"));
+        drop(store);
+        drop(app);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn showing_or_hiding_a_tool_keeps_the_connection() {
+        let mut store = Store::default();
+        let file = |extra: &str| McpFile::parse(format!(r#"{{"mcpServers": {{"docs": {{"command": "x"{extra}}}}}}}"#).into_bytes());
+        assert_eq!(store.take_mcp(file("")).changed, ["docs"]);
+        let hidden = store.take_mcp(file(r#", "toolExposure": {"delete_*": "hidden"}"#));
+        assert!(hidden.any && hidden.changed.is_empty(), "the tools a server shows are read as they are listed");
+        assert!(store.get("docs").unwrap().manifest.tools.hides("delete_page"));
+        assert_eq!(store.take_mcp(file(r#", "timeout": 5"#)).changed, ["docs"], "anything else changes the server");
     }
 
     #[test]

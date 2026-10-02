@@ -88,6 +88,10 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
 }
 ```
 
-`${VAR}` 会读取你的 shell 环境中的变量，`${VAR:-default}` 在变量没有值时使用默认值；值没有设置的请求头或变量会被省略。`description` 告诉智能体这个服务器的用途，`cwd` 是命令启动时所在的文件夹，`"oauth": false` 让远程服务器不要登录。Lorca 会保留它不认识的字段，也会保持你写的顺序。
+`${VAR}` 会读取你的 shell 环境中的变量，`${VAR:-default}` 在变量没有值时使用默认值；值没有设置的请求头或变量会被省略。`description` 告诉智能体这个服务器的用途，`cwd` 是命令启动时所在的文件夹，`timeout` 是一次调用最多可以多少秒没有回应（不设置时为十分钟），`"oauth": false` 让远程服务器不要登录。Lorca 会保留它不认识的字段，也会保持你写的顺序。
+
+想让智能体用不到服务器的某些工具，可以在服务器的表单里关掉它们旁边的开关，也可以像 pi 一样写在 `toolExposure` 里：`{ "delete_*": "hidden", "delete_draft": "codemode" }` 会隐藏名字以 `delete_` 开头的所有工具，`delete_draft` 除外，因为写明的名字优先于模式。`"exposure": "hidden"` 会隐藏 `toolExposure` 没有写到的所有工具。
+
+不支持即时注册应用的服务器，可以在 `oauth` 里使用你在它那里注册的应用：`clientId`、`clientSecret`（可以写成 `${SECRET}`），以及注册时填写的 `callbackPort` 或 `callbackUrl`，这样的登录会在 Runner 自己的浏览器里打开。`clientName` 让 Lorca 用另一个名字注册，用于只接受它认识的名字的服务器；`scope` 请求更多权限；服务器指错授权服务器时，`authServerMetadataUrl` 指向正确的那个。服务器回复某次调用需要比当前登录更多的权限时，会请你重新登录，一并授予这些权限。
 
 智能体按服务器的名称调用它的工具，比如 `notes__read_file`。读取类工具立即执行，其余的和其他插件一样要经过[自动审查](/zh/docs/auto-review)。提供资源（比如文件或记录）的服务器还会多出列出和读取资源的工具 `notes__list_mcp_resources` 和 `notes__read_mcp_resource`；二进制资源会存成文件，智能体可以打开。[命令行](/zh/docs/cli#mcp-服务器)管理的也是同一个文件：`lorca mcp add`、`list`、`get`、`remove`、`reload`、`sign-out`，以及从其他应用 `import`。

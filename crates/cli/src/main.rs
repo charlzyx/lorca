@@ -145,6 +145,9 @@ enum McpCommand {
         /// What the server is for, which bots read beside its tools.
         #[usage(long)]
         description: Option<String>,
+        /// Seconds a call may go without an answer or progress; ten minutes when unset.
+        #[usage(long)]
+        timeout: Option<u64>,
         /// The command and its arguments, or the URL.
         #[usage(double_dash = "automatic")]
         target: Vec<String>,
@@ -165,6 +168,10 @@ enum McpCommand {
     SignIn { name: String },
     /// Forget the sign-in of a remote server. Its next use asks for a sign-in again.
     SignOut { name: String },
+    /// Keep one of a server's tools from bots: its name, or a pattern ending in * (delete_*).
+    Hide { name: String, tool: String },
+    /// Offer a tool that was hidden to bots again.
+    Show { name: String, tool: String },
     /// Read mcp.json again after editing it by hand, so the running lorca serve takes the change.
     Reload,
     /// Add the servers from another app's MCP config: Claude Desktop, Claude Code, Cursor,
@@ -400,8 +407,8 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
             print_mcp_server(&server);
             Ok(())
         }
-        McpCommand::Add { name, transport, env, header, description, target } => {
-            let config = mcp_config(transport.as_deref(), &env, &header, description, &target)?;
+        McpCommand::Add { name, transport, env, header, description, timeout, target } => {
+            let config = mcp_config(transport.as_deref(), &env, &header, description, timeout, &target)?;
             let (saved, _) = mcp_call(app, "mcp.save", json!({ "name": name, "config": config })).await?;
             println!("Added {name} to {}.", saved["path"].as_str().unwrap_or("mcp.json"));
             let server = mcp_connect(app, &name).await?;
@@ -448,6 +455,16 @@ async fn mcp(app: &std::sync::Arc<App>, command: McpCommand) -> anyhow::Result<(
         McpCommand::SignOut { name } => {
             mcp_call(app, "mcp.sign_out", json!({ "name": name })).await?;
             println!("Signed out of {name}. Its next use asks for a sign-in again.");
+            Ok(())
+        }
+        McpCommand::Hide { name, tool } => {
+            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": true })).await?;
+            println!("Hid {tool} of {name}. Bots no longer see it.");
+            Ok(())
+        }
+        McpCommand::Show { name, tool } => {
+            mcp_call(app, "mcp.hide_tool", json!({ "name": name, "tool": tool, "hidden": false })).await?;
+            println!("Bots see {name}'s {tool} again.");
             Ok(())
         }
         McpCommand::Reload => {
@@ -501,10 +518,10 @@ fn mcp_outcome(server: &serde_json::Value) -> String {
 /// The entry `lorca mcp add` writes: a command with its environment, or a URL with its headers.
 /// What follows a command is its arguments, flags included (`npx -y …`, `docker run -e …`); what
 /// follows a URL is read as this command's own flags, which people write after it.
-fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], description: Option<String>, target: &[String]) -> anyhow::Result<serde_json::Value> {
+fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], description: Option<String>, timeout: Option<u64>, target: &[String]) -> anyhow::Result<serde_json::Value> {
     let Some(first) = target.first() else { anyhow::bail!("Give the command to run, or the server's URL, after the name.") };
     let is_url = first.starts_with("http://") || first.starts_with("https://");
-    let (mut transport, mut env, mut headers, mut description) = (transport.map(str::to_string), env.to_vec(), headers.to_vec(), description);
+    let (mut transport, mut env, mut headers, mut description, mut timeout) = (transport.map(str::to_string), env.to_vec(), headers.to_vec(), description, timeout);
     let mut target = target.to_vec();
     if is_url && transport.as_deref() != Some("stdio") {
         let mut rest = target.split_off(1).into_iter();
@@ -518,6 +535,7 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
                 "-H" | "--header" => headers.push(value()?),
                 "-e" | "--env" => env.push(value()?),
                 "--description" => description = Some(value()?),
+                "--timeout" => timeout = Some(value()?.parse().map_err(|_| anyhow::anyhow!("--timeout is a number of seconds."))?),
                 "-t" | "--transport" => transport = Some(value()?),
                 other => anyhow::bail!("A remote server is one URL, and {other:?} follows it. Flags go before or after the URL; a command's arguments follow the command."),
             }
@@ -568,6 +586,11 @@ fn mcp_config(transport: Option<&str>, env: &[String], headers: &[String], descr
     }
     if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
         config.insert("description".into(), description.trim().into());
+    }
+    // The file reads a timeout of 1000 or more as milliseconds, as Gemini CLI writes it, so a long one
+    // is written that way.
+    if let Some(seconds) = timeout.filter(|seconds| *seconds > 0) {
+        config.insert("timeout".into(), (if seconds >= 1000 { seconds * 1000 } else { seconds }).into());
     }
     Ok(serde_json::Value::Object(config))
 }
@@ -726,6 +749,11 @@ fn print_mcp_server(server: &serde_json::Value) {
     if let Some(description) = config["description"].as_str() {
         row("About", description);
     }
+    if let Some(timeout) = config["timeout"].as_u64() {
+        // 1000 or more is milliseconds, as the file reads it.
+        let seconds = if timeout >= 1000 { timeout.div_ceil(1000) } else { timeout };
+        row("Timeout", &format!("{seconds} s without an answer or progress"));
+    }
     row("State", &mcp_state(server));
     if server["status"]["state"] == "needs_auth" {
         row("", &format!("Run `lorca mcp sign-in {}`.", server["name"].as_str().unwrap_or_default()));
@@ -736,7 +764,8 @@ fn print_mcp_server(server: &serde_json::Value) {
         let width = tools.iter().filter_map(|t| t["name"].as_str()).map(|n| n.chars().count()).max().unwrap_or(0).min(36);
         for tool in tools {
             let about: String = tool["description"].as_str().unwrap_or_default().chars().take(100).collect();
-            println!("    {:<width$}  {about}", tool["name"].as_str().unwrap_or_default());
+            let hidden = if tool["hidden"] == true { " (hidden from bots)" } else { "" };
+            println!("    {:<width$}  {about}{hidden}", tool["name"].as_str().unwrap_or_default());
         }
     }
 }

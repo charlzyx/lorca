@@ -408,7 +408,11 @@ final class McpServerViewController: SheetViewController {
         statusSection.setRows(rows)
         let tools = server.tools ?? []
         toolsSection.isHidden = tools.isEmpty
-        if !tools.isEmpty { toolsSection.setRows([ToolsList(tools: tools)]) }
+        if !tools.isEmpty {
+            let list = ToolsList(tools: tools)
+            list.onShow = { [weak self] tool, shown in self?.showTool(tool, shown: shown) }
+            toolsSection.setRows([list])
+        }
         refit()
     }
 
@@ -457,6 +461,24 @@ final class McpServerViewController: SheetViewController {
             } catch {
                 self.alert(L("Couldn't start the sign-in"), error.localizedDescription)
             }
+        }
+    }
+
+    /// Offers a tool to bots or keeps it from them, in the Runner's mcp.json; a failure puts the
+    /// switch back.
+    private func showTool(_ tool: String, shown: Bool) {
+        guard let current = saved else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let answered = try await self.store.setMcpTool(tool, shown: shown, server: current.name, on: self.runner.id)
+                guard !self.isClosed else { return }
+                self.saved = answered
+            } catch {
+                self.alert(shown ? L("Couldn't offer %@ to bots", tool) : L("Couldn't hide %@", tool), error.localizedDescription)
+            }
+            guard !self.isClosed else { return }
+            self.render()
         }
     }
 
@@ -935,13 +957,20 @@ private final class PairRow: NSView, NSTextFieldDelegate {
     }
 }
 
-/// The tools a server offered: each one's name, the first line of what it does, and whether it
-/// only reads, in a list that scrolls past a few.
+/// The tools a server offered: each one's name, the first line of what it does, whether it only
+/// reads, and a switch that offers it to bots or keeps it from them, in a list that scrolls past a
+/// few.
 private final class ToolsList: NSView {
+    private let tools: [McpTool]
+    /// A tool's switch moved: its name, and whether bots see it now.
+    var onShow: ((String, Bool) -> Void)?
+
     init(tools: [McpTool]) {
+        self.tools = tools
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
-        let stack = Build.stack(tools.map(Self.row), spacing: 0)
+        let rows = tools.enumerated().map { index, tool in row(tool, index: index) }
+        let stack = Build.stack(rows, spacing: 0)
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
@@ -967,10 +996,10 @@ private final class ToolsList: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    private static func row(_ tool: McpTool) -> NSView {
-        let name = Build.label(tool.name, font: .monospacedSystemFont(ofSize: 11, weight: .semibold))
+    private func row(_ tool: McpTool, index: Int) -> NSView {
+        let name = Build.label(tool.name, font: .monospacedSystemFont(ofSize: 11, weight: .semibold), color: tool.isHidden ? .tertiaryLabelColor : .labelColor)
         name.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        let about = Build.label(tool.about, font: Theme.Font.caption, color: .secondaryLabelColor)
+        let about = Build.label(tool.about, font: Theme.Font.caption, color: tool.isHidden ? .tertiaryLabelColor : .secondaryLabelColor)
         about.lineBreakMode = .byTruncatingTail
         about.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
         var views: [NSView] = [name, about]
@@ -979,9 +1008,23 @@ private final class ToolsList: NSView {
             tag.toolTip = L("It only reads, so it runs without Auto-review.")
             views.append(tag)
         }
+        let toggle = NSSwitch()
+        toggle.controlSize = .mini
+        toggle.state = tool.isHidden ? .off : .on
+        toggle.tag = index
+        toggle.target = self
+        toggle.action = #selector(toggled(_:))
+        toggle.toolTip = tool.isHidden ? L("Hidden from bots") : L("Offered to bots")
+        toggle.setAccessibilityLabel(L("Offer %@ to bots", tool.name))
+        views.append(toggle)
         let row = Build.stack(views, orientation: .horizontal, spacing: 8)
         row.edgeInsets = NSEdgeInsets(top: 4, left: 12, bottom: 4, right: 12)
         row.toolTip = tool.about
         return row
+    }
+
+    @objc private func toggled(_ sender: NSSwitch) {
+        guard tools.indices.contains(sender.tag) else { return }
+        onShow?(tools[sender.tag].name, sender.state == .on)
     }
 }

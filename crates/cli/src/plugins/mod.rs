@@ -62,6 +62,8 @@ pub struct Manifest {
     pub tools: ToolHints,
 }
 
+// A manifest's own settings, a few per plugin: their size never matters.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerSpec {
@@ -76,6 +78,9 @@ pub enum ServerSpec {
         /// Where it starts; the plugin's folder when unset. A leading `~` is the home folder.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// Seconds a call may go without an answer or progress (`ServerSpec::call_timeout`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
     },
     /// A streamable-HTTP server. `${VAR}` in `headers` is filled the same way.
     Http {
@@ -84,9 +89,26 @@ pub enum ServerSpec {
         headers: BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         auth: Option<AuthSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout: Option<u64>,
     },
 }
 
+/// How long a plugin tool's call may go without an answer or progress, unless its server says.
+pub const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+impl ServerSpec {
+    /// How long a call to the server may go without an answer or progress: its own `timeout`, else
+    /// ten minutes.
+    pub fn call_timeout(&self) -> std::time::Duration {
+        let own = match self {
+            ServerSpec::Stdio { timeout, .. } | ServerSpec::Http { timeout, .. } => *timeout,
+        };
+        own.filter(|seconds| *seconds > 0).map(std::time::Duration::from_secs).unwrap_or(CALL_TIMEOUT)
+    }
+}
+
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthSpec {
@@ -118,6 +140,20 @@ pub enum AuthSpec {
         /// server says nothing about how it signs in, and many need no sign-in at all.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         optional: bool,
+        /// The name registered with a server that registers clients on the fly; Lorca when unset.
+        /// Some servers take only names they know.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_name: Option<String>,
+        /// A redirect a preregistered client must use: a fixed port on 127.0.0.1 (`/callback`),
+        /// or a whole loopback URL. Such a sign-in opens in the Runner's own browser.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_port: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        callback_url: Option<String>,
+        /// The authorization server's metadata document, taken as it is in place of discovery, for
+        /// a server that names the wrong authorization server or none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        auth_server_metadata_url: Option<String>,
     },
     /// `Authorization: Bearer <variable>`.
     Bearer { variable: String },
@@ -154,11 +190,32 @@ pub struct ToolHints {
     /// Never offered to the bot.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
+    /// Tools shown or hidden by name or pattern, in order, as pi reads an `mcp.json` entry's
+    /// `toolExposure`: an exact name decides first, then the first pattern that matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposure: Vec<ToolRule>,
+}
+
+/// One `toolExposure` entry: a tool's name or a pattern ending in `*`, and whether it is hidden.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolRule {
+    pub pattern: String,
+    pub hidden: bool,
 }
 
 impl ToolHints {
     fn is_empty(&self) -> bool {
-        self.readonly.is_empty() && self.hide.is_empty()
+        self.readonly.is_empty() && self.hide.is_empty() && self.exposure.is_empty()
+    }
+
+    /// Whether `tool` is kept from bots: by its `exposure` rule (its exact name first, then the
+    /// first pattern that matches), else by a `hide` pattern.
+    pub fn hides(&self, tool: &str) -> bool {
+        let rule = self.exposure.iter().find(|rule| rule.pattern == tool).or_else(|| self.exposure.iter().find(|rule| pattern_matches(&rule.pattern, tool)));
+        match rule {
+            Some(rule) => rule.hidden,
+            None => self.hide.iter().any(|pattern| pattern_matches(pattern, tool)),
+        }
     }
 }
 
@@ -946,7 +1003,7 @@ mod tests {
         let app = &scratch.0;
         let mut old = crate::marketplace::bundled().plugins.into_iter().find(|m| m.id == "github").unwrap();
         // As installed before the device flow existed: a bare OAuth entry.
-        old.servers.insert("github".into(), ServerSpec::Http { url: "https://api.githubcopilot.com/mcp/".into(), headers: BTreeMap::new(), auth: Some(AuthSpec::Oauth { scopes: vec![], token_variable: Some("GITHUB_TOKEN".into()), client_id_variable: None, client_secret_variable: None, client_id: None, client_secret: None, device_authorization_endpoint: None, token_endpoint: None, optional: false }) });
+        old.servers.insert("github".into(), ServerSpec::Http { url: "https://api.githubcopilot.com/mcp/".into(), headers: BTreeMap::new(), auth: Some(AuthSpec::Oauth { scopes: vec![], token_variable: Some("GITHUB_TOKEN".into()), client_id_variable: None, client_secret_variable: None, client_id: None, client_secret: None, device_authorization_endpoint: None, token_endpoint: None, optional: false, client_name: None, callback_port: None, callback_url: None, auth_server_metadata_url: None }), timeout: None });
         install(app, old, "marketplace").unwrap();
         let mut vars = BTreeMap::new();
         vars.insert("GITHUB_TOKEN".to_string(), "ghp-secret".to_string());

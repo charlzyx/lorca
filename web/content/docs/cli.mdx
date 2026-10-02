@@ -62,6 +62,7 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `lorca mcp sign-in <name>` | Signs in to a remote server that asks for it, in this computer's browser. |
 | `lorca mcp sign-out <name>` | Forgets a remote server's sign-in. Its next use asks for one again. |
 | `lorca mcp reload` | Has the running `lorca serve` read `mcp.json` again, after you edit the file by hand. |
+| `lorca mcp hide <name> <tool>`, `show <name> <tool>` | Keeps one of a server's tools from bots, or offers it again. The tool can be a pattern such as `delete_*`. |
 | `lorca mcp import [file]` | Adds the servers from another app's config: Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, or Gemini CLI, or the file you name. |
 
 ```bash
@@ -71,7 +72,7 @@ lorca mcp add linear https://mcp.linear.app/mcp
 lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ```
 
-`--description` tells bots what a server is for. `add` connects the server once it is saved and says whether it started.
+`--description` tells bots what a server is for, and `--timeout` how many seconds a call may go without an answer. `add` connects the server once it is saved and says whether it started.
 
 ## A headless Runner
 

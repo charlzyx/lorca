@@ -96,6 +96,8 @@ struct McpTool {
     var about: String
     /// Its server marked it read-only then: it runs without Auto-review.
     var isReadOnly: Bool
+    /// Kept from bots by the entry's `toolExposure`.
+    var isHidden: Bool = false
 }
 
 /// A server in a Runner's mcp.json, usable or not.
@@ -132,7 +134,9 @@ struct McpServer {
         toolCount = (json["tool_count"] as? NSNumber)?.intValue
         tools = (json["tools"] as? [[String: Any]])?.compactMap { tool in
             guard let name = tool["name"] as? String else { return nil }
-            return McpTool(name: name, title: tool["title"] as? String, about: tool["description"] as? String ?? "", isReadOnly: tool["read_only"] as? Bool ?? false)
+            return McpTool(
+                name: name, title: tool["title"] as? String, about: tool["description"] as? String ?? "", isReadOnly: tool["read_only"] as? Bool ?? false,
+                isHidden: tool["hidden"] as? Bool ?? false)
         }
     }
 

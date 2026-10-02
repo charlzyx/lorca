@@ -2182,10 +2182,17 @@ body.resizing * {
 
 .mcp-tool {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   min-width: 0;
   padding: 5px 12px;
+}
+
+/* A tool kept from bots reads dimmed beside its switch. */
+.mcp-tool.hidden .mcp-tool-name,
+.mcp-tool.hidden .mcp-tool-about,
+.mcp-tool.hidden .mcp-tool-tag {
+  opacity: 0.45;
 }
 
 .mcp-tool + .mcp-tool {

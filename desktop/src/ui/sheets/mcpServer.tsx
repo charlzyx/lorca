@@ -335,6 +335,20 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
     }
   };
 
+  /** Offers a tool to bots or keeps it from them; the switch moves at once, and back on a failure. */
+  const showTool = async (tool: string, shown: boolean) => {
+    const current = saved();
+    if (!current) return;
+    setSaved({ ...current, tools: current.tools?.map((each) => (each.name === tool ? { ...each, hidden: !shown } : each)) });
+    try {
+      const answered = await store.setMcpToolHidden(runner.id, current.name, tool, !shown);
+      if (!closed) setSaved(answered);
+    } catch (error) {
+      if (!closed) setSaved(current);
+      void alert({ message: shown ? L("Couldn't offer %@ to bots", tool) : L("Couldn't hide %@", tool), informative: errorText(error) });
+    }
+  };
+
   /** Forgets the sign-in on the Runner. Nothing is revoked at the server; its next use asks again. */
   const signOut = async () => {
     const current = saved();
@@ -459,7 +473,7 @@ function McpServerSheet(props: { runner: Device; server?: McpServer; dismiss: ()
         ) : undefined
       }
     >
-      <Show when={saved()}>{(server) => <ServerStatus server={server()} runner={runner} connecting={connecting()} busy={busy()} onReconnect={() => void connect(true)} onSignIn={() => void signIn()} onSignOut={() => void signOut()} onEnable={(on) => void setEnabled(on)} />}</Show>
+      <Show when={saved()}>{(server) => <ServerStatus server={server()} runner={runner} connecting={connecting()} busy={busy()} onReconnect={() => void connect(true)} onSignIn={() => void signIn()} onSignOut={() => void signOut()} onEnable={(on) => void setEnabled(on)} onShowTool={(tool, shown) => void showTool(tool, shown)} />}</Show>
       <div class="mcp-mode">
         <Segmented
           label={L("Edit as")}
@@ -636,6 +650,7 @@ function ServerStatus(props: {
   onSignIn: () => void;
   onSignOut: () => void;
   onEnable: (on: boolean) => void;
+  onShowTool: (tool: string, shown: boolean) => void;
 }) {
   const state = () => (props.connecting ? { text: L("Connecting…"), color: "var(--accent)" } : mcpState(props.server));
   const needsSignIn = () => !props.connecting && props.server.status?.state === "needs_auth";
@@ -683,7 +698,7 @@ function ServerStatus(props: {
           <div class="mcp-tools">
             <For each={props.server.tools ?? []}>
               {(tool) => (
-                <div class="mcp-tool" title={tool.description}>
+                <div class={["mcp-tool", { hidden: !!tool.hidden }]} title={tool.description}>
                   <span class="mcp-tool-name mono">{tool.name}</span>
                   <span class="mcp-tool-about truncate">{tool.description}</span>
                   <Show when={tool.readOnly}>
@@ -691,6 +706,14 @@ function ServerStatus(props: {
                       {L("Reads only")}
                     </span>
                   </Show>
+                  <Switch
+                    small
+                    checked={!tool.hidden}
+                    disabled={props.busy}
+                    label={L("Offer %@ to bots", tool.name)}
+                    tooltip={tool.hidden ? L("Hidden from bots") : L("Offered to bots")}
+                    onChange={(on) => props.onShowTool(tool.name, on)}
+                  />
                 </div>
               )}
             </For>

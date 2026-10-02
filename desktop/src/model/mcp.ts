@@ -27,6 +27,8 @@ export interface McpTool {
   description: string;
   /** Its server marked it read-only when it last connected: it runs without Auto-review. */
   readOnly: boolean;
+  /** Kept from bots by the entry's `toolExposure`. */
+  hidden?: boolean;
 }
 
 /** A server in a Runner's mcp.json, usable or not. */

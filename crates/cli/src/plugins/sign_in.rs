@@ -22,19 +22,44 @@ pub const SETUP_TIMEOUT: Duration = Duration::from_secs(45);
 pub const START_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// A loopback listener for the browser's redirect, bound before the page opens so the redirect
-/// never races it. The port is whatever was free; the client is registered with it.
+/// never races it. The port is whatever was free, and the client is registered with it, unless a
+/// preregistered client names its own (`bind_fixed`).
 pub struct Callback {
     listener: TcpListener,
+    /// The path the browser comes back to.
+    path: String,
+    /// A preregistered client's redirect, sent as written.
+    fixed: Option<String>,
 }
 
 impl Callback {
     pub async fn bind() -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.map_err(|e| format!("Cannot listen for the sign-in callback: {e}"))?;
-        Ok(Callback { listener })
+        Ok(Callback { listener, path: "/callback".into(), fixed: None })
+    }
+
+    /// A listener at the redirect a preregistered client was registered with: `url`, plain http to
+    /// this computer, or else `http://127.0.0.1:<port>/callback`. A URL without a port takes `port`,
+    /// or a free one, as RFC 8252 lets a loopback redirect.
+    pub async fn bind_fixed(port: Option<u16>, url: Option<&str>) -> Result<Self, String> {
+        let parsed = url.map(reqwest::Url::parse).transpose().map_err(|e| format!("The sign-in's callbackUrl does not read: {e}"))?;
+        let port = parsed.as_ref().and_then(reqwest::Url::port).or(port).unwrap_or(0);
+        let host = if parsed.as_ref().and_then(|url| url.host_str()) == Some("[::1]") { "::1" } else { "127.0.0.1" };
+        let listener = TcpListener::bind((host, port)).await.map_err(|e| format!("Cannot listen for the sign-in callback on port {port}: {e}"))?;
+        let bound = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+        let (path, fixed) = match (parsed, url) {
+            (Some(parsed), Some(written)) if parsed.port().is_some() => (parsed.path().to_string(), Some(written.to_string())),
+            (Some(mut parsed), _) => {
+                let _ = parsed.set_port(Some(bound));
+                (parsed.path().to_string(), Some(parsed.to_string()))
+            }
+            (None, _) => ("/callback".to_string(), None),
+        };
+        Ok(Callback { listener, path, fixed })
     }
 
     pub fn redirect_uri(&self) -> String {
-        format!("http://127.0.0.1:{}/callback", self.port())
+        self.fixed.clone().unwrap_or_else(|| format!("http://127.0.0.1:{}/callback", self.port()))
     }
 
     fn port(&self) -> u16 {
@@ -47,13 +72,13 @@ impl Callback {
     /// holds up the redirect.
     pub async fn wait(self, name: &str, timeout: Duration) -> Result<String, String> {
         let port = self.port();
-        let listener = self.listener;
+        let (listener, path) = (self.listener, self.path);
         let (landed, mut arrivals) = tokio::sync::mpsc::channel::<String>(1);
         let name = escape(name);
         let accepting = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else { return };
-                tokio::spawn(serve(socket, port, name.clone(), landed.clone()));
+                tokio::spawn(serve(socket, port, path.clone(), name.clone(), landed.clone()));
             }
         });
         let arrived = tokio::time::timeout(timeout, arrivals.recv()).await;
@@ -85,8 +110,9 @@ pub fn denied(callback: &str) -> bool {
     callback.split_once('?').is_some_and(|(_, query)| query.split('&').any(|pair| pair.split('=').next() == Some("error")))
 }
 
-/// Serves one connection: the redirect, or anything else the browser asks for (a favicon).
-async fn serve(mut socket: tokio::net::TcpStream, port: u16, name: String, landed: tokio::sync::mpsc::Sender<String>) {
+/// Serves one connection: the redirect to `expected`, or anything else the browser asks for (a
+/// favicon).
+async fn serve(mut socket: tokio::net::TcpStream, port: u16, expected: String, name: String, landed: tokio::sync::mpsc::Sender<String>) {
     let mut buffer = vec![0u8; 16 * 1024];
     let mut read = 0;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
@@ -98,7 +124,7 @@ async fn serve(mut socket: tokio::net::TcpStream, port: u16, name: String, lande
     }
     let head = String::from_utf8_lossy(&buffer[..read]);
     let path = head.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/").to_string();
-    if path != "/callback" && !path.starts_with("/callback?") {
+    if path != expected && !path.starts_with(&format!("{expected}?")) {
         let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;
         return;
     }
@@ -175,6 +201,27 @@ fn open_page(app: &Arc<App>, plugin_id: &str, id: &str, url: &str) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_preregistered_redirect_is_served_where_it_was_registered() {
+        // A port of its own: the redirect a client was registered with.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let callback = Callback::bind_fixed(Some(free), None).await.unwrap();
+        assert_eq!(callback.redirect_uri(), format!("http://127.0.0.1:{free}/callback"));
+        drop(callback);
+        // A whole URL, with a path of its own; one without a port takes a free one.
+        let callback = Callback::bind_fixed(None, Some("http://localhost/oauth/done")).await.unwrap();
+        let redirect = callback.redirect_uri();
+        assert!(redirect.starts_with("http://localhost:") && redirect.ends_with("/oauth/done"), "{redirect}");
+        let port = reqwest::Url::parse(&redirect).unwrap().port().unwrap();
+        let waiting = tokio::spawn(callback.wait("Docs", Duration::from_secs(5)));
+        assert_eq!(reqwest::get(format!("http://127.0.0.1:{port}/callback?code=x")).await.unwrap().status(), 404, "only its own path is the redirect");
+        assert_eq!(reqwest::get(format!("http://127.0.0.1:{port}/oauth/done?code=abc&state=s")).await.unwrap().status(), 200);
+        assert!(waiting.await.unwrap().unwrap().ends_with("/oauth/done?code=abc&state=s"));
+        // One written with its port is sent as written.
+        let callback = Callback::bind_fixed(None, Some(&format!("http://127.0.0.1:{free}/cb"))).await.unwrap();
+        assert_eq!(callback.redirect_uri(), format!("http://127.0.0.1:{free}/cb"));
+    }
 
     #[tokio::test]
     async fn the_callback_hands_back_where_the_browser_landed() {

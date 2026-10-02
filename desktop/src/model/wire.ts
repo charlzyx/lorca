@@ -72,7 +72,7 @@ export interface WireMcpServer {
   signs_in?: boolean | null;
   signed_in?: boolean | null;
   tool_count?: number | null;
-  tools?: { name: string; title?: string | null; description?: string | null; read_only?: boolean | null }[] | null;
+  tools?: { name: string; title?: string | null; description?: string | null; read_only?: boolean | null; hidden?: boolean | null }[] | null;
 }
 
 export interface WireMcpFile {
@@ -441,7 +441,7 @@ export function toMcpServer(wire: WireMcpServer): McpServer {
     signsIn: wire.signs_in ?? false,
     signedIn: wire.signed_in ?? false,
     toolCount: optional(wire.tool_count),
-    tools: wire.tools?.map((tool) => ({ name: tool.name, title: optional(tool.title), description: tool.description ?? "", readOnly: tool.read_only ?? false })),
+    tools: wire.tools?.map((tool) => ({ name: tool.name, title: optional(tool.title), description: tool.description ?? "", readOnly: tool.read_only ?? false, hidden: tool.hidden ?? false })),
   };
 }
 

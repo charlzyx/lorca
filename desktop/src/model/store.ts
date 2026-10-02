@@ -1040,6 +1040,20 @@ export class AppStore {
     return toMcpFile(await this.request("mcp.reload", { runner_id: runnerID }));
   }
 
+  /** Offers one of a server's tools to bots, or keeps it from them, in the Runner's mcp.json. The
+   * server keeps its connection. */
+  async setMcpToolHidden(runnerID: string, name: string, tool: string, hidden: boolean): Promise<McpServer> {
+    if (this.isMock) {
+      const servers = await this.mockMcpServers(runnerID);
+      const server = servers.find((each) => each.name === name);
+      if (!server) throw new RequestError(L("No server named %@ in mcp.json.", name));
+      const changed: McpServer = { ...server, tools: server.tools?.map((each) => (each.name === tool ? { ...each, hidden } : each)) };
+      this.setMockMcpServers(runnerID, servers.map((each) => (each.name === name ? changed : each)));
+      return changed;
+    }
+    return toMcpServer((await this.request<{ server: WireMcpServer }>("mcp.hide_tool", { runner_id: runnerID, name, tool, hidden })).server);
+  }
+
   /** Forgets a remote server's sign-in on its Runner; its next use asks for one again. */
   async signOutMcpServer(runnerID: string, name: string): Promise<McpServer> {
     if (this.isMock) {

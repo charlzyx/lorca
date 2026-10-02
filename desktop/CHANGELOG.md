@@ -13,9 +13,14 @@ and the update window shows it.
   `mcp.json` in its folder, in the format Claude Desktop, Cursor, and Claude Code use; after
   editing the file by hand, click Reload. Servers that offer resources, such as files or records,
   give bots tools to list and read them. Pick another Runner in Settings to manage its servers.
-- `lorca mcp` lists, adds, removes, turns on or off, reloads, and signs in to or out of MCP servers
-  from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude Code, Cursor,
-  Windsurf, VS Code, or Gemini CLI have on the computer.
+- MCP servers take a `timeout` for slow tools; can keep tools from bots, with a switch beside each
+  tool on the server's sheet or `toolExposure` in mcp.json, as pi writes it; and can sign in where a
+  server wants an app registered with it, with the redirect port or URL it was registered with, a
+  name to register under, and the authorization server's address when the server names the wrong
+  one. A server that needs more access asks you to sign in again for it.
+- `lorca mcp` lists, adds, removes, turns on or off, hides tools of, reloads, and signs in to or out
+  of MCP servers from a terminal, and `lorca mcp import` adds the servers Claude Desktop, Claude
+  Code, Cursor, Windsurf, VS Code, or Gemini CLI have on the computer.
 - Plugin servers are sturdier. One that fails to start says why, in the words it printed, and one
   that stopped starts again on the next call instead of failing until Lorca restarts. Stopping a
   server also stops what it started, such as npx's node; a call you stop is called off at the

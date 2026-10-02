@@ -564,7 +564,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // A Runner's mcp.json: its servers, here or through a sealed request to that Runner.
         // `mcp.parse` reads pasted JSON on this Device.
         "mcp.parse" => crate::plugins::mcp_json::parse_reply(params["text"].as_str().unwrap_or_default()),
-        "mcp.list" | "mcp.get" | "mcp.save" | "mcp.remove" | "mcp.set_enabled" | "mcp.reconnect" | "mcp.sign_in" | "mcp.sign_out" | "mcp.reload" => {
+        "mcp.list" | "mcp.get" | "mcp.save" | "mcp.remove" | "mcp.set_enabled" | "mcp.hide_tool" | "mcp.reconnect" | "mcp.sign_in" | "mcp.sign_out" | "mcp.reload" => {
             let runner_id = opt_string(&params, "runner_id");
             // Boxed: a connection's future is large, and a caller may hold this one on its stack.
             Box::pin(crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), method, params)).await
