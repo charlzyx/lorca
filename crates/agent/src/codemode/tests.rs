@@ -294,10 +294,9 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     ];
     let namespaces = vec![Namespace { name: "github".into(), description: "GitHub: issues and pull requests".into() }, Namespace { name: "notion".into(), description: "Notion".into() }];
     let complete = describe(&entries, &namespaces, &[], &CodemodeOptions { inline_budget: 100_000, ..CodemodeOptions::default() });
-    assert!(complete.contains("Nested tools: PARTIAL - 3 of 4 shown."), "a deferred tool is never listed: {complete}");
+    assert!(complete.contains("## linear (some tools not listed)"), "a deferred tool is never listed: {complete}");
     assert!(complete.contains("Shared MCP types. An MCP tool resolves to its whole `CallToolResult`"));
-    assert!(complete.contains("## github (2 tools)\nGitHub: issues and pull requests"), "{complete}");
-    assert!(complete.contains("## linear (2 tools, 1 shown)"), "{complete}");
+    assert!(complete.contains("Nested tools:\n\n## github\nGitHub: issues and pull requests"), "no counts, so the heading stays while the tools change: {complete}");
     assert!(complete.contains("## notion (tools not known yet; searchTools() finds them)\nNotion"), "{complete}");
     assert!(complete.contains("github__create_issue(args: { q: string; }): Promise<CallToolResult>;"), "{complete}");
     assert!(!complete.contains("### `read`"), "a direct tool is named, not listed");
@@ -308,9 +307,8 @@ fn the_description_lists_tools_by_namespace_within_its_budget() {
     assert!(before_connecting.contains("CallToolResult<TStructured"), "a host reaching MCP servers declares the types before their tools are known");
 
     let tight = describe(&entries, &namespaces, &[], &CodemodeOptions { inline_budget: 150, ..CodemodeOptions::default() });
-    assert!(tight.contains("Nested tools: PARTIAL - 2 of 4 shown."), "each namespace gets one tool in first: {tight}");
-    assert!(tight.contains("## github (2 tools, 1 shown)") && tight.contains("## linear (2 tools, 1 shown)"), "{tight}");
-    assert!(tight.contains(PARTIAL_GUIDANCE));
+    assert!(tight.contains("## github (some tools not listed)") && tight.contains("## linear (some tools not listed)"), "each namespace gets one tool in first: {tight}");
+    assert_eq!(tight.matches("\n### `").count(), 2, "{tight}");
 }
 
 /// `models.ask` as a host might give it: the prompt back in capitals, or a failure.
@@ -467,7 +465,6 @@ async fn every_script_has_a_deadline() {
     assert!(text_of(&spinning).contains("timed out after 200 ms"), "{}", text_of(&spinning));
     let longer = run(&codemode, "// @options: {\"timeout_ms\": 60000}\nwhile (true) {}").await;
     assert!(text_of(&longer).contains("timed out after 200 ms"), "an options line cannot ask for more: {}", text_of(&longer));
-    assert!(tool(vec![]).description().contains("at most and by default 30 minutes"));
 }
 
 #[test]

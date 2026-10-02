@@ -2959,7 +2959,7 @@ mod tests {
 
         let codemode = CodemodeTool::new(catalog.clone(), CodemodeOptions::default());
         let description = codemode.description().to_string();
-        assert!(description.contains("## linear (2 tools)\nLinear: Linear for the team.\nServer instructions: Use team keys like ENG."), "{description}");
+        assert!(description.contains("## linear\nLinear: Linear for the team.\nServer instructions: Use team keys like ENG."), "{description}");
         assert!(description.contains("linear__list_issues(args: {\n  // Team key\n  team: string;\n}): Promise<CallToolResult>;"), "{description}");
         assert!(description.contains("## notion (tools not known yet; searchTools() finds them)\nNotion: Notion for the team."), "{description}");
         assert!(description.contains("Your own tools `read` are callable here too"), "{description}");

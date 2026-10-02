@@ -342,7 +342,7 @@ impl Tool for CodemodeTool {
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Raw JavaScript source. Top-level await and return work. May start with a `// @options: {\"max_output_tokens\": 1000}` line."
+                    "description": "Raw JavaScript source."
                 }
             },
             "required": ["code"],
@@ -1021,33 +1021,22 @@ async fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<
 
 // MARK: - Description
 
-const DESCRIPTION_INTRO: &str = "Run JavaScript that calls tools: chain calls, run them in parallel, loop over results, and filter large \
-results down to what you need. Only what the script outputs or returns reaches you, never the results of the calls it makes.
-- The code is the body of an async function in a fresh QuickJS sandbox: top-level `await` and `return` work.
-- Call tools as `await tools.<name>(args)`. Names are JavaScript identifiers: characters that are not valid in one become `_`. Each tool takes one object argument.
-- A tool resolves to an object or a string, as its declaration says. A call that fails or gets invalid arguments rejects with an Error carrying the tool's error text.
-- A call a permission check refuses ends the whole script: the calls after it do not run.
-- Plain JavaScript only: no Node, file system, network, timers, or modules.
-- The input is raw JavaScript source, not JSON, a quoted string, or a markdown code fence.
-- It may start with a line like `// @options: {\"max_output_tokens\": 1000, \"timeout_ms\": 60000}`: `max_output_tokens` is the token budget for the output (default {max_output_tokens}, at most 50000), `timeout_ms` a hard deadline for the whole script, at most and by default {timeout} minutes.
-- Calls still running when the script ends are cancelled. Tool calls are real and have side effects: a script that fails partway does not undo the calls it already made.
-- Scripts have a {memory} MB memory limit. Filter or aggregate large data instead of accumulating it.
+// After pi 1.0's: one line per global, and what errors teach left to the errors, which name the
+// closest tools, the limits a script ran into, and the calls made before a failure.
+const DESCRIPTION_INTRO: &str = "Run JavaScript that calls other tools. Only what the script outputs or returns reaches you, never the \
+results of the calls it makes. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS \
+sandbox: top-level `await` and `return` work. No Node, file system, network, or timers.
+- `await tools.<name>({ ...args })` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. Calls still running when the script ends are cancelled.
+- Optional first line: `// @options: {\"max_output_tokens\": {max_output_tokens}, \"timeout_ms\": 60000}`
 
-Helpers:
-- `text(value)` appends a text item; a value that is not a string is written as JSON. `console.log(...)` and the other `console` methods do the same, and so does `return value`.
-- `image(imageUrlOrItem)` appends an image: a base64 `data:` URL, `{ image_url }`, or an MCP `ImageContent` block such as `result.content[0]`.
-- `exit()` ends the script successfully right away.
-- `store(key, value)` and `load(key)` keep JSON values for later scripts in this conversation. Storing `undefined` deletes a key. Writes count only when the script succeeds.
-- `ALL_TOOLS` lists `{ name, description }` of every tool known when the script starts.
-- `await searchTools(query, { limit?, namespace? })` resolves to the tools that best match the query (default limit 8), as `{ name, description }` with their declarations. It also finds tools that are not listed below.
-- `await describeTool(name)` resolves to a tool's description and declaration, or `undefined`.";
+Globals:
+- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script.
+- `store(key, value)` and `load(key)` keep JSON values for later scripts in this chat.
+- `ALL_TOOLS`, `searchTools(query, { limit?, namespace? })`, and `describeTool(name)` find tools that are not listed below.";
 
-const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`, never to the data alone: \
-read `structuredContent` when the declaration types it, and otherwise `content`, usually one text block whose text is often \
-JSON (`JSON.parse(result.content[0].text)`). `isError: true` means the tool reported a failure.";
-
-const PARTIAL_GUIDANCE: &str = "Some tools are not listed below. They are still callable on `tools`: find them with `await searchTools(query)`, \
-or filter `ALL_TOOLS` by name and description.";
+const MCP_RESULT_GUIDANCE: &str = "Shared MCP types. An MCP tool resolves to its whole `CallToolResult`: `structuredContent` when \
+its declaration types it, else `content`, usually one text block of JSON (`JSON.parse(result.content[0].text)`). `isError: true` \
+means it failed.";
 
 struct CatalogEntry {
     name: String,
@@ -1056,16 +1045,11 @@ struct CatalogEntry {
     deferred: bool,
 }
 
-/// The description: the helpers, the shared MCP types when an MCP tool is callable, the direct
+/// The description: the globals, the shared MCP types when an MCP tool is callable, the direct
 /// tools by name, and a section per tool, grouped by namespace, within the budget. Every
-/// namespace is named with its tool count either way, and the listing says whether it is
-/// complete.
+/// namespace is named either way, marked when some of its tools are not listed, as in pi.
 fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn HostFunction>], options: &CodemodeOptions) -> String {
-    let intro = DESCRIPTION_INTRO
-        .replace("{max_output_tokens}", &options.max_output_tokens.to_string())
-        .replace("{memory}", &(options.memory_limit / (1024 * 1024)).to_string())
-        .replace("{timeout}", &options.timeout.as_secs().div_ceil(60).to_string());
-    let mut sections = vec![intro];
+    let mut sections = vec![DESCRIPTION_INTRO.replace("{max_output_tokens}", &options.max_output_tokens.to_string())];
 
     let callable: Vec<&Entry> = entries.iter().filter(|entry| entry.tool.name() != CODEMODE_TOOL_NAME).collect();
     let direct: Vec<&str> = callable.iter().filter(|entry| entry.exposure == Exposure::Direct).map(|entry| entry.tool.name()).collect();
@@ -1103,11 +1087,6 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
     }
 
     let shown = select_catalog(&groups, options.inline_budget);
-    let total = listable.len();
-    let complete = shown.len() == total;
-    if !complete {
-        sections.push(PARTIAL_GUIDANCE.into());
-    }
     if options.mcp_types || listable.iter().any(|entry| mcp_structured_content_schema(entry.tool.output_schema().as_ref()).is_some()) {
         sections.push(format!("{MCP_RESULT_GUIDANCE}\n```ts\n{MCP_TYPESCRIPT_PREAMBLE}\n```"));
     }
@@ -1121,35 +1100,28 @@ fn describe(entries: &[Entry], namespaces: &[Namespace], functions: &[Arc<dyn Ho
         ));
     }
 
-    let mut listing = vec![if total == 0 {
-        "Nested tools: none known yet. searchTools() finds the tools of the groups below.".to_string()
-    } else if complete {
-        format!("Nested tools: COMPLETE list ({total} tool{}).", if total == 1 { "" } else { "s" })
-    } else {
-        format!("Nested tools: PARTIAL - {} of {total} shown.", shown.len())
-    }];
+    let mut listing = vec!["Nested tools:".to_string()];
     for (namespace, members) in &groups {
         let visible: Vec<&CatalogEntry> = members.iter().filter(|member| shown.contains(&member.name)).collect();
         if let Some(namespace) = namespace {
-            let count = if members.is_empty() {
-                "tools not known yet; searchTools() finds them".to_string()
+            // Only what is missing is marked, so the heading stays the same while the tools do.
+            let marker = if members.is_empty() {
+                " (tools not known yet; searchTools() finds them)"
+            } else if visible.is_empty() {
+                " (tools not listed)"
+            } else if visible.len() < members.len() {
+                " (some tools not listed)"
             } else {
-                let mut count = format!("{} tool{}", members.len(), if members.len() == 1 { "" } else { "s" });
-                if visible.is_empty() {
-                    count.push_str(", none shown");
-                } else if visible.len() < members.len() {
-                    count.push_str(&format!(", {} shown", visible.len()));
-                }
-                count
+                ""
             };
             let description = namespace.description.trim();
-            listing.push(if description.is_empty() { format!("## {} ({count})", namespace.name) } else { format!("## {} ({count})\n{description}", namespace.name) });
+            listing.push(if description.is_empty() { format!("## {}{marker}", namespace.name) } else { format!("## {}{marker}\n{description}", namespace.name) });
         }
         for member in visible {
             listing.push(member.section.clone());
         }
     }
-    if total > 0 || !named.is_empty() {
+    if !listable.is_empty() || !named.is_empty() {
         sections.push(listing.join("\n\n"));
     }
     if let Some(guidance) = options.guidance.as_deref().map(str::trim).filter(|guidance| !guidance.is_empty()) {
