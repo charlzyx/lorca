@@ -4,7 +4,7 @@
 
 Commands:
 
-- `lorca serve` — default; the app connects here
+- `lorca serve` — the app connects here; `lorca` alone lists the commands and starts nothing, so a bot's `lorca` never starts a second service
 - `lorca identity new` / `identity restore <phrase>` / `identity show`
 - `lorca pair` — show a pairing string and wait; `lorca pair <string>` joins
 - `lorca provider set <kind> [api-key] [--base-url <url>]` — connect DeepSeek, Anthropic, OpenCode Zen (`opencode`), or OpenCode Go (`opencode-go`) with an API key, or open the browser sign-in for `chatgpt` and `grok`. The key is checked against the API first and read from stdin when omitted. `provider add <name> <base-url> [--api chat-completions|responses|messages] [--model <id>]… [--api-key-stdin]` adds a custom provider, its server checked first; `provider remove <kind>` (a custom provider's kind deletes it) / `provider list`. A running `lorca serve` carries out the change over the local websocket; with none, the command changes `credentials.json` itself and runs one sync pass

@@ -25,7 +25,7 @@ struct Cli {
 
 #[derive(Subcommands, Debug)]
 enum Command {
-    /// Run the local API the app connects to (default).
+    /// Run the local API the app connects to.
     Serve {
         /// Exit when this process is gone. The app passes its own pid so a killed app never
         /// leaves a stale CLI holding the port.
@@ -182,8 +182,15 @@ enum McpCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Bare `lorca` lists the commands and touches nothing: the service is `lorca serve`, as the
+    // apps start it, so `lorca` typed to see what it does, a bot's included, never starts a second
+    // one or makes a data folder.
+    let Some(command) = cli.command else {
+        print!("{}", Cli::render_help(Cli::command(), false).unwrap_or_default());
+        return Ok(());
+    };
     // `lorca mcp` says how each step went in its own words; the log keeps to warnings.
-    let quiet = matches!(cli.command, Some(Command::Mcp { .. }));
+    let quiet = matches!(command, Command::Mcp { .. });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
         .with_target(false)
@@ -193,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(cli.home, cli.port);
     let app = App::load(config)?;
 
-    match cli.command.unwrap_or(Command::Serve { parent_pid: None, ready_stdout: false }) {
+    match command {
         Command::Serve { parent_pid, ready_stdout } => {
             runtime::resume_sent_jobs(&app);
             // A command a Lorca that quit left waiting went with it; its row says so now.

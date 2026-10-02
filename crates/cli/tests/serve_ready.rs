@@ -115,3 +115,14 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
 }
+
+#[tokio::test]
+async fn bare_lorca_lists_the_commands_and_starts_nothing() {
+    let home = Home::new();
+    let output = Command::new(env!("CARGO_BIN_EXE_lorca")).env("LORCA_HOME", &home.0).env("RUST_LOG", "off").stdin(Stdio::null()).output();
+    let output = timeout(Duration::from_secs(10), output).await.expect("it returns rather than serving").unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("Usage: lorca") && help.contains("serve") && help.contains("mcp"), "{help}");
+    assert!(!home.0.exists(), "a help page makes no data folder");
+}

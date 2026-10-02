@@ -703,15 +703,16 @@ fn safe_command(command: &str, args: &[String]) -> bool {
     }
 }
 
-/// `lorca` that only reads: its help and version, and the MCP servers listed or one shown. A
-/// flag after `--` belongs to a server's command (`lorca mcp add x -- npx --help` adds one).
+/// `lorca` that only reads: its help (bare `lorca` included) and version, and the MCP servers
+/// listed or one shown. A flag after `--` belongs to a server's command (`lorca mcp add x -- npx
+/// --help` adds one).
 fn safe_lorca(args: &[String]) -> bool {
     let own: Vec<&str> = args.iter().map(String::as_str).take_while(|arg| *arg != "--").collect();
     if own.iter().any(|arg| matches!(*arg, "--help" | "-h" | "--version" | "-V")) {
         return true;
     }
     let words: Vec<&str> = own.into_iter().filter(|arg| !arg.starts_with('-')).collect();
-    matches!(words.as_slice(), ["help", ..] | ["mcp"] | ["mcp", "help", ..] | ["mcp", "list"] | ["mcp", "get", _])
+    matches!(words.as_slice(), [] | ["help", ..] | ["mcp"] | ["mcp", "help", ..] | ["mcp", "list"] | ["mcp", "get", _])
 }
 
 fn safe_git(args: &[String]) -> bool {
@@ -859,7 +860,7 @@ mod tests {
 
     #[test]
     fn the_lorca_command_is_reviewed_unless_it_only_reads() {
-        for command in ["lorca --help", "lorca mcp", "lorca mcp list", "lorca mcp get github", "lorca mcp add --help", "lorca --version", "lorca mcp list | grep github"] {
+        for command in ["lorca", "lorca --help", "lorca mcp", "lorca mcp list", "lorca mcp get github", "lorca mcp add --help", "lorca --version", "lorca mcp list | grep github"] {
             assert!(read_only(command), "{command}");
         }
         let home = Path::new("/home/me");
