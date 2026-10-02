@@ -246,17 +246,22 @@ final class McpServerViewController: SheetViewController {
 
         let texts = [L("Name"), L("Type"), L("Command"), L("Environment"), L("URL"), L("Headers"), L("About"), L("JSON")]
         let labelWidth = ceil(texts.map { formLabel($0).intrinsicContentSize.width }.max() ?? 0)
+        let envLabel = pairsLabel(texts[3])
+        let headersLabel = pairsLabel(texts[5])
         nameGrid = NSGridView(views: [[formLabel(texts[0]), nameField], [NSGridCell.emptyContentView, nameNote]])
         formGrid = NSGridView(views: [
             [formLabel(texts[1]), typeControl],
             [formLabel(texts[2]), commandField],
             [NSGridCell.emptyContentView, commandNote],
-            [topLabel(texts[3]), envEditor],
+            [envLabel.box, envEditor],
             [formLabel(texts[4]), urlField],
             [NSGridCell.emptyContentView, urlNote],
-            [topLabel(texts[5]), headersEditor],
+            [headersLabel.box, headersEditor],
             [formLabel(texts[6]), aboutField],
         ])
+        // In one grid now, so a constraint can tie each label to its editor's first line.
+        envEditor.alignedLabel = envLabel.label
+        headersEditor.alignedLabel = headersLabel.label
         jsonGrid = NSGridView(views: [[topLabel(texts[7]), jsonScroll], [NSGridCell.emptyContentView, jsonNote]])
         for grid in [nameGrid!, formGrid!, jsonGrid!] {
             grid.translatesAutoresizingMaskIntoConstraints = false
@@ -311,6 +316,27 @@ final class McpServerViewController: SheetViewController {
 
     private func formLabel(_ text: String) -> NSTextField {
         Build.label(text, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+    }
+
+    /// A label beside rows of fields, in a box the grid tops with them. The editor keeps the label
+    /// itself on the text of its first line (`PairsEditor.alignedLabel`): the first row's name, or
+    /// the add button while there are no rows.
+    private func pairsLabel(_ text: String) -> (box: NSView, label: NSTextField) {
+        let label = formLabel(text)
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(label)
+        // Where the label sits until the editor ties it to its first line.
+        let resting = label.topAnchor.constraint(equalTo: box.topAnchor)
+        resting.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: box.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: box.trailingAnchor),
+            label.topAnchor.constraint(greaterThanOrEqualTo: box.topAnchor),
+            label.bottomAnchor.constraint(equalTo: box.bottomAnchor),
+            resting,
+        ])
+        return (box, label)
     }
 
     /// A label set down to the first row of the fields beside it.
@@ -833,6 +859,23 @@ private final class PairsEditor: NSView {
     /// A row came or went, so the sheet's height changes.
     var onResize: (() -> Void)?
 
+    /// The label beside the editor, kept on the baseline of its first line: the first row's name
+    /// field, or the add button while there are no rows. Set once both are in one view tree.
+    weak var alignedLabel: NSView? {
+        didSet { alignLabel() }
+    }
+    private var labelBaseline: NSLayoutConstraint?
+
+    private func alignLabel() {
+        labelBaseline?.isActive = false
+        guard let alignedLabel else { return }
+        let first: NSView = rows.first?.nameField ?? addButton
+        let baseline = alignedLabel.firstBaselineAnchor.constraint(equalTo: first.firstBaselineAnchor)
+        baseline.priority = NSLayoutConstraint.Priority(999)
+        baseline.isActive = true
+        labelBaseline = baseline
+    }
+
     var isEnabled = true {
         didSet {
             for row in rows { row.isEnabled = isEnabled }
@@ -865,6 +908,7 @@ private final class PairsEditor: NSView {
             }
             rows = []
             for (name, value) in newValue { insert(name: name, value: value) }
+            alignLabel()
         }
     }
 
@@ -878,12 +922,14 @@ private final class PairsEditor: NSView {
             self.stack.removeArrangedSubview(row)
             row.removeFromSuperview()
             self.rows.removeAll { $0 === row }
+            self.alignLabel()
             self.onChange?()
             self.onResize?()
         }
         stack.insertArrangedSubview(row, at: rows.count)
         row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         rows.append(row)
+        if rows.count == 1 { alignLabel() }
         return row
     }
 

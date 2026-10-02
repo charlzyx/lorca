@@ -2099,10 +2099,11 @@ body.resizing * {
   color: var(--red);
 }
 
-/* A label beside rows of fields sits on their first row. */
-.mcp-form .pairs-label {
-  align-self: start;
-  padding-top: 5px;
+/* A label beside rows of fields sits on the first one's text, the first row's fields or the Add
+   link when there are none: label and fields align their first baselines. */
+.mcp-form .pairs-label,
+.mcp-form .pairs-label + .form-control {
+  align-self: first baseline;
 }
 
 /* Each label holds every label the form can show, stacked unseen behind its own, so the label
@@ -2142,12 +2143,17 @@ body.resizing * {
   padding-right: 28px;
 }
 
+/* Its baseline is its text's, which a label beside it aligns with, while its icon stays centered. */
 .pairs-add {
   display: inline-flex;
-  align-items: center;
+  align-items: baseline;
   gap: 4px;
   align-self: flex-start;
   font-size: 12px;
+}
+
+.pairs-add > .icon {
+  align-self: center;
 }
 
 .mcp-json {
