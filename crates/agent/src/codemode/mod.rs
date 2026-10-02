@@ -890,7 +890,7 @@ fn check_image(data: &str, images: usize) -> Result<&'static str, String> {
     if images >= MAX_IMAGES {
         return Err(format!("a script's output holds at most {MAX_IMAGES} images"));
     }
-    crate::types::inline_image_type(data)
+    crate::images::inline_type(data)
 }
 
 /// A successful script's `store()` writes, from `[[key, json], [key], …]`. Anything else is an

@@ -51,7 +51,7 @@ A host can run a script itself, outside a model's turn: `codemode.run_script(cal
 
 A script that waits on a promise nothing can settle fails at once instead of hanging.
 
-The host holds a script to limits its VM's memory cap does not cover. Past 16 MB of output, or with more than 1,000 calls it started and has not seen finish, the script stops. An image must be PNG, JPEG, GIF, or WebP, in valid base64, of at most 5 MB, and ten at most; any other is left out with a note in the output. A call whose arguments are over 8 MB, or are not JSON the host can read, rejects without running. Strings are made well-formed before they cross, so a lone surrogate becomes U+FFFD. `store()` writes over their limits fail the script, whatever the script did to the prelude's own checks.
+The host holds a script to limits its VM's memory cap does not cover. Past 16 MB of output, or with more than 1,000 calls it started and has not seen finish, the script stops. An image must be PNG, JPEG, GIF, or WebP by its bytes, whatever the script labeled it, in valid base64, of at most 3.75 MB (Anthropic refuses an image over 5 MB of base64) and 8000 pixels on a side, and ten at most (`lorca_agent::images`); any other is left out with a note in the output. A call whose arguments are over 8 MB, or are not JSON the host can read, rejects without running. Strings are made well-formed before they cross, so a lone surrogate becomes U+FFFD. `store()` writes over their limits fail the script, whatever the script did to the prelude's own checks.
 
 ## Calls go through the loop
 

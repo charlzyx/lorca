@@ -15,9 +15,6 @@ use crate::app::App;
 use crate::model::Attachment;
 
 pub const MAX_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
-/// Images up to this size go to the model as pixels as well as a path.
-#[cfg(feature = "runner")]
-const MAX_IMAGE_PART_BYTES: u64 = 5 * 1024 * 1024;
 
 /// A file the app asked to send: a path on this machine, with the id the app already shows.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -156,7 +153,7 @@ pub fn materialize(app: &App, attachment: &Attachment, workdir: &Path) -> Option
 }
 
 /// What the model sees for one attachment: a line naming the file, and, when `pixels` (the
-/// model takes images), an image up to 5 MB as an image part too.
+/// model takes images), an image it takes as an image part too, or a line saying why not.
 #[cfg(feature = "runner")]
 pub fn content_parts(app: &App, attachment: &Attachment, workdir: &Path, pixels: bool) -> Vec<ContentPart> {
     let Some(path) = materialize(app, attachment, workdir) else {
@@ -169,13 +166,17 @@ pub fn content_parts(app: &App, attachment: &Attachment, workdir: &Path, pixels:
         human_size(attachment.size),
         path.display()
     ))];
-    if pixels && attachment.is_image() && attachment.size <= MAX_IMAGE_PART_BYTES {
-        if let Ok(bytes) = std::fs::read(&path) {
-            parts.push(ContentPart::Image {
-                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                mime_type: attachment.mime.clone(),
-            });
-        }
+    if pixels && attachment.is_image() {
+        // Sent as the type its bytes say, and only when the model takes it: a HEIC photo, an
+        // SVG, or one too large is named instead, since a refused image fails every later turn.
+        let image = lorca_agent::images::check_len(attachment.size).and_then(|()| {
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+            lorca_agent::images::inline_type_of(&bytes).map(|mime| (bytes, mime))
+        });
+        parts.push(match image {
+            Ok((bytes, mime)) => ContentPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&bytes), mime_type: mime.into() },
+            Err(why) => ContentPart::text(format!("[{} is not shown as an image: {why}]", attachment.name)),
+        });
     }
     parts
 }
@@ -269,6 +270,33 @@ mod tests {
         png.extend_from_slice(&480u32.to_be_bytes());
         assert_eq!(image_size(&png), (Some(640), Some(480)));
         assert_eq!(image_size(b"nope"), (None, None));
+    }
+
+    #[cfg(feature = "runner")]
+    #[test]
+    fn attachments_reach_the_model_as_images_it_takes() {
+        let home = std::env::temp_dir().join(format!("lorca-files-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        let workdir = home.join("work");
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
+        png.extend_from_slice(&640u32.to_be_bytes());
+        png.extend_from_slice(&480u32.to_be_bytes());
+        let parts = |id: &str, name: &str, mime: &str, bytes: &[u8]| {
+            write_local(&app, id, bytes).unwrap();
+            let attachment = Attachment { id: id.into(), name: name.into(), mime: mime.into(), size: bytes.len() as u64, width: None, height: None };
+            content_parts(&app, &attachment, &workdir, true)
+        };
+        let labeled = parts("att-1", "shot.jpg", "image/jpeg", &png);
+        assert!(matches!(&labeled[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"), "the type its bytes say: {labeled:?}");
+        let heic = parts("att-2", "IMG_0001.heic", "image/heic", b"\0\0\0\x18ftypheic\0\0\0\0mif1heic");
+        assert_eq!(heic[1], ContentPart::text("[IMG_0001.heic is not shown as an image: it is not a PNG, JPEG, GIF, or WebP image]"));
+        let mut large = png.clone();
+        large.resize(4 * 1024 * 1024, 0);
+        let large = parts("att-3", "big.png", "image/png", &large);
+        assert_eq!(large[1], ContentPart::text("[big.png is not shown as an image: it is over 3.75 MB]"));
+        assert_eq!(parts("att-4", "notes.txt", "text/plain", b"hi").len(), 1, "a file that is no image is only named");
+        drop(app);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

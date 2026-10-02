@@ -39,6 +39,10 @@ and the update window shows it.
 - Bots on ChatGPT, Grok, and OpenCode's GPT, Grok, and Muse Spark models see the images their
   tools return, such as a browser plugin's screenshot or an image file they read. They used to get
   only the text beside the image.
+- A chat keeps working when a bot reads an image no model takes, such as a BMP file or an image
+  over 3.75 MB or 8,000 pixels on a side, and when you attach a HEIC photo or an SVG. The bot is
+  told why it cannot see the image; before, every later message in that chat could fail. A text
+  file that starts with "BM" now reads as text instead of as a broken image.
 - Pairing a computer or restoring your identity no longer asks you to connect a provider your
   account already has. Onboarding waits until the account's providers arrive from the relay, which a
   slow connection or a long list of chats used to outlast.

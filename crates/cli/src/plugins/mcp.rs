@@ -2318,7 +2318,7 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
 /// providers refuse a whole request over an image they do not take, and the chat would fail at
 /// every later turn.
 fn model_image(data: &str) -> Result<ContentPart, String> {
-    lorca_agent::types::inline_image_type(data).map(|mime_type| ContentPart::Image { data: data.to_string(), mime_type: mime_type.into() })
+    lorca_agent::images::inline_type(data).map(|mime_type| ContentPart::Image { data: data.to_string(), mime_type: mime_type.into() })
 }
 
 /// Adds a result's text, cut where the result's text reaches `MAX_RESULT_CHARS`.

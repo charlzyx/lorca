@@ -172,7 +172,7 @@ Output limits are applied so a single call cannot flood the context: 2,000 lines
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
-| `read` | `path`, `offset?` (1-indexed line), `limit?` (lines) | Returns text from the start of the file or from `offset`, keeping the first lines that fit. JPEG, PNG, GIF, WebP, and BMP files (detected by content) come back as an image part. |
+| `read` | `path`, `offset?` (1-indexed line), `limit?` (lines) | Returns text from the start of the file or from `offset`, keeping the first lines that fit. JPEG, PNG, GIF, and WebP files (detected by content) come back as an image part when a model takes them (`images::inline_type_of`: at most 3.75 MB and 8000 pixels on a side); a BMP or a larger image comes back as a line saying why it is not attached. |
 | `write` | `path`, `content` | Creates or overwrites the file, creating parent directories. |
 | `edit` | `path`, `edits: [{ oldText, newText }]` | Exact text replacement. Each `oldText` must match exactly once in the original file, and edits must not overlap; all edits are matched against the original, not one after another. Preserves a UTF-8 BOM and CRLF line endings. |
 | `bash` | `command`, `timeout?` (seconds) | Runs `bash -c` (or `sh -c` where bash is missing) in the working directory with stdin closed and the login shell's environment (`login_shell::command`). stdout and stderr are combined and truncated at the tail; when truncated, the full output is saved to a temp file whose path is in the note. Streams the output tail as updates, at most every 250 ms. A non-zero exit, timeout, or abort is an error result that includes the output. Timeout and abort kill the command's process group. |
