@@ -117,6 +117,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         .flatten()
         .collect();
     crate::files::prefetch(app, &attachments).await;
+    if providers::supports_vision(app, &bot.provider, bot.model.as_deref()) {
+        crate::files::make_images(app, &attachments).await;
+    }
 
     let window = provider.model_info().map(|i| i.context_window).unwrap_or(0);
     let settings = compaction_settings(window);
@@ -495,6 +498,9 @@ async fn materialize_steering_messages(
             _ => &[],
         };
         crate::files::prefetch(app, attachments).await;
+        if pixels {
+            crate::files::make_images(app, attachments).await;
+        }
         if let Some(message) = steering_message(app, &chat_message, workdir, pixels) {
             out.push(message);
         }

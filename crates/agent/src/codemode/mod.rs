@@ -272,9 +272,10 @@ const ERROR_PREVIEW_CHARS: usize = 500;
 const CHARS_PER_TOKEN: usize = 4;
 /// How long calls still running when a script ends get to wind down after their cancel.
 const WIND_DOWN: Duration = Duration::from_secs(10);
-/// What one script may send the host, whatever its memory limit: the text it outputs, its
-/// images and their size, the calls it has started and not seen finish, and one call's
-/// arguments. Past the first or the third, the script stops.
+/// What one script may send the host, whatever its memory limit: the text it outputs, how many
+/// images, the calls it has started and not seen finish, and one call's arguments. Past the
+/// first or the third, the script stops. Each image is made one a model takes as it ends
+/// (`images::prepare`).
 const MAX_OUTPUT_CHARS: usize = 16 * 1024 * 1024;
 const MAX_IMAGES: usize = 10;
 const MAX_PENDING_CALLS: usize = 1000;
@@ -582,13 +583,19 @@ impl<'a> Run<'a> {
                         }
                         output.push(ContentPart::text(text));
                     }
-                    Some(Event::Image(data)) => match check_image(&data, images) {
-                        Ok(mime_type) => {
-                            images += 1;
-                            output.push(ContentPart::Image { data, mime_type: mime_type.into() });
+                    // Kept as the script gave it until the script ends (`inline_images`), so making
+                    // a large one smaller never holds up the deadline or a stop.
+                    Some(Event::Image(_)) if images >= MAX_IMAGES => {
+                        output.push(ContentPart::text(format!("[An image was left out: a script's output holds at most {MAX_IMAGES} images]")));
+                    }
+                    Some(Event::Image(data)) => {
+                        output_chars += data.len();
+                        if output_chars > MAX_OUTPUT_CHARS {
+                            break End::Limit(format!("Its output passed {} MB, so it was stopped.", MAX_OUTPUT_CHARS / (1024 * 1024)));
                         }
-                        Err(why) => output.push(ContentPart::text(format!("[An image was left out: {why}]"))),
-                    },
+                        images += 1;
+                        output.push(ContentPart::Image { data, mime_type: String::new() });
+                    }
                     Some(Event::Done { value, writes }) => {
                         if output_chars + value.as_ref().map_or(0, String::len) > MAX_OUTPUT_CHARS {
                             break End::Limit(format!("Its output passed {} MB, so it was stopped.", MAX_OUTPUT_CHARS / (1024 * 1024)));
@@ -784,7 +791,8 @@ impl<'a> Run<'a> {
         }
     }
 
-    async fn finish(&self, end: End, mut items: Vec<ContentPart>, max_output_tokens: Option<u64>, stored: &BTreeMap<String, String>, started: Instant) -> ScriptRun {
+    async fn finish(&self, end: End, items: Vec<ContentPart>, max_output_tokens: Option<u64>, stored: &BTreeMap<String, String>, started: Instant) -> ScriptRun {
+        let mut items = inline_images(items).await;
         let calls = self.calls.lock().unwrap().clone();
         let mut returned = None;
         // The store's limits hold here too, whatever the script did to its own copy of them.
@@ -883,14 +891,25 @@ fn read_arguments(name: &str, json: Option<&str>, absent: Value) -> Result<Value
     }
 }
 
-/// The type of an image the result can carry, as its bytes say whatever the script labeled it:
-/// one every provider takes, in valid base64, and not too many or too large. The error says why
-/// it was left out.
-fn check_image(data: &str, images: usize) -> Result<&'static str, String> {
-    if images >= MAX_IMAGES {
-        return Err(format!("a script's output holds at most {MAX_IMAGES} images"));
+/// The script's images as a model takes them (`images::prepare`), made off the async threads;
+/// one that cannot go becomes a line saying why.
+async fn inline_images(items: Vec<ContentPart>) -> Vec<ContentPart> {
+    if !items.iter().any(|item| matches!(item, ContentPart::Image { .. })) {
+        return items;
     }
-    crate::images::inline_type(data)
+    let made = tokio::task::spawn_blocking(move || {
+        items
+            .into_iter()
+            .flat_map(|item| match item {
+                ContentPart::Image { data, .. } => match crate::images::prepare_base64(&data) {
+                    Ok(image) => image.into_parts(),
+                    Err(why) => vec![ContentPart::text(format!("[An image was left out: {why}]"))],
+                },
+                other => vec![other],
+            })
+            .collect()
+    });
+    made.await.unwrap_or_else(|error| vec![ContentPart::text(format!("[The script's output was lost making its images: {error}]"))])
 }
 
 /// A successful script's `store()` writes, from `[[key, json], [key], …]`. Anything else is an

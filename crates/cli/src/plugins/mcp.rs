@@ -2102,7 +2102,13 @@ impl Tool for PluginTool {
             }
         };
         let is_error = result.is_error.unwrap_or(false);
-        let mut content = model_content(&result);
+        // Off the async threads: making a large image one a model takes takes a moment.
+        let (result, mut content) = tokio::task::spawn_blocking(move || {
+            let content = model_content(&result);
+            (result, content)
+        })
+        .await
+        .map_err(|e| ToolError(format!("{tool} failed: {e}")))?;
         if is_error && content.iter().all(|part| part.as_text().is_none_or(|text| text.trim().is_empty())) {
             content = vec![ContentPart::text(format!("{} {tool} reported an error", self.plugin_name))];
         }
@@ -2144,7 +2150,7 @@ impl PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let (content, structured) = match self.kind {
-            ToolKind::ReadResource => read_contents(structured),
+            ToolKind::ReadResource => tokio::task::spawn_blocking(move || read_contents(structured)).await.map_err(|e| ToolError(format!("{tool} failed: {e}")))?,
             _ => (vec![ContentPart::text(serde_json::to_string_pretty(&structured).unwrap_or_default())], structured),
         };
         let blocks: Vec<Value> = content
@@ -2241,7 +2247,7 @@ fn read_contents(read: Value) -> (Vec<ContentPart>, Value) {
             }
             (None, Some(blob)) => match mime.starts_with("image/").then(|| model_image(blob).ok()).flatten() {
                 Some(image) => {
-                    content.push(image);
+                    content.extend(image);
                     contents.push(json!({ "uri": uri, "mimeType": mime, "blob": blob }));
                 }
                 None => match save_blob(uri, blob) {
@@ -2285,14 +2291,14 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
         match block {
             ContentBlock::Text(text) => push_text(&mut content, &mut text_len, text.text.clone()),
             ContentBlock::Image(image) => match model_image(&image.data) {
-                Ok(part) => content.push(part),
+                Ok(parts) => content.extend(parts),
                 Err(why) => push_text(&mut content, &mut text_len, format!("[{} image, left out: {why}]", image.mime_type)),
             },
             ContentBlock::Audio(audio) => push_text(&mut content, &mut text_len, format!("[{} audio, left out]", audio.mime_type)),
             ContentBlock::Resource(embedded) => match &embedded.resource {
                 ResourceContents::TextResourceContents { text, .. } => push_text(&mut content, &mut text_len, text.clone()),
                 ResourceContents::BlobResourceContents { uri, mime_type: Some(mime), blob, .. } if mime.starts_with("image/") => match model_image(blob) {
-                    Ok(part) => content.push(part),
+                    Ok(parts) => content.extend(parts),
                     Err(why) => push_text(&mut content, &mut text_len, format!("[{uri}: {mime}, left out: {why}]")),
                 },
                 ResourceContents::BlobResourceContents { uri, mime_type, .. } => {
@@ -2314,11 +2320,12 @@ fn model_content(result: &rmcp::model::CallToolResult) -> Vec<ContentPart> {
     content
 }
 
-/// An image of a result as a model takes it, typed by what its bytes say, or why it cannot go:
-/// providers refuse a whole request over an image they do not take, and the chat would fail at
-/// every later turn.
-fn model_image(data: &str) -> Result<ContentPart, String> {
-    lorca_agent::images::inline_type(data).map(|mime_type| ContentPart::Image { data: data.to_string(), mime_type: mime_type.into() })
+/// An image of a result as a model takes it (`images::prepare`), with a note when it changed on
+/// the way, or why it cannot go: providers refuse a whole request over an image they do not
+/// take, and the chat would fail at every later turn. A large one takes a moment, so results
+/// are made off the async threads.
+fn model_image(data: &str) -> Result<Vec<ContentPart>, String> {
+    lorca_agent::images::prepare_base64(data).map(lorca_agent::images::Inline::into_parts)
 }
 
 /// Adds a result's text, cut where the result's text reaches `MAX_RESULT_CHARS`.
@@ -2623,10 +2630,16 @@ mod tests {
         assert_eq!(last_words(["", "  ", "    at frame (x.js:1:1)"].into_iter()), None);
     }
 
-    /// A 1×1 PNG, an SVG, and the first bytes of a JPEG, in base64.
+    /// A 1×1 PNG, and text labeled an image, which no system reads as one, in base64.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-    const SVG: &str = "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=";
-    const JPEG: &str = "/9j/4AAQSkZJRgAB";
+    const NOT_AN_IMAGE: &str = "bm90IGFuIGltYWdl";
+
+    /// A small JPEG, in base64.
+    fn jpeg() -> String {
+        let mut jpeg = Vec::new();
+        image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(8, 8, image::Rgb([20, 120, 220]))).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, jpeg)
+    }
 
     #[test]
     fn results_reach_the_model_without_binary_data() {
@@ -2637,8 +2650,8 @@ mod tests {
             { "type": "resource", "resource": { "uri": "file:///a.pdf", "mimeType": "application/pdf", "blob": "JVBERi0=" } },
             { "type": "resource", "resource": { "uri": "file:///a.png", "mimeType": "image/png", "blob": PNG } },
             { "type": "resource_link", "uri": "file:///b.md", "name": "b.md" },
-            { "type": "image", "data": SVG, "mimeType": "image/svg+xml" },
-            { "type": "image", "data": JPEG, "mimeType": "image/png" },
+            { "type": "image", "data": NOT_AN_IMAGE, "mimeType": "image/svg+xml" },
+            { "type": "image", "data": jpeg(), "mimeType": "image/png" },
             { "type": "resource", "resource": { "uri": "file:///c.png", "mimeType": "image/png", "blob": "iVBORw0=" } }
         ] }))
         .unwrap();
@@ -2652,14 +2665,14 @@ mod tests {
                 "embedded",
                 "[file:///a.pdf: application/pdf, left out]",
                 "[file:///b.md (b.md)]",
-                "[image/svg+xml image, left out: it is not a PNG, JPEG, GIF, or WebP image]",
-                "[file:///c.png: image/png, left out: it is not a PNG, JPEG, GIF, or WebP image]"
+                "[image/svg+xml image, left out: it is not an image Lorca can read]",
+                "[file:///c.png: image/png, left out: it is not an image Lorca can read]"
             ]
         );
         let types: Vec<&str> = content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
         assert_eq!(types, ["image/png", "image/jpeg"], "an embedded image is an image, and an image has the type its bytes say");
         let shown = format!("{content:?}");
-        assert!(!shown.contains("QVVESU8=") && !shown.contains("JVBERi0=") && !shown.contains(SVG), "audio and other binary data never reach the model as text");
+        assert!(!shown.contains("QVVESU8=") && !shown.contains("JVBERi0=") && !shown.contains(NOT_AN_IMAGE), "audio and other binary data never reach the model as text");
     }
 
     /// A server at the other end of `io` that answers the handshake and lists one tool a page,
@@ -2792,7 +2805,7 @@ mod tests {
             { "uri": "file:///a.md", "mimeType": "text/markdown", "text": "# A" },
             { "uri": "file:///b.png", "mimeType": "image/png", "blob": PNG },
             { "uri": "file:///docs/report.pdf", "mimeType": "application/pdf", "blob": pdf },
-            { "uri": "file:///logo.svg", "mimeType": "image/svg+xml", "blob": SVG }
+            { "uri": "file:///logo.svg", "mimeType": "image/svg+xml", "blob": NOT_AN_IMAGE }
         ] }));
         assert_eq!(content[0].as_text(), Some("# A"));
         assert!(matches!(&content[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"));

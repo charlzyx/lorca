@@ -70,3 +70,7 @@ process-wrap = { version = "10", features = ["tokio1"], optional = true }
 [target.'cfg(windows)'.dependencies]
 # `serve --parent-pid` watches the parent through a process handle.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# Real images for the attachment tests; the agent crate builds the same crate already.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

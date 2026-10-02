@@ -420,18 +420,22 @@ async fn a_script_cannot_flood_the_host() {
 #[tokio::test]
 async fn images_the_model_cannot_take_are_left_out() {
     let codemode = tool(vec![]);
-    // A JPEG labeled PNG keeps the type its bytes say, as providers refuse a mismatch, and
-    // wrapped base64 loses its line breaks.
-    let code = "image('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=');\nimage('data:image/png;base64,not base64!');\n\
-                image({ type: 'image', data: 'AAAA' });\nimage('data:image/png;base64,/9j/4AAQSkZJRgAB');\n\
-                for (let i = 0; i < 10; i++) image('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4\\n2mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');";
-    let result = run(&codemode, code).await;
+    let mut jpeg = Vec::new();
+    image::DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(8, 8, image::Rgb([200, 30, 30]))).write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+    let jpeg = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, jpeg);
+    // Data that is not base64 or no image is left out; a JPEG labeled PNG keeps the type its
+    // bytes say, as providers refuse a mismatch; wrapped base64 loses its line breaks; and the
+    // eleventh image is one too many.
+    let code = format!(
+        "image('data:image/png;base64,not base64!');\nimage({{ type: 'image', data: 'AAAA' }});\nimage('data:image/png;base64,{jpeg}');\n\
+         for (let i = 0; i < 8; i++) image('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4\\n2mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');"
+    );
+    let result = run(&codemode, &code).await;
     let types: Vec<&str> = result.content.iter().filter_map(|part| if let ContentPart::Image { mime_type, .. } = part { Some(mime_type.as_str()) } else { None }).collect();
     let text = text_of(&result);
-    assert_eq!(types.len(), 10, "{text}");
-    assert_eq!((types[0], types[1]), ("image/jpeg", "image/png"), "{text}");
-    assert_eq!(text.matches("it is not a PNG, JPEG, GIF, or WebP image").count(), 2, "an SVG, and data that is no image: {text}");
-    assert!(text.contains("its data is not base64"), "{text}");
+    assert_eq!(types, ["image/jpeg", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png", "image/png"], "{text}");
+    assert!(text.contains("[An image was left out: its data is not base64]"), "{text}");
+    assert!(text.contains("[An image was left out: it is not an image Lorca can read]"), "{text}");
     assert!(text.contains("at most 10 images"), "{text}");
 }
 

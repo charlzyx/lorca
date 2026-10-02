@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use base64::Engine;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -22,39 +21,15 @@ impl ReadTool {
     }
 }
 
-/// The type of an image file, by its first bytes, so it is never read as text. A BMP is named
-/// too, though no model takes it.
-fn image_mime(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("image/jpeg")
-    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        Some("image/png")
-    } else if bytes.starts_with(b"GIF8") {
-        Some("image/gif")
-    } else if bytes.len() > 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if is_bmp(bytes) {
-        Some("image/bmp")
-    } else {
-        None
-    }
-}
-
-/// A BMP by its whole file header, its reserved bytes zero and a known size of the header after
-/// it, so a text file that starts with "BM" still reads as text.
-fn is_bmp(bytes: &[u8]) -> bool {
-    bytes.len() >= 18 && bytes.starts_with(b"BM") && bytes[6..10] == [0; 4] && matches!(u32::from_le_bytes([bytes[14], bytes[15], bytes[16], bytes[17]]), 12 | 40 | 52 | 56 | 64 | 108 | 124)
-}
-
 #[async_trait]
 impl Tool for ReadTool {
     fn name(&self) -> &str {
         "read"
     }
     fn description(&self) -> &str {
-        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp). Images are sent as attachments, up to 3.75 MB and 8000 pixels on a side. \
-         For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. \
-         When you need the full file, continue with offset until complete."
+        "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp, tiff). Images are sent as attachments, \
+         scaled down to fit 2000x2000 pixels. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). \
+         Use offset/limit for large files. When you need the full file, continue with offset until complete."
     }
     fn parameters(&self) -> Value {
         json!({
@@ -78,14 +53,18 @@ impl Tool for ReadTool {
             return Err("Operation aborted".into());
         }
 
-        if let Some(mime) = image_mime(&bytes) {
-            // An image the model would refuse goes back as text saying why, never as an
-            // attachment that fails the chat's later turns.
-            let content = match crate::images::inline_type_of(&bytes) {
-                Ok(mime) => vec![
-                    ContentPart::text(format!("Read image file [{mime}]")),
-                    ContentPart::Image { data: base64::engine::general_purpose::STANDARD.encode(&bytes), mime_type: mime.to_string() },
-                ],
+        if let Some(mime) = crate::images::file_type(&bytes) {
+            // As a model takes it, after pi's read: converted, turned upright, or scaled down
+            // with a note saying so; one that cannot go is named with why, never attached.
+            let prepared = tokio::task::spawn_blocking(move || crate::images::prepare(&bytes)).await.map_err(|e| ToolError(e.to_string()))?;
+            let content = match prepared {
+                Ok(image) => {
+                    let mut text = format!("Read image file [{}]", image.mime_type);
+                    if let Some(note) = &image.note {
+                        text = format!("{text}\n{note}");
+                    }
+                    vec![ContentPart::text(text), ContentPart::Image { data: image.data, mime_type: image.mime_type }]
+                }
                 Err(why) => vec![ContentPart::text(format!("Read image file [{mime}]: {why}, so it is not attached."))],
             };
             return Ok(ToolResult { content, details: Value::Null, ..ToolResult::default() });
@@ -144,6 +123,7 @@ impl Tool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
     use std::sync::Arc;
 
     /// What reading a file with these bytes gives the model.
@@ -152,29 +132,32 @@ mod tests {
         ReadTool::new(dir.to_path_buf()).execute("call-1", json!({ "path": name }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap().content
     }
 
-    /// A PNG header of the given size: all the checks read.
-    fn png(width: u32, height: u32) -> Vec<u8> {
-        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
-        png.extend_from_slice(&width.to_be_bytes());
-        png.extend_from_slice(&height.to_be_bytes());
-        png
+    fn picture(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_fn(width, height, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 90])));
+        let mut bytes = Vec::new();
+        image.write_to(&mut std::io::Cursor::new(&mut bytes), format).unwrap();
+        bytes
+    }
+
+    fn text(parts: &[ContentPart]) -> &str {
+        parts[0].as_text().unwrap()
     }
 
     #[tokio::test]
-    async fn only_images_a_model_takes_are_attached() {
+    async fn images_go_as_a_model_takes_them() {
         let dir = std::env::temp_dir().join(format!("lorca-read-images-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let small = read(&dir, "small.png", &png(640, 480)).await;
-        assert_eq!(small[0], ContentPart::text("Read image file [image/png]"));
+        let small = read(&dir, "small.png", &picture(64, 48, ImageFormat::Png)).await;
+        assert_eq!(text(&small), "Read image file [image/png]");
         assert!(matches!(&small[1], ContentPart::Image { mime_type, .. } if mime_type == "image/png"), "{small:?}");
-        let bmp = read(&dir, "old.bmp", b"BM\x46\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00\x28\x00\x00\x00").await;
-        assert_eq!(bmp, [ContentPart::text("Read image file [image/bmp]: it is not a PNG, JPEG, GIF, or WebP image, so it is not attached.")]);
-        let mut large = png(640, 480);
-        large.resize(4 * 1024 * 1024, 0);
-        let large = read(&dir, "large.png", &large).await;
-        assert_eq!(large, [ContentPart::text("Read image file [image/png]: it is over 3.75 MB, so it is not attached.")]);
-        let page = read(&dir, "page.png", &png(1280, 9000)).await;
-        assert_eq!(page, [ContentPart::text("Read image file [image/png]: it is 1280×9000 pixels, over 8000 on a side, so it is not attached.")]);
+        let bmp = read(&dir, "old.bmp", &picture(64, 48, ImageFormat::Bmp)).await;
+        assert!(text(&bmp).contains("\n[Image converted from image/bmp to image/"), "{}", text(&bmp));
+        assert!(matches!(&bmp[1], ContentPart::Image { .. }));
+        let page = read(&dir, "page.png", &picture(2600, 100, ImageFormat::Png)).await;
+        assert!(text(&page).ends_with("\n[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]"), "{}", text(&page));
+        let cut = read(&dir, "cut.png", &picture(64, 48, ImageFormat::Png)[..40]).await;
+        assert_eq!(cut.len(), 1, "{cut:?}");
+        assert!(text(&cut).starts_with("Read image file [image/png]: ") && text(&cut).ends_with(", so it is not attached."), "{}", text(&cut));
         let notes = read(&dir, "cars.txt", b"BMW and Audi\nVolvo").await;
         assert_eq!(notes, [ContentPart::text("BMW and Audi\nVolvo")], "a text file that starts with BM is text");
         let _ = std::fs::remove_dir_all(&dir);

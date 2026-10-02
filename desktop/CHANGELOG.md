@@ -39,10 +39,13 @@ and the update window shows it.
 - Bots on ChatGPT, Grok, and OpenCode's GPT, Grok, and Muse Spark models see the images their
   tools return, such as a browser plugin's screenshot or an image file they read. They used to get
   only the text beside the image.
-- A chat keeps working when a bot reads an image no model takes, such as a BMP file or an image
-  over 3.75 MB or 8,000 pixels on a side, and when you attach a HEIC photo or an SVG. The bot is
-  told why it cannot see the image; before, every later message in that chat could fail. A text
-  file that starts with "BM" now reads as text instead of as a broken image.
+- Bots see the images you attach and their tools return in a form every model takes. A BMP, a
+  GIF, or a TIFF is converted, a photo taken sideways is turned upright, and a large photo or
+  screenshot is scaled down to fit 2,000 pixels, with a note telling the bot its original size.
+  An image that still cannot go, such as an SVG, or a HEIC photo, which only a Mac converts, is
+  named with the reason. Before, such an image could make every later message in its chat fail.
+  Each message sends a chat's latest 20 images, so a long chat full of screenshots keeps working,
+  and a text file that starts with "BM" now reads as text.
 - Pairing a computer or restoring your identity no longer asks you to connect a provider your
   account already has. Onboarding waits until the account's providers arrive from the relay, which a
   slow connection or a long list of chats used to outlast.

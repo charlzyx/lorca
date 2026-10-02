@@ -265,6 +265,11 @@ let messages = transform_messages(&request.messages, &TransformOptions {
 - **Tool call ids** from another model pass through `normalize_tool_call_id`, and their results are renamed to match.
 - **Failed and aborted turns** (`stop_reason` `Error` or `Aborted`) are left out: they are incomplete, and replaying them is what makes APIs reject a request.
 - **A call without a result** gets a `No result provided` error result before the next assistant turn, the next user message, or the end, so every `tool_use` has its `tool_result`.
+- **A request carries only its latest images**: at most 20 (`MAX_REQUEST_IMAGES`; Anthropic refuses an image over 2000 pixels on a side in a request with more) and 16 MB of base64 (`MAX_REQUEST_IMAGE_BYTES`, under Gemini's 20 MB request and Anthropic's 32 MB). Older ones become `(older image omitted: a request carries only the latest images)`. Past the count they leave ten at a time, so the same ones stay out from one request to the next and the cached prefix breaks once in ten images; past the bytes, only as many as must, and never the latest.
+
+## Images
+
+`agent::images::prepare(bytes)` (and `prepare_base64`) makes any image into one a model takes inline, after pi's: a PNG, JPEG, or WebP that is upright, within 2000×2000 pixels, and under 4.5 MB of base64 goes as it is; anything else (a BMP, a GIF, a TIFF, an ICO, a photo its camera turned, a large screenshot, and on a Mac a HEIC or AVIF through `sips`) is decoded with the `image` crate, turned upright, scaled down to fit (Lanczos3), and written as a PNG or a JPEG at 80, whichever is smaller (a JPEG alone for a photo), then at lower qualities and smaller sizes while it is still too large. `Inline::note` tells the model what changed, in pi's words: `[Image converted from image/bmp to image/png.]`, or `[Image: original 2600x100, displayed at 2000x77. Multiply coordinates by 1.30 to map to original image.]`. The error says why an image cannot go. Decoding a large image takes a moment (a 12-megapixel photo about a quarter of a second in a release build), so callers run it off the async threads. Every image Lorca shows a model goes through it: `read`, codemode's `image()`, MCP results, and attachments. `images::file_type(bytes)` tells an image file from text by its first bytes.
 
 ## Retries and error classes
 
