@@ -381,6 +381,7 @@
 "Low" = "低";
 "Machine" = "机器";
 "Machine key" = "机器密钥";
+"Make Owner" = "设为负责人";
 "Manage…" = "管理…";
 "Marketplace" = "市场";
 "Marketplace (⇧⌘M)" = "市场 (⇧⌘M)";
@@ -479,6 +480,7 @@
 "OS" = "操作系统";
 "Other Server…" = "其他服务器…";
 "Overwrite with mine" = "用我的版本覆盖";
+"Owner" = "负责人";
 "Pair" = "配对";
 "Pair a Device" = "配对设备";
 "Pair a Device…" = "配对设备…";
@@ -542,6 +544,7 @@
 "Remove" = "移除";
 "Remove %@ from %@?" = "要从 %2$@ 移除 %1$@ 吗？";
 "Remove from chat" = "从聊天中移除";
+"Remove from Chat" = "从聊天中移除";
 "Remove Image" = "移除图像";
 "Remove…" = "移除…";
 "Removing…" = "正在移除…";

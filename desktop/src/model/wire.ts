@@ -190,6 +190,7 @@ export interface WireChat {
   kind: string;
   title?: string | null;
   bot_ids: string[];
+  owner_bot_id?: string | null;
   is_pinned: boolean;
   created_at: number;
   messages?: WireMessage[] | null;
@@ -607,6 +608,7 @@ export function toChat(wire: WireChat, existing?: { messages: Message[]; unreadC
     createdAt: seconds(wire.created_at),
     usage: wire.usage ? toUsage(wire.usage) : undefined,
     hasMore: wire.has_more ?? existing?.hasMore ?? false,
+    ownerBotID: optional(wire.owner_bot_id),
   };
 }
 

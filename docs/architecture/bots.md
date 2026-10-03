@@ -4,7 +4,7 @@
 
 A new identity starts with one bot, **Chef**, a chief of staff on the first Runner: an ordinary bot whose description has it plan the work, delegate each task to the right teammate with `message_bot`, propose a new one for `create_bot` when none fits, and do hands-on work when necessary. Nothing about it is privileged; rename or delete it like any bot.
 
-A chat has a `kind`. A DM is one bot and never gains or loses members; there is one DM per bot. A group holds one to six bots, can add or remove them after creation, and has an `owner_bot_id` (the bot holding the work; defaults to the first member, `chats.set_owner` changes it).
+A chat has a `kind`. A DM is one bot and never gains or loses members; there is one DM per bot. A group holds one to six bots, can add or remove them after creation, and has an `owner_bot_id` (the bot holding the work, marked as the owner in every member's system prompt; defaults to the first member, and moves to the first remaining one when the owner leaves). `chats.set_owner` changes it: in the macOS and Windows/Linux inspectors the owner's row reads Owner, and a click or right-click on a member of a group with several offers Make Owner beside Remove from Chat; on the phone, tapping a member in Details makes it the owner.
 
 Deleting a bot removes its DM and routines and removes it from every group. A group with other bots keeps its transcript and moves ownership when needed; a group whose last bot was deleted is removed. The macOS sidebar treats Delete on a DM as this bot deletion and says so in its confirmation sheet. Deleting a group removes only that chat.
 

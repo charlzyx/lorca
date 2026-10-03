@@ -338,6 +338,7 @@ enum Wire {
         var kind: String
         var title: String?
         var botIds: [String]
+        var ownerBotId: String?
         var isPinned: Bool
         var createdAt: Double
         var messages: [Message]?
@@ -705,7 +706,8 @@ extension Wire.Chat {
             isPinned: isPinned,
             createdAt: Date(timeIntervalSince1970: createdAt),
             usage: usage?.toModel(),
-            hasMore: hasMore ?? existingHasMore
+            hasMore: hasMore ?? existingHasMore,
+            ownerBotID: ownerBotId
         )
     }
 }

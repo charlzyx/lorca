@@ -1036,6 +1036,8 @@ export interface Chat {
   usage?: ChatUsage;
   /** The CLI holds messages older than the ones here; the transcript asks for them by page. */
   hasMore: boolean;
+  /** The group member holding the work, as the CLI last said. */
+  ownerBotID?: string;
 }
 
 export const isGroup = (chat: Chat) => chat.kind === "group";
@@ -1044,6 +1046,11 @@ export const isDM = (chat: Chat) => chat.kind === "dm";
 export const canAddBot = (chat: Chat) => isGroup(chat) && chat.botIDs.length < maxGroupBots;
 /** Whether a bot may leave. Groups keep at least one bot; DMs never change. */
 export const canRemoveBot = (chat: Chat) => isGroup(chat) && chat.botIDs.length > 1;
+/** A group's owner: the one set, else the first member, as the CLI picks. */
+export function chatOwner(chat: Chat): string | undefined {
+  if (!isGroup(chat)) return undefined;
+  return chat.ownerBotID && chat.botIDs.includes(chat.ownerBotID) ? chat.ownerBotID : chat.botIDs[0];
+}
 
 export function lastActivity(chat: Chat): number {
   return chat.messages[chat.messages.length - 1]?.createdAt ?? chat.createdAt;

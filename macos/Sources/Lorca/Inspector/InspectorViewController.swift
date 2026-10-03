@@ -248,21 +248,59 @@ final class InspectorViewController: NSViewController {
     private func showParticipants(_ members: [Bot], in chat: Chat) {
         let hosts = members.map { store.device($0.runnerID)?.name ?? L("unassigned") }
         let looks = members.map { AvatarView.content(for: $0) }
-        guard changed(participants, to: [members, looks, hosts, chat.canRemoveBot]) else { return }
+        guard changed(participants, to: [members, looks, hosts, chat.canRemoveBot, chat.owner]) else { return }
         participants.setRows(
             zip(members, hosts).map { bot, host in
                 let row = keptRow("bot:\(bot.id)") { BotRow() }
+                let isOwner = chat.owner == bot.id
                 row.configure(
                     bot: bot,
-                    detailText: "\(bot.provider.name) · \(host)",
+                    detailText: (isOwner ? "\(L("Owner")) · " : "") + "\(bot.provider.name) · \(host)",
                     accessorySymbol: chat.canRemoveBot ? "minus.circle" : nil,
                     tooltip: L("Remove from chat")
                 )
                 row.onAccessory = { [weak self] in self?.onRemoveBot?(bot.id) }
                 // The avatar is the way to a bot's look: symbol, color, or an image.
                 row.onAvatarClick = { [weak self] in self?.presentAsSheet(BotLookViewController(botID: bot.id)) }
+                // In a group of several, a click or a right-click on a member offers to make it
+                // the owner.
+                let menu = chat.isGroup && members.count > 1 ? memberMenu(for: bot.id, in: chat) : nil
+                row.menu = menu
+                row.onClick = menu.map { menu in
+                    { [weak row] in
+                        guard let row, let event = NSApp.currentEvent else { return }
+                        NSMenu.popUpContextMenu(menu, with: event, for: row)
+                    }
+                }
                 return row
             })
+    }
+
+    private func memberMenu(for botID: Bot.ID, in chat: Chat) -> NSMenu {
+        let menu = NSMenu()
+        let owner = NSMenuItem(title: L("Make Owner"), action: #selector(makeOwner(_:)), keyEquivalent: "")
+        owner.target = self
+        owner.representedObject = botID
+        owner.state = chat.owner == botID ? .on : .off
+        menu.addItem(owner)
+        if chat.canRemoveBot {
+            menu.addItem(.separator())
+            let remove = NSMenuItem(title: L("Remove from Chat"), action: #selector(removeMember(_:)), keyEquivalent: "")
+            remove.target = self
+            remove.representedObject = botID
+            menu.addItem(remove)
+        }
+        return menu
+    }
+
+    @objc private func makeOwner(_ sender: NSMenuItem) {
+        guard case let .chat(chatID) = selection, let botID = sender.representedObject as? Bot.ID else { return }
+        store.setOwner(botID, of: chatID)
+    }
+
+    @objc private func removeMember(_ sender: NSMenuItem) {
+        guard let botID = sender.representedObject as? Bot.ID else { return }
+        onRemoveBot?(botID)
     }
 
     private func showProfile(of bot: Bot) {

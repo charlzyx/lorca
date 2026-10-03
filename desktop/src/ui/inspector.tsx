@@ -9,9 +9,11 @@ import * as Format from "../model/format";
 import {
   canAddBot,
   canRemoveBot,
+  chatOwner,
   contextSummary,
   deviceSymbol,
   isDM,
+  isGroup,
   memoryBudgetSummary,
   memoryFilesSummary,
   providerModels,
@@ -29,6 +31,7 @@ import { errorText, store } from "../model/store";
 import { addBotToChat, presentMarketplace } from "./actions";
 import { box } from "./box";
 import { Button } from "./controls";
+import { popupMenu, separator } from "./menu";
 import { chatActions, openDevice } from "./root";
 import { ActionRow, BotRow, EditableRow, KeyValueRow, NoteRow, PluginRow, PopUpRow, Section, StatusRow, SummaryActionRow, SwitchRow } from "./sections";
 import { presentBotDescription } from "./sheets/botDescription";
@@ -159,13 +162,28 @@ function Participants(props: { chat: Chat; members: Bot[] }) {
             track.roster();
             return store.device(bot().runnerID)?.name ?? L("unassigned");
           };
+          const isOwner = () => chatOwner(props.chat) === bot().id;
+          // In a group of several, a click or a right-click on a member offers to make it the owner.
+          const hasMenu = () => isGroup(props.chat) && props.members.length > 1;
+          const menu = async (event: MouseEvent) => {
+            const chatID = props.chat.id;
+            const botID = bot().id;
+            const picked = await popupMenu(
+              [{ id: "owner", label: L("Make Owner"), checked: isOwner() }, ...(canRemoveBot(props.chat) ? [separator, { id: "remove", label: L("Remove from Chat") }] : [])],
+              { x: event.clientX, y: event.clientY },
+            );
+            if (picked === "owner") store.setOwner(botID, chatID);
+            else if (picked === "remove") store.removeBot(botID, chatID);
+          };
           return (
             <BotRow
               bot={bot()}
-              detail={`${providerName(bot().provider, store.providers)} · ${host()}`}
+              detail={`${isOwner() ? `${L("Owner")} · ` : ""}${providerName(bot().provider, store.providers)} · ${host()}`}
               accessorySymbol={canRemoveBot(props.chat) ? "minus.circle" : undefined}
               accessoryTooltip={L("Remove from chat")}
               onAccessory={() => store.removeBot(bot().id, props.chat.id)}
+              onClick={hasMenu() ? menu : undefined}
+              onContextMenu={hasMenu() ? menu : undefined}
               // The avatar is the way to a bot's look: symbol, color, or an image.
               onAvatarClick={() => presentBotLook(bot().id)}
             />

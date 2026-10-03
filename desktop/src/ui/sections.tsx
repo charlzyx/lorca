@@ -54,12 +54,23 @@ export function BotRow(props: {
   accessorySymbol?: string;
   accessoryTooltip?: string;
   onAccessory?: () => void;
-  onClick?: () => void;
+  onClick?: (event: MouseEvent) => void;
+  onContextMenu?: (event: MouseEvent) => void;
   onAvatarClick?: () => void;
   working?: boolean;
 }) {
   return (
-    <div class={["row", "bot-row", { clickable: !!props.onClick }]} data-label={props.bot.name} onClick={() => props.onClick?.()}>
+    <div
+      class={["row", "bot-row", { clickable: !!props.onClick }]}
+      data-label={props.bot.name}
+      onClick={(event) => props.onClick?.(event)}
+      onContextMenu={(event) => {
+        if (!props.onContextMenu) return;
+        event.preventDefault();
+        event.stopPropagation();
+        props.onContextMenu(event);
+      }}
+    >
       <Avatar
         content={botAvatar(props.bot)}
         size={28}

@@ -1236,6 +1236,18 @@ final class AppStore {
         perform("chats.remove_bot", ["chat_id": chatID, "bot_id": botID])
     }
 
+    /// Makes a group member the bot holding the work.
+    func setOwner(_ botID: Bot.ID, of chatID: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == chatID }),
+            chats[index].isGroup,
+            chats[index].botIDs.contains(botID),
+            chats[index].owner != botID
+        else { return }
+        chats[index].ownerBotID = botID
+        emit(.chatChanged(chatID))
+        perform("chats.set_owner", ["chat_id": chatID, "bot_id": botID])
+    }
+
     // MARK: - Messages
 
     @discardableResult

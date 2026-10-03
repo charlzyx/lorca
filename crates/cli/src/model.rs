@@ -474,8 +474,8 @@ pub struct ChatMeta {
     #[serde(default)]
     pub title: Option<String>,
     pub bot_ids: Vec<String>,
-    /// The bot that owns the work in this chat right now. Unaddressed messages go to it; a
-    /// handoff can pass it on. Empty means the members decide.
+    /// A group's member holding the work, marked as the owner in every member's system prompt.
+    /// Empty means the first member; `chats.set_owner` changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_bot_id: Option<String>,
     #[serde(default)]
