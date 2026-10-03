@@ -57,7 +57,7 @@ import {
 import { SettingsPage } from "./settings/panes";
 import { chatForShortcut, ChatsSidebar, SettingsSidebar } from "./sidebar";
 import { Loading, Offline, Placeholder } from "./states";
-import { setupWindow } from "./window";
+import { setupWindow, setWindowTitle } from "./window";
 
 /** The narrowest the content gets before the side panes give way. */
 const contentMinWidth = 460;
@@ -181,7 +181,7 @@ export function MainWindow(props: RouteSectionProps) {
     paneLayout.open = undefined;
   });
 
-  // The window's title: the chat's, the pane's, or the app's.
+  // The title: the chat's, the pane's, or the app's; the window's adds " - Lorca".
   const title = createMemo(() => {
     track.chats();
     const current = selection.read();
@@ -195,7 +195,7 @@ export function MainWindow(props: RouteSectionProps) {
   createEffect(
     () => title().title,
     (text) => {
-      document.title = text;
+      setWindowTitle(text);
     },
   );
 

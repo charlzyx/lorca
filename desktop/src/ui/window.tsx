@@ -9,6 +9,13 @@ import { commands, installMenuBar } from "./commands";
 import { popupMenu } from "./menu";
 import { alert } from "./overlay";
 
+/** Sets the window's title, which the taskbar and Alt+Tab show: the page's title, then ` - Lorca`, or
+ * the app's name alone when the page's title is the app's name. */
+export function setWindowTitle(text: string): void {
+  const name = hostInfo().name;
+  document.title = text === name ? name : `${text} - ${name}`;
+}
+
 function presentNote(title: string, body: string): void {
   void alert({ message: title, informative: body, style: "informational", buttons: [{ title: L("OK") }], width: 420 });
 }

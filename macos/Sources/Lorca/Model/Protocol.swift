@@ -461,6 +461,7 @@ enum Wire {
         var isRunning: Bool?
         var description: String?
         var targetBotId: String?
+        var scriptCommand: String?
         var from: String?
         var to: String?
         var reason: String?
@@ -652,6 +653,7 @@ extension Wire.Message {
                     isRunning: self.body.isRunning ?? false,
                     description: self.body.description,
                     targetBotID: self.body.targetBotId,
+                    scriptCommand: self.body.scriptCommand,
                     run: self.body.run.map {
                         CommandRun(
                             sessionID: $0.sessionId, command: $0.command ?? "",
