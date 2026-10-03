@@ -360,12 +360,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "chats.set_owner" => {
             let chat_id = string(&params, "chat_id")?;
             let bot_id = string(&params, "bot_id")?;
-            app.update_chat_meta(&chat_id, |meta| {
-                if meta.bot_ids.contains(&bot_id) {
-                    meta.owner_bot_id = Some(bot_id.clone());
-                }
-            })
-            .map_err(|e| e.to_string())?;
+            let chat = app.chat(&chat_id).ok_or("Unknown chat")?;
+            if !chat.meta.is_group() {
+                return Err("Only a group has an owner".into());
+            }
+            if !chat.meta.bot_ids.contains(&bot_id) {
+                return Err(format!("{} is not in {}", crate::runtime::name_of(app, &bot_id), app.chat_title(&chat.meta)));
+            }
+            app.update_chat_meta(&chat_id, |meta| meta.owner_bot_id = Some(bot_id.clone())).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "chats.search" => {

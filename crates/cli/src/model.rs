@@ -487,6 +487,14 @@ impl ChatMeta {
     pub fn is_group(&self) -> bool {
         self.kind == "group"
     }
+
+    /// A group's owner: the one set while it is a member, else the first member.
+    pub fn owner(&self) -> Option<&str> {
+        if !self.is_group() {
+            return None;
+        }
+        self.owner_bot_id.as_deref().filter(|id| self.bot_ids.iter().any(|member| member == id)).or(self.bot_ids.first().map(String::as_str))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

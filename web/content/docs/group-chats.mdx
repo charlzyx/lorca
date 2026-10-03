@@ -29,6 +29,16 @@ Another message steers the room. The bot currently taking its turn finishes that
 
 A bot whose Runner is offline is skipped, and the room moves on.
 
+## The owner
+
+Every group has an owner: the bot holding the work. Every bot in the group is told which one it is. The owner starts as the first bot you picked. To change it, click or right-click a bot in the chat's inspector and choose **Make Owner**, or tap a bot in the chat's Details on your phone. From a terminal:
+
+```bash
+lorca chats set-owner "Launch room" Developer
+```
+
+When the owner leaves the group, the first bot left in it becomes the owner.
+
 ## Groups or direct chats?
 
 - Use a **group** when several bots need the same context: a standup, a review, a plan that touches more than one job.

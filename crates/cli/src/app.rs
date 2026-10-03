@@ -752,6 +752,65 @@ impl App {
         self.state.lock().unwrap().devices.iter().find(|d| d.id == id).cloned()
     }
 
+    /// A chat's name as the apps show it: a group's title, else its members' names; a direct
+    /// chat's bot.
+    pub fn chat_title(&self, chat: &ChatMeta) -> String {
+        if let Some(title) = chat.title.as_deref().map(str::trim).filter(|title| chat.is_group() && !title.is_empty()) {
+            return title.to_string();
+        }
+        chat.bot_ids.iter().map(|id| crate::runtime::name_of(self, id)).collect::<Vec<_>>().join(", ")
+    }
+
+    /// The group a person names: its id, or its title as the apps show it, in any case.
+    pub fn find_group(&self, query: &str) -> Result<Chat, String> {
+        let query = query.trim();
+        let chats = self.state.lock().unwrap().chats.clone();
+        if let Some(chat) = chats.iter().find(|chat| chat.meta.id == query) {
+            if !chat.meta.is_group() {
+                return Err(format!("{query} is the direct chat with {}; only a group has an owner.", self.chat_title(&chat.meta)));
+            }
+            return Ok(chat.clone());
+        }
+        let named: Vec<&Chat> = chats.iter().filter(|chat| chat.meta.is_group() && self.chat_title(&chat.meta).to_lowercase() == query.to_lowercase()).collect();
+        match named.as_slice() {
+            [chat] => Ok((*chat).clone()),
+            [] => Err(format!("No group is called \"{query}\".")),
+            many => Err(format!(
+                "{} groups are called \"{query}\"; name one by its id: {}.",
+                many.len(),
+                many.iter().map(|chat| chat.meta.id.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
+    /// The member of a group a person names: its id, or its name in any case, with or without
+    /// the `@`.
+    pub fn find_member(&self, chat: &Chat, query: &str) -> Result<Bot, String> {
+        let query = query.trim();
+        let members: Vec<Bot> = {
+            let state = self.state.lock().unwrap();
+            chat.meta.bot_ids.iter().filter_map(|id| state.bots.iter().find(|bot| &bot.id == id).cloned()).collect()
+        };
+        if let Some(bot) = members.iter().find(|bot| bot.id == query) {
+            return Ok(bot.clone());
+        }
+        let name = query.strip_prefix('@').unwrap_or(query).to_lowercase();
+        let named: Vec<&Bot> = members.iter().filter(|bot| bot.name.to_lowercase() == name).collect();
+        let title = self.chat_title(&chat.meta);
+        match named.as_slice() {
+            [bot] => Ok((*bot).clone()),
+            [] => Err(format!(
+                "{query} is not in {title}. Its bots: {}.",
+                members.iter().map(|bot| bot.name.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+            many => Err(format!(
+                "{} bots in {title} are called {query}; name one by its id: {}.",
+                many.len(),
+                many.iter().map(|bot| bot.id.as_str()).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+
     pub fn routine(&self, id: &str) -> Option<Routine> {
         self.state.lock().unwrap().routines.iter().find(|r| r.id == id).cloned()
     }
@@ -1919,6 +1978,46 @@ mod tests {
             app.store.outbox().unwrap().iter().filter_map(|item| item.group.as_deref()).collect::<Vec<_>>(),
             vec!["dm-b2", "shared"]
         );
+    }
+
+    #[test]
+    fn groups_and_members_are_found_by_id_or_by_the_name_the_apps_show() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        {
+            let mut state = app.state.lock().unwrap();
+            let mut scout = bot("b1");
+            scout.name = "Scout".into();
+            let mut critic = bot("b2");
+            critic.name = "Critic".into();
+            state.bots = vec![scout, critic];
+            let mut launch = chat("launch", "group", &["b1", "b2"], None);
+            launch.meta.title = Some("Launch room".into());
+            let mut other = chat("other", "group", &["b2"], None);
+            other.meta.title = Some("Standup".into());
+            let mut again = chat("again", "group", &["b1"], None);
+            again.meta.title = Some("standup".into());
+            state.chats = vec![chat("dm-b1", "dm", &["b1"], Some("b1")), launch, other, again, chat("untitled", "group", &["b2", "b1"], Some("b1"))];
+        }
+
+        assert_eq!(app.find_group("launch").unwrap().meta.id, "launch");
+        assert_eq!(app.find_group("LAUNCH ROOM").unwrap().meta.id, "launch");
+        assert_eq!(app.find_group("Critic, Scout").unwrap().meta.id, "untitled", "an untitled group goes by its members' names");
+        assert!(app.find_group("Standup").unwrap_err().contains("other, again"));
+        assert!(app.find_group("dm-b1").unwrap_err().contains("only a group has an owner"));
+        assert!(app.find_group("Scout").is_err(), "a direct chat's bot names no group");
+
+        let launch = app.find_group("launch").unwrap();
+        assert_eq!(app.find_member(&launch, "critic").unwrap().id, "b2");
+        assert_eq!(app.find_member(&launch, "@Scout").unwrap().id, "b1");
+        assert_eq!(app.find_member(&launch, "b2").unwrap().id, "b2");
+        let standup = app.find_group("other").unwrap();
+        assert_eq!(app.find_member(&standup, "Scout").unwrap_err(), "Scout is not in Standup. Its bots: Critic.");
+
+        assert_eq!(launch.meta.owner(), Some("b1"), "no owner set means the first member");
+        assert_eq!(app.find_group("untitled").unwrap().meta.owner(), Some("b1"));
+        assert_eq!(chat("gone", "group", &["b2"], Some("b1")).meta.owner(), Some("b2"), "an owner who left is not the owner");
+        assert_eq!(chat("dm", "dm", &["b1"], Some("b1")).meta.owner(), None);
     }
 
     #[test]

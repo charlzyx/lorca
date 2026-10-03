@@ -44,6 +44,8 @@ On Windows, bots run their commands in Git for Windows' bash, not WSL's, so inst
 | `lorca provider remove <kind>` | Disconnects a provider on every device, or deletes a custom one (`custom:openrouter`, as `provider list` shows it). |
 | `lorca provider list` | Lists the connected providers. |
 | `lorca mcp …` | Manages this computer's own MCP servers; see [MCP servers](#mcp-servers). |
+| `lorca chats list` | Lists the chats: each one's id and bots, with a group's owner. |
+| `lorca chats set-owner <group> <bot>` | Makes a bot the [owner](/docs/group-chats#the-owner) of a group. Name the group by its title or id, and the bot by its name or id. |
 | `lorca models reload` | Checks lorca.app for a newer model catalog now. Lorca also checks on its own when it starts and when an app connects, at most once an hour, so new models arrive without an update. |
 | `lorca status` | Prints this device's state as JSON: devices, bots, chats, providers. |
 | `lorca doctor` | Checks the home folder, identity, port, relay, and `mcp.json`, and says what is wrong. |

@@ -64,6 +64,11 @@ enum Command {
         #[usage(subcommand)]
         command: ModelsCommand,
     },
+    /// The account's chats, and the owner of each group.
+    Chats {
+        #[usage(subcommand)]
+        command: ChatsCommand,
+    },
     /// Show identity, Devices, bots, and relay state.
     Status,
     /// Check the local setup.
@@ -185,6 +190,22 @@ enum McpCommand {
 }
 
 #[derive(Subcommands, Debug)]
+enum ChatsCommand {
+    /// List the chats: each one's id and bots, and a group's owner.
+    List,
+    /// Make a bot the owner of a group, the member holding the work.
+    ///
+    ///   lorca chats set-owner "Launch room" Developer
+    #[usage(verbatim_doc_comment)]
+    SetOwner {
+        /// The group's title or id, as `lorca chats list` shows it.
+        group: String,
+        /// The bot's name or id.
+        bot: String,
+    },
+}
+
+#[derive(Subcommands, Debug)]
 enum ModelsCommand {
     /// Fetch the latest model catalog from lorca.app now, rather than at the next hourly check.
     Reload,
@@ -200,8 +221,9 @@ async fn main() -> anyhow::Result<()> {
         print!("{}", Cli::render_help(Cli::command(), false).unwrap_or_default());
         return Ok(());
     };
-    // `lorca mcp` says how each step went in its own words; the log keeps to warnings.
-    let quiet = matches!(command, Command::Mcp { .. } | Command::Models { .. });
+    // `lorca mcp` and `lorca chats` say how each step went in their own words; the log keeps to
+    // warnings.
+    let quiet = matches!(command, Command::Mcp { .. } | Command::Models { .. } | Command::Chats { .. });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
         .with_target(false)
@@ -320,6 +342,7 @@ async fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Chats { command } => chats(&app, command).await,
         Command::Status => {
             let snapshot = app.snapshot();
             println!("{}", serde_json::to_string_pretty(&snapshot)?);
@@ -379,6 +402,71 @@ async fn provider(app: &std::sync::Arc<App>, command: ProviderCommand) -> anyhow
     let result = result.map_err(|message| anyhow::anyhow!(message))?;
     print_providers(&result["providers"]);
     Ok(())
+}
+
+/// Names groups and bots as the apps show them. A change goes through the running `lorca serve`
+/// when there is one, so the apps see it at once; otherwise here, followed by one sync pass.
+async fn chats(app: &std::sync::Arc<App>, command: ChatsCommand) -> anyhow::Result<()> {
+    match command {
+        ChatsCommand::List => {
+            print_chats(app);
+            Ok(())
+        }
+        ChatsCommand::SetOwner { group, bot } => {
+            let chat = app.find_group(&group).map_err(|message| anyhow::anyhow!("{message} `lorca chats list` shows the groups."))?;
+            let bot = app.find_member(&chat, &bot).map_err(|message| anyhow::anyhow!(message))?;
+            let title = app.chat_title(&chat.meta);
+            if chat.meta.owner() == Some(bot.id.as_str()) {
+                println!("{} is already the owner of {title}.", bot.name);
+                return Ok(());
+            }
+            let params = serde_json::json!({ "chat_id": chat.meta.id, "bot_id": bot.id });
+            let result = match serve_call(app.config.port, "chats.set_owner", &params).await? {
+                Some(result) => result,
+                None => {
+                    let result = Box::pin(lorca::api::dispatch(app, "chats.set_owner", params)).await;
+                    flush_outbox_once(app).await;
+                    result
+                }
+            };
+            result.map_err(|message| anyhow::anyhow!(message))?;
+            println!("{} is now the owner of {title}.", bot.name);
+            Ok(())
+        }
+    }
+}
+
+/// The groups, then the direct chats, each by title: id, title, and a group's bots with its owner.
+fn print_chats(app: &App) {
+    let chats: Vec<lorca::model::ChatMeta> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.clone()).collect();
+    if chats.is_empty() {
+        println!("No chats yet.");
+        return;
+    }
+    let mut rows: Vec<(bool, String, String, String)> = chats
+        .iter()
+        .map(|chat| {
+            let detail = if chat.is_group() {
+                chat.bot_ids
+                    .iter()
+                    .map(|id| {
+                        let name = runtime::name_of(app, id);
+                        if chat.owner() == Some(id.as_str()) { format!("{name} (owner)") } else { name }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                "direct chat".to_string()
+            };
+            (!chat.is_group(), app.chat_title(chat), chat.id.clone(), detail)
+        })
+        .collect();
+    rows.sort_by_key(|row| (row.0, row.1.to_lowercase()));
+    let id_width = rows.iter().map(|row| row.2.chars().count()).max().unwrap_or(0);
+    let title_width = rows.iter().map(|row| row.1.chars().count()).max().unwrap_or(0).min(32);
+    for (_, title, id, detail) in rows {
+        println!("  {id:<id_width$}  {title:<title_width$}  {detail}");
+    }
 }
 
 fn read_api_key() -> anyhow::Result<String> {
