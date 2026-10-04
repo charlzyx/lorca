@@ -297,6 +297,8 @@ export interface ChatMeta {
   title?: string | null;
   bot_ids: string[];
   owner_bot_id?: string;
+  /// What a group is for, which every member reads in its system prompt.
+  description?: string | null;
   is_pinned: boolean;
   created_at: number;
 }

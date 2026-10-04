@@ -330,12 +330,17 @@ export function bots(): Bot[] {
 }
 
 function chat(id: string, kind: Chat["kind"], botIDs: string[], messages: Message[], extra: Partial<Chat>): Chat {
-  return { id, kind, botIDs, messages, unreadCount: 0, isPinned: false, createdAt: Date.now(), hasMore: false, ...extra };
+  return { id, kind, botIDs, messages, unreadCount: 0, isPinned: false, createdAt: Date.now(), hasMore: false, groupDescription: "", ...extra };
 }
 
 export function chats(): Chat[] {
   return [
-    chat("chat-relay", "group", ["bot-nova", "bot-patch", "bot-scout"], launchRoomThread(), { customTitle: "Launch room", isPinned: true, createdAt: minutesAgo(400) }),
+    chat("chat-relay", "group", ["bot-nova", "bot-patch", "bot-scout"], launchRoomThread(), {
+      customTitle: "Launch room",
+      groupDescription: "Ship the relay launch: the TLS rollout, the release notes, and the go/no-go call on Friday.",
+      isPinned: true,
+      createdAt: minutesAgo(400),
+    }),
     chat("chat-nova", "dm", ["bot-nova"], managerThread(), { createdAt: minutesAgo(60 * 30) }),
     chat("chat-patch", "dm", ["bot-patch"], developerThread(), { unreadCount: 2, createdAt: minutesAgo(60 * 26) }),
     chat("chat-launch", "group", ["bot-quill", "bot-nova"], launchThread(), { customTitle: "Launch copy", createdAt: minutesAgo(60 * 52) }),

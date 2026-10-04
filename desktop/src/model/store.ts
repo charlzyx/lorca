@@ -708,6 +708,7 @@ export class AppStore {
       isPinned: false,
       createdAt: Date.now(),
       hasMore: false,
+      groupDescription: "",
     };
     this.chats = [chat, ...this.chats];
     this.sortChats();
@@ -756,6 +757,7 @@ export class AppStore {
         isPinned: false,
         createdAt: Date.now(),
         hasMore: false,
+        groupDescription: "",
       };
       this.chats = [chat, ...this.chats];
       this.sortChats();
@@ -1318,6 +1320,16 @@ export class AppStore {
     this.emit({ kind: "chatChanged", chatID: id });
     this.emit({ kind: "chatsChanged" });
     this.perform("chats.rename", { chat_id: id, title: trimmed });
+  }
+
+  /** What a group is for; every member reads it in its system prompt. */
+  setDescription(text: string, chatID: string): void {
+    const chat = this.chat(chatID);
+    const trimmed = text.trim();
+    if (!chat || !isGroup(chat) || chat.groupDescription === trimmed) return;
+    this.replaceChat({ ...chat, groupDescription: trimmed });
+    this.emit({ kind: "chatChanged", chatID });
+    this.perform("chats.set_description", { chat_id: chatID, description: trimmed });
   }
 
   addBot(botID: string, chatID: string): void {

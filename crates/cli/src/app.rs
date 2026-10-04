@@ -1174,6 +1174,7 @@ impl App {
         }
         let ids: Vec<String> = if meta.kind == "dm" {
             meta.title = None;
+            meta.description = None;
             meta.bot_ids.iter().take(1).cloned().collect()
         } else {
             meta.kind = "group".into();
@@ -1225,6 +1226,7 @@ impl App {
             title: None,
             bot_ids: vec![bot_id.to_string()],
             owner_bot_id: Some(bot_id.to_string()),
+            description: None,
             is_pinned: false,
             created_at: 0.0,
         })
@@ -1269,6 +1271,21 @@ impl App {
                 anyhow::bail!("Only group chats can be renamed");
             }
             chat.meta.title = title;
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    /// Sets what a group is for, which every member reads in its system prompt. A direct chat
+    /// is its bot's, and the bot's own description says what it is for.
+    pub fn describe_chat(&self, chat_id: &str, description: Option<String>) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let chat = state.chats.iter_mut().find(|c| c.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+            if !chat.meta.is_group() {
+                anyhow::bail!("Only a group has a description");
+            }
+            chat.meta.description = description;
         }
         self.roster_changed(true);
         Ok(())
@@ -1832,6 +1849,7 @@ mod tests {
                 title: None,
                 bot_ids: bot_ids.iter().map(|id| id.to_string()).collect(),
                 owner_bot_id: owner.map(str::to_string),
+                description: None,
                 is_pinned: false,
                 created_at: 1.0,
             },

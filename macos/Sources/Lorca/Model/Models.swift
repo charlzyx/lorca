@@ -982,6 +982,8 @@ struct Chat: Identifiable, Hashable {
     var hasMore = false
     /// The group member holding the work, as the CLI last said.
     var ownerBotID: Bot.ID? = nil
+    /// What a group is for, which every member reads in its system prompt; empty for none.
+    var groupDescription = ""
 
     var isGroup: Bool { kind == .group }
 

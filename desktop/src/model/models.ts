@@ -1041,6 +1041,8 @@ export interface Chat {
   hasMore: boolean;
   /** The group member holding the work, as the CLI last said. */
   ownerBotID?: string;
+  /** What a group is for, which every member reads in its system prompt; empty for none. */
+  groupDescription: string;
 }
 
 export const isGroup = (chat: Chat) => chat.kind === "group";

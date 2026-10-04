@@ -707,7 +707,8 @@ enum MockData {
                 messages: launchRoomThread(),
                 unreadCount: 0,
                 isPinned: true,
-                createdAt: minutesAgo(400)
+                createdAt: minutesAgo(400),
+                groupDescription: "Ship the relay launch: the TLS rollout, the release notes, and the go/no-go call on Friday."
             ),
             Chat(
                 id: "chat-nova",

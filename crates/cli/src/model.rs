@@ -483,6 +483,10 @@ pub struct ChatMeta {
     /// Empty means the first member; `chats.set_owner` changes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_bot_id: Option<String>,
+    /// What a group is for, in the user's words; every member reads it in its system prompt.
+    /// `chats.set_description` changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,
     pub created_at: f64,
@@ -499,6 +503,11 @@ impl ChatMeta {
             return None;
         }
         self.owner_bot_id.as_deref().filter(|id| self.bot_ids.iter().any(|member| member == id)).or(self.bot_ids.first().map(String::as_str))
+    }
+
+    /// A group's description, when it has one.
+    pub fn purpose(&self) -> Option<&str> {
+        self.description.as_deref().map(str::trim).filter(|text| self.is_group() && !text.is_empty())
     }
 }
 

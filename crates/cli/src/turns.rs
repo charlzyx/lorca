@@ -1444,6 +1444,9 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
                 prompt.push_str(&format!("- {}{marker}{owner} · runs on {host}\n", member.name));
             }
         }
+        if let Some(purpose) = chat.meta.purpose() {
+            prompt.push_str(&format!("\nThe user describes what this group is for:\n{purpose}\n"));
+        }
         prompt.push_str(
             "\nEveryone here, including the user, reads every message. After each new message the bots take turns in that \
              order, and a turn is yours now. Other bots' messages appear as \"[Name]: …\".\n\
@@ -3134,7 +3137,7 @@ mod tests {
 
     fn chat(id: &str, kind: &str, title: Option<&str>, bot_ids: &[&str]) -> Chat {
         Chat {
-            meta: ChatMeta { id: id.into(), kind: kind.into(), title: title.map(str::to_string), bot_ids: bot_ids.iter().map(|b| b.to_string()).collect(), owner_bot_id: None, is_pinned: false, created_at: 0.0 },
+            meta: ChatMeta { id: id.into(), kind: kind.into(), title: title.map(str::to_string), bot_ids: bot_ids.iter().map(|b| b.to_string()).collect(), owner_bot_id: None, description: None, is_pinned: false, created_at: 0.0 },
             unread_count: 0,
             usage: None,
             compactions: Vec::new(),
@@ -3146,6 +3149,51 @@ mod tests {
         message.created_at = at;
         message.state = MessageState::Complete;
         message
+    }
+
+    fn room_job(chat_id: &str, bot_id: &str) -> Job {
+        Job {
+            id: "job".into(),
+            chat_id: chat_id.into(),
+            bot_id: bot_id.into(),
+            kind: "room_turn".into(),
+            trigger_message_id: String::new(),
+            routine_id: None,
+            check: None,
+            requested_by: "dev".into(),
+            from_bot_id: None,
+            hops: 0,
+            round: 1,
+            is_winding_down: false,
+            setup: None,
+            created_at: 0.0,
+        }
+    }
+
+    /// Every member reads what the group is for, and a direct chat has no such line.
+    #[test]
+    fn a_groups_description_reaches_every_members_prompt() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (chef, scout) = (bot("b1", "Chef"), bot("b2", "Scout"));
+        let mut group = chat("room", "group", Some("Launch room"), &["b1", "b2"]);
+        group.meta.description = Some("  Plan the October launch and keep the checklist current.  ".into());
+        let dm = chat("dm", "dm", None, &["b1"]);
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.extend([chef.clone(), scout.clone()]);
+            state.chats.extend([group.clone(), dm.clone()]);
+        }
+        for member in [&chef, &scout] {
+            let store = MemoryStore::for_bot(&app.config.home, member);
+            let prompt = system_prompt(app, &group, member, &room_job("room", &member.id), &store, None, &[]);
+            assert!(prompt.contains("The user describes what this group is for:\nPlan the October launch and keep the checklist current.\n"), "{prompt}");
+        }
+
+        group.meta.description = Some("   ".into());
+        let store = MemoryStore::for_bot(&app.config.home, &chef);
+        assert!(!system_prompt(app, &group, &chef, &room_job("room", "b1"), &store, None, &[]).contains("what this group is for"));
+        assert!(!system_prompt(app, &dm, &chef, &room_job("dm", "b1"), &store, None, &[]).contains("what this group is for"));
     }
 
     #[tokio::test]

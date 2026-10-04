@@ -315,6 +315,15 @@ class Engine {
     void core.request("chats.rename", { chat_id: chatId, title });
   }
 
+  /// What a group is for; every member reads it in its system prompt.
+  setGroupDescription(chatId: string, description: string) {
+    const trimmed = description.trim();
+    const chat = chatById(chatId);
+    if (chat?.kind !== "group" || (chat.description ?? "") === trimmed) return;
+    this.patchChat(chatId, (meta) => ({ ...meta, description: trimmed || null }));
+    void core.request("chats.set_description", { chat_id: chatId, description: trimmed });
+  }
+
   pinChat(chatId: string, pinned: boolean) {
     this.patchChat(chatId, (meta) => ({ ...meta, is_pinned: pinned }));
     void core.request("chats.pin", { chat_id: chatId, pinned });

@@ -1211,6 +1211,17 @@ final class AppStore {
         perform("chats.rename", ["chat_id": id, "title": trimmed])
     }
 
+    /// What a group is for; every member reads it in its system prompt.
+    func setDescription(_ text: String, of chatID: Chat.ID) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = chats.firstIndex(where: { $0.id == chatID }), chats[index].isGroup,
+            chats[index].groupDescription != trimmed
+        else { return }
+        chats[index].groupDescription = trimmed
+        emit(.chatChanged(chatID))
+        perform("chats.set_description", ["chat_id": chatID, "description": trimmed])
+    }
+
     func addBot(_ botID: Bot.ID, to chatID: Chat.ID) {
         guard let index = chats.firstIndex(where: { $0.id == chatID }),
             chats[index].canAddBot,

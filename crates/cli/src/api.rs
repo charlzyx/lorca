@@ -250,6 +250,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     kind,
                     title: opt_string(&params, "title"),
                     owner_bot_id: opt_string(&params, "owner_bot_id").or_else(|| bot_ids.first().cloned()),
+                    description: opt_string(&params, "description").map(|text| text.trim().to_string()),
                     bot_ids,
                     is_pinned: false,
                     created_at: 0.0,
@@ -325,6 +326,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         "chats.rename" => {
             let title = params["title"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
             app.rename_chat(&string(&params, "chat_id")?, title).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "chats.set_description" => {
+            let description = params["description"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            app.describe_chat(&string(&params, "chat_id")?, description).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "chats.pin" => {
