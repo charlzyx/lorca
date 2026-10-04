@@ -509,6 +509,7 @@ enum Wire {
         var body: Body
         var state: State
         var createdAt: Double
+        var queued: Bool?
     }
 
     struct RosterChanged: Decodable {
@@ -690,13 +691,15 @@ extension Wire.Message {
         default: state = .complete
         }
 
-        return Message(
+        var message = Message(
             id: id, author: author, body: body, state: state,
             createdAt: Date(timeIntervalSince1970: createdAt),
             attachments: (self.body.attachments ?? []).map {
                 Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height)
             },
             replyTo: self.body.replyTo.map { ReplyQuote(messageID: $0.messageId, author: $0.author.toModel(), text: $0.text) })
+        message.queued = queued ?? false
+        return message
     }
 }
 

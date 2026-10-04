@@ -922,6 +922,8 @@ struct Message: Identifiable, Hashable {
     var attachments: [Attachment]
     /// The message the user answers with this one, quoted.
     var replyTo: ReplyQuote?
+    /// A message of the user's the bot's turn holds for its next step; Send now has it read now.
+    var queued = false
 
     init(
         id: String = "msg-\(UUID().uuidString.lowercased())",

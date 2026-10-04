@@ -359,4 +359,7 @@ export const zh: Record<string, string> = {
   "Replying to {name}": "回复 {name}",
   "Cancel reply": "取消回复",
   "In reply to {name}: {text}": "回复 {name}：{text}",
+  "Send now": "立即发送",
+  "Could not send now": "无法立即发送",
+  "Have the bot read this now. A command it is running moves to the background.": "让智能体现在就读到这条消息。它正在运行的命令会转到后台。",
 };

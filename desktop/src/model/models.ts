@@ -999,6 +999,8 @@ export interface Message {
   attachments: Attachment[];
   /** The message the user answers with this one, quoted. */
   replyTo?: ReplyQuote;
+  /** A message of the user's the bot's turn holds for its next step; Send now has it read now. */
+  queued?: boolean;
 }
 
 /** A message quoted by the user's reply: who wrote it and how it opens, as the CLI keeps it with the

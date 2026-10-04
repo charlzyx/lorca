@@ -828,8 +828,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             case .text:
                 let words = layout.rendered(for: message).plainText
                 let said = "\(authorName(of: message.author)): \(words.isEmpty ? Attachment.summary(message.attachments) : words)"
-                guard let quote = message.replyTo else { return said }
-                return "\(said) \(L("In reply to %@: %@", authorName(of: quote.author), quote.text))"
+                let held = message.queued ? " \(L("Waiting for the bot to finish its step."))" : ""
+                guard let quote = message.replyTo else { return said + held }
+                return "\(said) \(L("In reply to %@: %@", authorName(of: quote.author), quote.text))\(held)"
             case let .tool(tool) where tool.run != nil:
                 return CommandCellView.spokenText(run: tool.run!, botName: botName(of: message))
             case .tool, .handoff:
@@ -897,6 +898,7 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 )
                 messageCell.onReply = message.canBeQuoted ? { [weak self] in self?.startReply(to: message) } : nil
                 messageCell.onQuoteClick = message.replyTo.map { quote in { [weak self] in self?.reveal(quote.messageID) } }
+                messageCell.onSendNow = { [weak self] in self?.store.sendNow(message.id, in: chat.id) }
 
             case let .tool(tool) where tool.run != nil:
                 guard let commandCell = cell as? CommandCellView, let run = tool.run else { return }

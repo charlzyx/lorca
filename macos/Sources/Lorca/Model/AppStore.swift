@@ -1319,7 +1319,7 @@ final class AppStore {
         append(message, to: chatID)
 
         if isMock {
-            replyEngine?.respond(to: trimmed, in: chat)
+            replyEngine?.respond(to: trimmed, in: chat, messageID: message.id)
             return chatID
         }
 
@@ -1476,6 +1476,21 @@ final class AppStore {
         if working { runningJobs.append((id, chatID, botID, nil)) }
         emit(.respondingChanged(chatID))
         emit(.chatsChanged)
+    }
+
+    /// Has the bot's turn read a message it holds for its next step now: a command it waits on
+    /// goes to the background, and a reply in progress stops where it got to.
+    func sendNow(_ messageID: Message.ID, in chatID: Chat.ID) {
+        if isMock {
+            replyEngine?.sendNow(chatID: chatID)
+            return
+        }
+        perform("chats.send_now", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Marks a message the mock turn holds, or no longer holds.
+    func setMockQueued(_ messageID: Message.ID, in chatID: Chat.ID, _ queued: Bool) {
+        update(messageID, in: chatID) { $0.queued = queued }
     }
 
     func stopResponding(in chatID: Chat.ID) {

@@ -244,6 +244,8 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         last_flush: std::time::Instant::now(),
     })));
     let steering = (!chat.meta.is_group()).then(|| AgentMessageQueue::new(QueueMode::All));
+    // Send now cuts the step short for a message the queue holds.
+    let interrupt = steering.is_some().then(lorca_agent::StepInterrupt::new);
     let hooks = Arc::new(TurnHooks {
         app: app.clone(),
         chat_id: chat.meta.id.clone(),
@@ -264,6 +266,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         sink: Some(sink.clone()),
         retry: Some(RetryPolicy::default()),
         request: lorca_agent::RequestOptions::default().with_session_id(&chat.meta.id),
+        interrupt: interrupt.clone(),
     };
 
     // Events reach the transcript through the sink, in order with the tools' own writes.
@@ -271,6 +274,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     drop(_rx);
     if let Some(queue) = &steering {
         app.register_steering_queue(&chat.meta.id, &job.id, queue.clone());
+    }
+    if let Some(interrupt) = &interrupt {
+        app.register_step_interrupt(&chat.meta.id, &job.id, interrupt.clone());
     }
     let mut failed = false;
     let mut recovered = false;
@@ -318,10 +324,13 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     }
     if steering.is_some() {
         app.unregister_steering_queue(&chat.meta.id, &job.id);
+        app.unregister_step_interrupt(&chat.meta.id, &job.id);
     }
-    // Stop ends what the bot left running in the chat too; a turn that ends on its own does not.
+    // Stop ends what the bot left running in the chat too, and what the user sent meanwhile no
+    // longer waits for a step; a turn that ends on its own leaves both.
     if cancel.is_cancelled() {
         app.shell_sessions.stop_chat(&chat.meta.id);
+        app.unqueue_chat(&chat.meta.id);
     }
     let mut state = sink.0.lock().unwrap();
     state.finish();
@@ -452,6 +461,25 @@ fn steering_message(
 
 const STEERING_MESSAGE_KIND: &str = "lorca_steering";
 
+/// Send now: the direct chat's turn reads the messages it holds at once. The commands it runs go
+/// to the background and run on, its reply in progress stops where it got to, its other tools are
+/// cancelled, and its next step starts from what the user said. False when nothing held the
+/// message any more.
+pub fn send_now(app: &Arc<App>, chat_id: &str, message_id: &str) -> Result<bool, String> {
+    let message = app.message(chat_id, message_id).ok_or("Unknown message")?;
+    if message.author != Author::You || !message.queued {
+        return Ok(false);
+    }
+    let Some(interrupt) = app.step_interrupt(chat_id) else {
+        // The turn that held it has ended; the message's own turn reads it.
+        app.set_queued(chat_id, message_id, false);
+        return Ok(false);
+    };
+    app.shell_sessions.background_chat(app, chat_id);
+    interrupt.interrupt();
+    Ok(true)
+}
+
 /// A new message from the user reached this Runner. The direct-chat loop that owns the chat
 /// takes it as steering, and the questions the chat's turn waits on are dismissed: the user
 /// wrote instead of answering, and the turn could not read what they wrote until its question
@@ -473,6 +501,8 @@ pub(crate) fn steer_message(app: &App, message: &Message) -> bool {
     }
     let Some(queue) = app.steering_queue(&message.chat_id) else { return false };
     let Ok(data) = serde_json::to_value(message) else { return false };
+    // Held before it is queued, so the turn's promotion, which clears it, comes after.
+    app.set_queued(&message.chat_id, &message.id, true);
     queue.push(AgentMessage::Custom {
         kind: STEERING_MESSAGE_KIND.into(),
         data,
@@ -771,6 +801,7 @@ async fn memory_flush(
         sink: None,
         retry: Some(RetryPolicy::default()),
         request: lorca_agent::RequestOptions::default().with_session_id(&chat.meta.id),
+        interrupt: None,
     };
     let (tx, _rx) = mpsc::channel::<AgentEvent>(1);
     drop(_rx);
@@ -3239,6 +3270,43 @@ mod tests {
         let store = MemoryStore::for_bot(&app.config.home, &chef);
         assert!(!system_prompt(app, &group, &chef, &room_job("room", "b1"), &store, None, &[]).contains("what this group is for"));
         assert!(!system_prompt(app, &dm, &chef, &room_job("dm", "b1"), &store, None, &[]).contains("what this group is for"));
+    }
+
+    /// A message the turn holds for its next step says so on every Device until the turn reads
+    /// it; Send now has the turn read it at once.
+    #[tokio::test]
+    async fn send_now_reads_a_held_message_at_once() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(bot("b1", "Chef"));
+            state.chats.push(chat("chat", "dm", None, &["b1"]));
+        }
+        app.upsert_message(said("chat", Author::You, "run the checks", 1.0), false);
+        let queue = AgentMessageQueue::new(QueueMode::All);
+        app.register_steering_queue("chat", "job", queue.clone());
+        app.register_step_interrupt("chat", "job", lorca_agent::StepInterrupt::new());
+        let steer = said("chat", Author::You, "skip the slow suite", 2.0);
+        app.upsert_message(steer.clone(), false);
+
+        assert!(steer_message(app, &steer));
+        assert!(app.message("chat", &steer.id).unwrap().queued, "held for the next step");
+        assert_eq!(send_now(app, "chat", &steer.id), Ok(true));
+        // The loop reads it: the promotion lets go of it.
+        assert!(app.claim_steering_message("chat", &steer.id));
+        let read = app.message("chat", &steer.id).unwrap();
+        assert!(!read.queued && read.promoted_at.is_some());
+        assert_eq!(send_now(app, "chat", &steer.id), Ok(false), "nothing holds it any more");
+
+        // A turn that ended before it read one: Send now lets go of it for its own turn.
+        let late = said("chat", Author::You, "and the docs", 3.0);
+        app.upsert_message(late.clone(), false);
+        assert!(steer_message(app, &late));
+        app.unregister_steering_queue("chat", "job");
+        app.unregister_step_interrupt("chat", "job");
+        assert_eq!(send_now(app, "chat", &late.id), Ok(false));
+        assert!(!app.message("chat", &late.id).unwrap().queued);
     }
 
     #[tokio::test]

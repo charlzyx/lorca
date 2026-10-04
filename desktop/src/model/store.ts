@@ -187,7 +187,7 @@ export class AppStore {
   /** The chat last reported to the CLI as on screen; `undefined` is none reported yet. */
   private reportedWatchedChat: string | null | undefined = undefined;
   private loadingOlder = new Set<string>();
-  replyEngine: { respond(prompt: string, chat: Chat): void; cancel(chatID: string): void } | null = null;
+  replyEngine: { respond(prompt: string, chat: Chat, messageID: string): void; cancel(chatID: string): void; sendNow(chatID: string): void } | null = null;
   private started = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private bootstrapGeneration = 0;
@@ -1440,7 +1440,7 @@ export class AppStore {
     this.append(message, chatID);
 
     if (this.isMock) {
-      this.replyEngine?.respond(trimmed, chat);
+      this.replyEngine?.respond(trimmed, chat, message.id);
       return chatID;
     }
 
@@ -1576,6 +1576,21 @@ export class AppStore {
     if (working) this.runningJobs.push({ id, chatID, botID });
     this.emit({ kind: "respondingChanged", chatID });
     this.emit({ kind: "chatsChanged" });
+  }
+
+  /** Has the bot's turn read a message it holds for its next step now: a command it waits on goes
+   * to the background, and a reply in progress stops where it got to. */
+  sendNow(messageID: string, chatID: string): void {
+    if (this.isMock) {
+      this.replyEngine?.sendNow(chatID);
+      return;
+    }
+    this.perform("chats.send_now", { chat_id: chatID, message_id: messageID });
+  }
+
+  /** Marks a message the mock turn holds, or no longer holds. */
+  setMockQueued(messageID: string, chatID: string, queued: boolean): void {
+    this.update(messageID, chatID, (message) => ({ ...message, queued }));
   }
 
   stopResponding(chatID: string): void {

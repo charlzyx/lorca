@@ -439,6 +439,10 @@ pub struct Message {
     /// The apps keep showing when it was typed; transcript rebuilding uses this later time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promoted_at: Option<f64>,
+    /// A user message the turn at work holds for its next step: the turn reads it once the
+    /// step's reply and tools are done, or at once when the user asks (`chats.send_now`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queued: bool,
 }
 
 /// How much of a tool call's detail the apps get: enough for the "Messaged ◉ X" marker.
@@ -484,6 +488,7 @@ impl Message {
             state: MessageState::Complete,
             created_at: crate::config::now_secs(),
             promoted_at: None,
+            queued: false,
         }
     }
 

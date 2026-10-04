@@ -288,6 +288,8 @@ export interface Message {
   created_at: number;
   /** Later model-context position when this message steered work already in flight. */
   promoted_at?: number;
+  /** A message of the user's the bot's turn holds for its next step; Send now has it read now. */
+  queued?: boolean;
 }
 
 /// A message quoted by the user's reply: who wrote it and how it opens, as the core keeps it with

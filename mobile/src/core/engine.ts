@@ -225,6 +225,12 @@ class Engine {
     return message;
   }
 
+  /// Has the bot's turn read a message it holds for its next step now: a command it waits on goes
+  /// to the background, and a reply in progress stops where it got to. The bot's Runner does it.
+  async sendNow(chatId: string, messageId: string): Promise<void> {
+    await core.request("chats.send_now", { chat_id: chatId, message_id: messageId });
+  }
+
   /// The page of messages before the chat's first one, as the transcript nears its top. One
   /// request per chat at a time.
   async loadOlder(chatId: string): Promise<void> {

@@ -176,6 +176,7 @@ export interface WireMessage {
   body: WireBody;
   state: { kind: string; error?: string | null };
   created_at: number;
+  queued?: boolean | null;
 }
 
 export interface WireChatUsage {
@@ -588,6 +589,7 @@ export function toMessage(wire: WireMessage): Message {
     createdAt: seconds(wire.created_at),
     attachments: (body.attachments ?? []).map(toAttachment),
     replyTo: body.reply_to ? { messageID: body.reply_to.message_id, author: toAuthor(body.reply_to.author), text: body.reply_to.text } : undefined,
+    queued: wire.queued ?? undefined,
   };
 }
 

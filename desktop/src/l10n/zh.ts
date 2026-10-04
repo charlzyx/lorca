@@ -792,4 +792,6 @@ export const zh: Record<string, string> = {
   "Your identity is restored": "你的身份已恢复",
   "Zoom": "缩放",
   "You": "你",
+  "Send now": "立即发送",
+  "Have the bot read this now. A command it is running moves to the background.": "让智能体现在就读到这条消息。它正在运行的命令会转到后台。",
 };
