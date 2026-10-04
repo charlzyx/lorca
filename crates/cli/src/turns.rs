@@ -1530,7 +1530,8 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
              waiting and that they can type it into the command's card in this chat, then end your turn. Never ask for it in \
              a message: what they type in the card goes straight to the command and never reaches you or the chat. When a \
              command you left running ends by itself, you get a turn to hear how it went and carry on; bash_output shows \
-             more of what it printed.\n",
+             more of what it printed. Start a server, a watcher, or a long build with background: true, never with & or \
+             nohup: it keeps running after your turn, the user can see and stop it, and you hear when it ends.\n",
         );
     }
     if let Some(runner) = runner {
@@ -3996,6 +3997,78 @@ mod tests {
         app.delete_chat("chat");
         assert_eq!(session.end(), Some(SessionEnd::Stopped("Stopped: its chat or bot was deleted".into())));
         assert!(app.shell_sessions.find("chat", "b1", session.id()).is_none());
+    }
+
+    /// A server the bot starts in the background outlives its turn: its end, Stop in the chat,
+    /// and the idle limit leave it running and out of the transcript.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_background_command_outlives_stop_and_the_limits() {
+        use lorca_agent::tools::{BashSessions, BashTool};
+        let (scratch, chef) = chef_in_a_dm();
+        let app = &scratch.0;
+        let sessions: Arc<dyn BashSessions> = Arc::new(crate::shell::TurnSessions::new(app, "chat", "b1"));
+        let bash = BashTool::with_sessions(scratch.1.clone(), sessions).waiting_after(Duration::from_millis(300));
+        let card = |row: &Message| run_of(&app.message("chat", &row.id).unwrap()).unwrap();
+        let wait = |background: bool| json!({ "command": "sleep 60", "description": "Wait", "background": background });
+        app.shell_sessions.set_limits(crate::shell::Limits { idle: Duration::from_millis(900), max: 8 });
+
+        let mut turn = turn_state(app, &chef, "dev");
+        let (server, result) = call_tool(&mut turn, &bash, "call-1", json!({ "command": "echo listening; sleep 60", "description": "Serve", "background": true })).await;
+        let text = result.unwrap().text_content();
+        assert!(text.starts_with("listening\n") && text.contains("[Running in the background as session "), "{text}");
+        let (waiting, _) = call_tool(&mut turn, &bash, "call-2", wait(false)).await;
+        turn.finish();
+        assert_eq!((card(&server).state.as_str(), card(&server).handed_over), ("running", false), "Running tasks shows it, not the chat");
+        assert!(card(&waiting).handed_over);
+
+        // Silent past the idle limit, it runs on; Stop ends only the other.
+        row_when(app, &waiting.id, |run| run.outcome.as_deref() == Some("Stopped after 0.9 seconds without output")).await;
+        assert_eq!(card(&server).state, "running");
+        app.shell_sessions.set_limits(crate::shell::Limits::default());
+        let mut turn = turn_state(app, &chef, "dev");
+        let (waiting, _) = call_tool(&mut turn, &bash, "call-3", wait(false)).await;
+        crate::runtime::cancel_chat(app, "chat");
+        row_when(app, &waiting.id, |run| run.outcome.as_deref() == Some("Stopped")).await;
+        assert_eq!(card(&server).state, "running");
+
+        // Too many: every other command stops before a background one, and the one starting never.
+        app.shell_sessions.set_limits(crate::shell::Limits { idle: crate::shell::IDLE_LIMIT, max: 2 });
+        let (first, _) = call_tool(&mut turn, &bash, "call-4", wait(false)).await;
+        let (second, _) = call_tool(&mut turn, &bash, "call-5", wait(false)).await;
+        row_when(app, &first.id, |run| run.state == "stopped").await;
+        let (other, _) = call_tool(&mut turn, &bash, "call-6", wait(true)).await;
+        row_when(app, &second.id, |run| run.state == "stopped").await;
+        assert_eq!(card(&server).state, "running");
+        call_tool(&mut turn, &bash, "call-7", wait(true)).await.1.unwrap();
+        let stopped = row_when(app, &server.id, |run| run.state == "stopped").await;
+        assert_eq!(run_of(&stopped).unwrap().outcome.as_deref(), Some("Stopped to make room for a newer command (2 at most)"));
+        assert_eq!(card(&other).state, "running");
+        app.shell_sessions.shutdown(app);
+
+        // At a question its card shows, once no turn runs in the chat that could answer it.
+        app.shell_sessions.set_limits(crate::shell::Limits::default());
+        let lock = app.chat_lock("chat");
+        let turn_runs = lock.lock().await;
+        let mut turn = turn_state(app, &chef, "dev");
+        let command = "sleep 0.1; read -r -p 'Port 3000 is in use. Use another? (Y/n) ' x </dev/tty; echo port:$x; sleep 60";
+        let (asks, _) = call_tool(&mut turn, &bash, "call-8", json!({ "command": command, "description": "Serve", "background": true })).await;
+        turn.finish();
+        row_when(app, &asks.id, |run| run.state == "waiting").await;
+        assert!(!card(&asks).handed_over, "a turn may still answer it");
+        drop(turn_runs);
+        let asked = row_when(app, &asks.id, |run| run.handed_over).await;
+        assert_eq!(run_of(&asked).unwrap().prompt.as_deref(), Some("Port 3000 is in use. Use another? (Y/n)"));
+        app.shell_sessions.shutdown(app);
+
+        // One that ends by itself wakes its bot, as any command it left running does.
+        let mut turn = turn_state(app, &chef, "dev");
+        let (build, _) = call_tool(&mut turn, &bash, "call-9", json!({ "command": "sleep 2.5; echo built", "description": "Build", "background": true })).await;
+        let id = card(&build).session_id.unwrap();
+        assert!(card(&build).is_live());
+        row_when(app, &build.id, |run| run.state == "exited").await;
+        let job = crate::shell::wake_job(app, &app.shell_sessions, &id).expect("a command turn");
+        assert!(command_cue(app, &job).unwrap().contains("built"));
     }
 
     #[cfg(unix)]
