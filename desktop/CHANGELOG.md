@@ -6,6 +6,8 @@ and the update window shows it.
 
 ## [Unreleased]
 
+## [0.1.3]
+
 - The marketplace comes from lorca.app, so new plugins and bots show up without an update, and
   plugins you installed from it get their fixes the same way. Lorca checks when it starts, when the
   app connects, and when you or a bot look through the marketplace, at most once an hour, and a bot
