@@ -646,7 +646,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
 
         // A command running in its terminal: the user's answer goes to it from its card, or it
         // stops. Here when the bot runs here, else sealed to its Runner. The text is never kept.
-        "bash.stdin" | "bash.stop" => {
+        "bash.stdin" | "bash.stop" | "bash.background" => {
             let chat_id = string(&params, "chat_id")?;
             let message_id = string(&params, "message_id")?;
             let message = app.message(&chat_id, &message_id).ok_or("Unknown message")?;

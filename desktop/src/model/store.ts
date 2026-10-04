@@ -49,6 +49,7 @@ import {
   type ProviderModel,
   type Routine,
   commandRunOf,
+  runsInForeground,
 } from "./models";
 import { parseLocally, type McpEntry, type McpFile, type McpServer, type ParsedServer } from "./mcp";
 import { ReplyEngine } from "./replies";
@@ -1128,6 +1129,26 @@ export class AppStore {
       return;
     }
     await this.request("bash.stop", { chat_id: chatID, message_id: messageID });
+  }
+
+  /** Sends a command the bot is waiting on to the background (`bash.background`): the bot's call
+   * returns and the command runs on, out of the way of Stop in the chat. */
+  async sendCommandToBackground(chatID: string, messageID: string): Promise<void> {
+    if (this.isMock) {
+      this.update(messageID, chatID, (message) => {
+        if (message.body.kind !== "tool" || !message.body.tool.run) return message;
+        const run = { ...message.body.tool.run, background: true };
+        return { ...message, body: { kind: "tool", tool: { ...message.body.tool, isRunning: false, run } } };
+      });
+      return;
+    }
+    await this.request("bash.background", { chat_id: chatID, message_id: messageID });
+  }
+
+  /** The commands in `chatID` that a bot's call still waits on, which Run in Background sends
+   * there. */
+  foregroundCommands(chatID: string): Message[] {
+    return this.chat(chatID)?.messages.filter(runsInForeground) ?? [];
   }
 
   /** The demo has no Runner: an answer or a Stop ends the command at once. */

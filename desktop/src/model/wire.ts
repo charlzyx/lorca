@@ -135,6 +135,7 @@ export interface WireRun {
   reason?: string | null;
   rule?: string | null;
   handed_over?: boolean | null;
+  background?: boolean | null;
 }
 
 export interface WireBody {
@@ -525,6 +526,7 @@ export function toMessage(wire: WireMessage): Message {
             reason: optional(body.run.reason),
             rule: optional(body.run.rule),
             handedOver: body.run.handed_over ?? false,
+            background: body.run.background ?? false,
           }
         : undefined;
       modelBody = {

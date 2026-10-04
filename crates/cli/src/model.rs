@@ -372,6 +372,10 @@ pub struct CommandRun {
     /// then until it ends; before, the bot is still dealing with it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handed_over: bool,
+    /// It runs in the background: the bot started it there, or the user sent it from Running
+    /// tasks (`bash.background`). Stop in the chat leaves it running.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
     /// Its last lines, as the bottom of a terminal shows them: what it said after an answer
     /// ("Sorry, try again."). Never what was typed, which the terminal does not echo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
