@@ -429,13 +429,14 @@ fn convert_with_compaction(messages: &[AgentMessage]) -> Vec<LlmMessage> {
 /// to the transcript a second time.
 fn steering_message(
     app: &App,
+    bot: &Bot,
     message: &Message,
     workdir: &std::path::Path,
     pixels: bool,
 ) -> Option<AgentMessage> {
-    let (Author::You, Body::Text { text, attachments, mentions }) = (&message.author, &message.body) else { return None };
+    let (Author::You, Body::Text { text, attachments, mentions, reply_to }) = (&message.author, &message.body) else { return None };
     let timestamp = (message.promoted_at.unwrap_or(message.created_at) * 1000.0) as u64;
-    let text = with_mention_ids(app, text, mentions);
+    let text = user_words(app, bot, text, mentions, reply_to.as_ref());
     if attachments.is_empty() {
         return Some(user(&text, timestamp));
     }
@@ -506,7 +507,7 @@ async fn materialize_steering_messages(
         if pixels {
             crate::files::make_images(app, attachments).await;
         }
-        if let Some(message) = steering_message(app, &chat_message, workdir, pixels) {
+        if let Some(message) = steering_message(app, bot, &chat_message, workdir, pixels) {
             out.push(message);
         }
     }
@@ -1450,8 +1451,8 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
         prompt.push_str(
             "\nEveryone here, including the user, reads every message. After each new message the bots take turns in that \
              order, and a turn is yours now. Other bots' messages appear as \"[Name]: …\".\n\
-             - Speak when the new messages ask something of you, name you with @, or need what only you know. \
-             Otherwise answer with exactly PASS and nothing else.\n\
+             - Speak when the new messages ask something of you, name you with @, reply to your message, or need what only \
+             you know. Otherwise answer with exactly PASS and nothing else.\n\
              - When a message names other bots with @ and not you, PASS.\n\
              - One message per turn, short, addressed to the group. Do not narrate or repeat what others said.\n\
              - Teammates in this chat read it: talk to them here. message_bot is only for bots outside this chat.\n\
@@ -1778,12 +1779,15 @@ fn transcript_bounded(app: &App, chat: &Chat, bot: &Bot, workdir: &std::path::Pa
         }
         let timestamp = (message.promoted_at.unwrap_or(message.created_at) * 1000.0) as u64;
         match (&message.author, &message.body) {
-            (Author::You, Body::Text { text, attachments, mentions }) if attachments.is_empty() => out.push(user(&with_mention_ids(app, text, mentions), timestamp)),
-            (Author::You, Body::Text { text, attachments, mentions }) => {
+            (Author::You, Body::Text { text, attachments, mentions, reply_to }) if attachments.is_empty() => {
+                out.push(user(&user_words(app, bot, text, mentions, reply_to.as_ref()), timestamp))
+            }
+            (Author::You, Body::Text { text, attachments, mentions, reply_to }) => {
                 // A file is named by its path in the workspace; an image is shown as well.
                 let mut content = Vec::new();
-                if !text.is_empty() {
-                    content.push(ContentPart::text(with_mention_ids(app, text, mentions)));
+                let words = user_words(app, bot, text, mentions, reply_to.as_ref());
+                if !words.is_empty() {
+                    content.push(ContentPart::text(words));
                 }
                 for attachment in attachments {
                     content.extend(crate::files::content_parts(app, attachment, workdir, pixels));
@@ -1860,6 +1864,20 @@ fn transcript_bounded(app: &App, chat: &Chat, bot: &Bot, workdir: &std::path::Pa
 
 fn user(text: &str, timestamp: u64) -> AgentMessage {
     AgentMessage::User(UserMessage { content: vec![ContentPart::text(text)], timestamp })
+}
+
+/// The user's words as `bot` reads them: the message they answer, quoted, then the text with
+/// the ids of the bots it mentions.
+fn user_words(app: &App, bot: &Bot, text: &str, mentions: &[String], reply_to: Option<&ReplyTo>) -> String {
+    let text = with_mention_ids(app, text, mentions);
+    let Some(reply) = reply_to else { return text };
+    let whose = match &reply.author {
+        Author::Bot { bot_id } if bot_id == &bot.id => "your message".to_string(),
+        Author::Bot { bot_id } => format!("{}'s message", name_of(app, bot_id)),
+        _ => "their earlier message".to_string(),
+    };
+    let quote = format!("[Replying to {whose}: \"{}\"]", reply.text);
+    if text.is_empty() { quote } else { format!("{quote}\n{text}") }
 }
 
 /// The user's words as a bot reads them: the first `@Name` of each bot the message mentions
@@ -3151,6 +3169,32 @@ mod tests {
         message
     }
 
+    /// A bot reads the quote a reply carries before the user's words, naming whose message it was.
+    #[test]
+    fn a_bot_reads_what_the_user_replies_to() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let (chef, scout) = (bot("b1", "Chef"), bot("b2", "Scout"));
+        app.state.lock().unwrap().bots.extend([chef.clone(), scout.clone()]);
+        let quote = |author: Author| ReplyTo { message_id: "m".into(), author, text: "Ship on Friday?".into() };
+
+        let reply = quote(Author::Bot { bot_id: "b1".into() });
+        assert_eq!(user_words(app, &chef, "yes", &[], Some(&reply)), "[Replying to your message: \"Ship on Friday?\"]\nyes");
+        assert_eq!(user_words(app, &scout, "yes", &[], Some(&reply)), "[Replying to Chef's message: \"Ship on Friday?\"]\nyes");
+        let own = quote(Author::You);
+        assert_eq!(user_words(app, &chef, "", &[], Some(&own)), "[Replying to their earlier message: \"Ship on Friday?\"]");
+        assert_eq!(user_words(app, &chef, "ask @Scout", &["b2".into()], None), "ask @Scout (id b2)");
+
+        let dm = chat("chat", "dm", None, &["b1"]);
+        app.state.lock().unwrap().chats.push(dm.clone());
+        let mut message = said("chat", Author::You, "yes", 1.0);
+        message.body = Body::Text { text: "yes".into(), attachments: Vec::new(), mentions: Vec::new(), reply_to: Some(reply) };
+        app.upsert_message(message, false);
+        let transcript = transcript_for(app, &dm, &chef, &scratch.1);
+        let Some(AgentMessage::User(UserMessage { content, .. })) = transcript.last() else { panic!("{transcript:?}") };
+        assert!(matches!(&content[0], ContentPart::Text { text, .. } if text.starts_with("[Replying to your message:")), "{content:?}");
+    }
+
     fn room_job(chat_id: &str, bot_id: &str) -> Job {
         Job {
             id: "job".into(),
@@ -4324,7 +4368,7 @@ mod tests {
         );
 
         let mut message = said("chat", Author::You, "", 1.0);
-        message.body = Body::Text { text: "ask @Chef".into(), attachments: Vec::new(), mentions: vec!["b2".into()] };
+        message.body = Body::Text { text: "ask @Chef".into(), attachments: Vec::new(), mentions: vec!["b2".into()], reply_to: None };
         app.upsert_message(message, false);
         let messages = transcript_for(app, &dm, &scout, &scratch.1);
         assert!(matches!(&messages[0], AgentMessage::User(m) if m.content.first().and_then(ContentPart::as_text) == Some("ask @Chef (id b2)")));

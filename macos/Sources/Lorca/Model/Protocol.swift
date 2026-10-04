@@ -475,6 +475,13 @@ enum Wire {
         var rule: String?
         var command: String?
         var run: Run?
+        var replyTo: ReplyTo?
+    }
+
+    struct ReplyTo: Decodable {
+        var messageId: String
+        var author: Author
+        var text: String
     }
 
     struct Run: Decodable {
@@ -636,12 +643,7 @@ extension Wire.Bot {
 
 extension Wire.Message {
     func toModel() -> Message {
-        let author: Message.Author
-        switch self.author.kind {
-        case "you": author = .you
-        case "bot": author = .bot(self.author.botId ?? "")
-        default: author = .system
-        }
+        let author = self.author.toModel()
 
         let body: Message.Body
         switch self.body.kind {
@@ -692,7 +694,18 @@ extension Wire.Message {
             createdAt: Date(timeIntervalSince1970: createdAt),
             attachments: (self.body.attachments ?? []).map {
                 Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height)
-            })
+            },
+            replyTo: self.body.replyTo.map { ReplyQuote(messageID: $0.messageId, author: $0.author.toModel(), text: $0.text) })
+    }
+}
+
+extension Wire.Author {
+    func toModel() -> Message.Author {
+        switch kind {
+        case "you": .you
+        case "bot": .bot(botId ?? "")
+        default: .system
+        }
     }
 }
 

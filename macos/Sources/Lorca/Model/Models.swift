@@ -917,6 +917,8 @@ struct Message: Identifiable, Hashable {
     var createdAt: Date
     /// Files sent with a text body; other bodies carry none.
     var attachments: [Attachment]
+    /// The message the user answers with this one, quoted.
+    var replyTo: ReplyQuote?
 
     init(
         id: String = "msg-\(UUID().uuidString.lowercased())",
@@ -924,7 +926,8 @@ struct Message: Identifiable, Hashable {
         body: Body,
         state: State = .complete,
         createdAt: Date = Date(),
-        attachments: [Attachment] = []
+        attachments: [Attachment] = [],
+        replyTo: ReplyQuote? = nil
     ) {
         self.id = id
         self.author = author
@@ -932,6 +935,13 @@ struct Message: Identifiable, Hashable {
         self.state = state
         self.createdAt = createdAt
         self.attachments = attachments
+        self.replyTo = replyTo
+    }
+
+    /// A finished text message, the user's or a bot's, which a reply can answer.
+    var canBeQuoted: Bool {
+        guard case .text = body else { return false }
+        return state == .complete && author != .system
     }
 
     /// A `bash` row's command.
@@ -953,6 +963,32 @@ struct Message: Identifiable, Hashable {
     var isTranscriptText: Bool {
         if case .text = body { return true }
         return false
+    }
+}
+
+/// A message quoted by the user's reply: who wrote it and how it opens, as the CLI keeps it
+/// with the reply, so the quote reads the same where the original has not loaded.
+struct ReplyQuote: Hashable {
+    let messageID: Message.ID
+    let author: Message.Author
+    let text: String
+
+    /// The quote of `message` the CLI makes, for a reply it has not confirmed yet: its words
+    /// without the Markdown, on one line.
+    @MainActor
+    init?(quoting message: Message) {
+        guard message.canBeQuoted else { return nil }
+        let words = RenderedMessage(message.text, textColor: .labelColor).plainText
+        var line = words.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if line.isEmpty { line = message.attachments.map(\.name).joined(separator: ", ") }
+        if line.count > 280 { line = String(line.prefix(280)).trimmingCharacters(in: .whitespaces) + "…" }
+        self.init(messageID: message.id, author: message.author, text: line)
+    }
+
+    init(messageID: Message.ID, author: Message.Author, text: String) {
+        self.messageID = messageID
+        self.author = author
+        self.text = text
     }
 }
 

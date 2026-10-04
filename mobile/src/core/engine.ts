@@ -216,9 +216,10 @@ class Engine {
 
   /// Sends the user's message with its files and the bots picked by `@`; the core starts the
   /// turns it calls for.
-  async sendMessage(chatId: string, text: string, files: PickedFile[] = [], mentions: string[] = []): Promise<Message> {
+  /// `replyTo` is the message the user answers, which the bot reads quoted.
+  async sendMessage(chatId: string, text: string, files: PickedFile[] = [], mentions: string[] = [], replyTo?: string): Promise<Message> {
     const attachments = files.map((file) => ({ path: pathOf(file.uri), name: file.name, mime: file.mime, width: file.width, height: file.height }));
-    const { message } = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions });
+    const { message } = await core.request<{ message: Message }>("chats.send", { chat_id: chatId, text, attachments, mentions, ...(replyTo ? { reply_to: replyTo } : {}) });
     upsertMessage(message);
     setStatus(chatId, null);
     return message;

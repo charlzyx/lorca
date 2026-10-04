@@ -272,7 +272,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let text = opt_string(&params, "text").unwrap_or_default();
             let mentions: Vec<String> = serde_json::from_value(params["mentions"].clone()).unwrap_or_default();
             let message =
-                runtime::send_user_message(app.clone(), &string(&params, "chat_id")?, &text, opt_string(&params, "message_id"), attachments, mentions)
+                runtime::send_user_message(
+                    app.clone(),
+                    &string(&params, "chat_id")?,
+                    &text,
+                    opt_string(&params, "message_id"),
+                    attachments,
+                    mentions,
+                    opt_string(&params, "reply_to"),
+                )
                     .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }

@@ -800,3 +800,8 @@
 "Your first bot" = "你的第一个智能体";
 "Your identity is restored" = "你的身份已恢复";
 "Zoom" = "缩放";
+"Reply" = "回复";
+"Reply…" = "回复…";
+"Replying to %@" = "回复 %@";
+"Cancel reply" = "取消回复";
+"In reply to %@: %@" = "回复 %1$@：%2$@";

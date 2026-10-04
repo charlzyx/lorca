@@ -9,6 +9,7 @@ import {
   isCustomKind,
   isProviderKind,
   type Attachment,
+  type Author,
   type AutoReview,
   type Bot,
   type BotMemory,
@@ -159,6 +160,7 @@ export interface WireBody {
   rule?: string | null;
   command?: string | null;
   run?: WireRun | null;
+  reply_to?: { message_id: string; author: WireAuthor; text: string } | null;
 }
 
 export interface WireAuthor {
@@ -501,9 +503,12 @@ export function toBot(wire: WireBot): Bot {
   };
 }
 
+function toAuthor(wire: WireAuthor): Author {
+  return wire.kind === "you" ? { kind: "you" } : wire.kind === "bot" ? { kind: "bot", botID: wire.bot_id ?? "" } : { kind: "system" };
+}
+
 export function toMessage(wire: WireMessage): Message {
-  const author: Message["author"] =
-    wire.author.kind === "you" ? { kind: "you" } : wire.author.kind === "bot" ? { kind: "bot", botID: wire.author.bot_id ?? "" } : { kind: "system" };
+  const author = toAuthor(wire.author);
   const body = wire.body;
   let modelBody: Message["body"];
   switch (body.kind) {
@@ -580,6 +585,7 @@ export function toMessage(wire: WireMessage): Message {
     state,
     createdAt: seconds(wire.created_at),
     attachments: (body.attachments ?? []).map(toAttachment),
+    replyTo: body.reply_to ? { messageID: body.reply_to.message_id, author: toAuthor(body.reply_to.author), text: body.reply_to.text } : undefined,
   };
 }
 

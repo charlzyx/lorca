@@ -1289,15 +1289,17 @@ final class AppStore {
 
     /// Sends the message and returns the chat it landed in. Mentions are references the chat's
     /// bot acts on (it can message that bot); the message itself stays here. `mentions` are the
-    /// bots picked from the `@` menu, which the CLI hands the bot by id.
+    /// bots picked from the `@` menu, which the CLI hands the bot by id. `replyTo` is the message
+    /// the user answers, which the bot reads quoted.
     @discardableResult
-    func send(_ text: String, attachments: [OutgoingAttachment] = [], mentions: [Bot.ID] = [], in chatID: Chat.ID) -> Chat.ID {
+    func send(_ text: String, attachments: [OutgoingAttachment] = [], mentions: [Bot.ID] = [], replyTo: Message.ID? = nil, in chatID: Chat.ID) -> Chat.ID {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty, let chat = chat(chatID) else { return chatID }
 
         // The files are known here already; the CLI keeps the ids the bubble shows.
         for outgoing in attachments { attachmentURLs[outgoing.attachment.id] = outgoing.url }
-        let message = Message(author: .you, body: .text(trimmed), attachments: attachments.map(\.attachment))
+        let quote = replyTo.flatMap { id in chat.messages.first { $0.id == id } }.flatMap(ReplyQuote.init(quoting:))
+        let message = Message(author: .you, body: .text(trimmed), attachments: attachments.map(\.attachment), replyTo: quote)
         append(message, to: chatID)
 
         if isMock {
@@ -1321,18 +1323,18 @@ final class AppStore {
                 self.emit(.chatsChanged)
             }
         }
-        perform(
-            "chats.send",
-            [
-                "chat_id": chatID, "text": trimmed, "message_id": message.id, "mentions": mentions,
-                "attachments": attachments.map { outgoing in
-                    [
-                        "id": outgoing.attachment.id, "path": outgoing.url.path, "name": outgoing.attachment.name,
-                        "mime": outgoing.attachment.mime, "width": outgoing.attachment.width as Any,
-                        "height": outgoing.attachment.height as Any,
-                    ]
-                },
-            ])
+        var params: [String: Any] = [
+            "chat_id": chatID, "text": trimmed, "message_id": message.id, "mentions": mentions,
+            "attachments": attachments.map { outgoing in
+                [
+                    "id": outgoing.attachment.id, "path": outgoing.url.path, "name": outgoing.attachment.name,
+                    "mime": outgoing.attachment.mime, "width": outgoing.attachment.width as Any,
+                    "height": outgoing.attachment.height as Any,
+                ]
+            },
+        ]
+        if let quote { params["reply_to"] = quote.messageID }
+        perform("chats.send", params)
         return chatID
     }
 

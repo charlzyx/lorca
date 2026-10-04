@@ -223,6 +223,9 @@ pub enum Body {
         /// bot reads "@Scout (id bot-1a2b3c4d)", and a group offers them the first turns.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mentions: Vec<String>,
+        /// The message the user answers with this one, quoted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<ReplyTo>,
     },
     Tool {
         name: String,
@@ -297,6 +300,50 @@ pub enum Body {
     },
 }
 
+/// A message quoted by the user's reply: who wrote it and how it opens, kept with the reply, so
+/// the quote reads the same where the original has not loaded or has gone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplyTo {
+    pub message_id: String,
+    pub author: Author,
+    /// Its text on one line, at most `REPLY_QUOTE_CHARS` characters, or the names of its files.
+    pub text: String,
+}
+
+/// How much of a quoted message a reply keeps.
+pub const REPLY_QUOTE_CHARS: usize = 280;
+
+/// Message Markdown as the words it shows: no markers, a space where a line or a block breaks.
+fn plain_text(markdown: &str) -> String {
+    use pulldown_cmark::{Event, Parser, TagEnd};
+    let mut out = String::with_capacity(markdown.len());
+    for event in Parser::new(markdown) {
+        match event {
+            Event::Text(text) | Event::Code(text) | Event::InlineMath(text) | Event::DisplayMath(text) => out.push_str(&text),
+            Event::SoftBreak | Event::HardBreak | Event::Rule => out.push(' '),
+            Event::End(TagEnd::Paragraph | TagEnd::Item | TagEnd::Heading(_) | TagEnd::CodeBlock | TagEnd::TableCell | TagEnd::TableRow) => out.push(' '),
+            _ => {}
+        }
+    }
+    out
+}
+
+impl ReplyTo {
+    /// The quote of `message`, when it is one a reply can answer: a text message, the user's or
+    /// a bot's.
+    pub fn quoting(message: &Message) -> Option<ReplyTo> {
+        let Body::Text { text, attachments, .. } = &message.body else { return None };
+        let mut line = plain_text(text).split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            line = attachments.iter().map(|attachment| attachment.name.as_str()).collect::<Vec<_>>().join(", ");
+        }
+        if line.chars().count() > REPLY_QUOTE_CHARS {
+            line = format!("{}…", line.chars().take(REPLY_QUOTE_CHARS).collect::<String>().trim_end());
+        }
+        Some(ReplyTo { message_id: message.id.clone(), author: message.author.clone(), text: line })
+    }
+}
+
 /// A `bash` call as its card shows it: Auto-review checking it, the question it asks, the
 /// command running in its terminal (`lorca_agent::tools::BashSession`), what the command asks,
 /// and how it ended.
@@ -362,7 +409,7 @@ impl CommandRun {
 
 impl Body {
     pub fn text(text: impl Into<String>) -> Self {
-        Body::Text { text: text.into(), attachments: Vec::new(), mentions: Vec::new() }
+        Body::Text { text: text.into(), attachments: Vec::new(), mentions: Vec::new(), reply_to: None }
     }
 }
 

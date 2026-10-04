@@ -12,6 +12,9 @@ enum ChatMetrics {
     static let tightTopPadding: CGFloat = 4
     static let bubblePadX: CGFloat = 14
     static let bubblePadY: CGFloat = 10
+    /// The line above a reply's bubble that quotes the message it answers.
+    static let quoteLineHeight: CGFloat = 18
+    static let quoteGap: CGFloat = 2
     static let maxBubbleWidth: CGFloat = 580
     static let userLeftGutter: CGFloat = 72
     static let dayRowHeight: CGFloat = 42
@@ -82,8 +85,8 @@ enum AttachmentLayout {
     }
 }
 
-/// The name sits above the first bubble of a run (group chats only); the bubble holds the
-/// attachments, the text, and the stamp.
+/// The name sits above the first bubble of a run (group chats only), and a reply's quote above
+/// its bubble; the bubble holds the attachments, the text, and the stamp.
 struct BubbleMetrics {
     var textWidth: CGFloat
     var textHeight: CGFloat
@@ -98,6 +101,8 @@ struct BubbleMetrics {
     var hasText = true
     /// The body laid out at `textWidth`, handed to the cell so it lays out without measuring.
     var textLayout = SegmentLayout()
+    /// For a reply, the width its quote line may take above the bubble; zero for any other.
+    var quoteWidth: CGFloat = 0
 
     var timeGutter: CGFloat {
         timeWidth > 0 ? ChatMetrics.timeGap + timeWidth : 0
@@ -105,6 +110,10 @@ struct BubbleMetrics {
 
     var headerHeight: CGFloat {
         showsName ? ChatMetrics.headerLineHeight + ChatMetrics.headerToBody : 0
+    }
+
+    var quoteBlockHeight: CGFloat {
+        quoteWidth > 0 ? ChatMetrics.quoteLineHeight + ChatMetrics.quoteGap : 0
     }
 
     /// The attachments and the gap to whatever sits under them.
@@ -118,7 +127,7 @@ struct BubbleMetrics {
     var bubbleHeight: CGFloat {
         ChatMetrics.bubblePadY + attachmentsBlockHeight + textHeight + ChatMetrics.bubblePadY
     }
-    var rowHeight: CGFloat { headerHeight + bubbleHeight }
+    var rowHeight: CGFloat { headerHeight + quoteBlockHeight + bubbleHeight }
 }
 
 /// Notice box size, with icon and label frames in box coordinates (y grows downward).
@@ -271,7 +280,8 @@ final class ChatLayout {
             attachmentsSize: attachments.size,
             attachmentFrames: attachments.frames,
             hasText: hasText,
-            textLayout: textLayout
+            textLayout: textLayout,
+            quoteWidth: message.replyTo == nil ? 0 : maxBubble
         )
         entry.bubbles = [(key, metrics)] + entry.bubbles.prefix(1)
         cache[message.id] = entry

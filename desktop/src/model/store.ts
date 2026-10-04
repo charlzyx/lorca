@@ -17,6 +17,7 @@ import {
   isCustomKind,
   isDM,
   isGroup,
+  quoteOf,
   isRunner,
   isSentMessage,
   lastActivity,
@@ -1395,11 +1396,14 @@ export class AppStore {
   }
 
   /** Sends the message and returns the chat it landed in. `mentions` are the bots picked from the `@`
-   * menu, which the CLI hands the bot by id. */
-  send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string): string {
+   * menu, which the CLI hands the bot by id; `replyTo` is the message the user answers, which the bot
+   * reads quoted. */
+  send(text: string, attachments: OutgoingAttachment[], mentions: string[], chatID: string, replyTo?: string): string {
     const trimmed = text.trim();
     const chat = this.chat(chatID);
     if ((trimmed === "" && attachments.length === 0) || !chat) return chatID;
+    const original = replyTo ? chat.messages.find((message) => message.id === replyTo) : undefined;
+    const quote = original ? quoteOf(original) : undefined;
 
     // The files are known here already; the CLI keeps the ids the bubble shows.
     for (const outgoing of attachments) this.attachmentFiles.set(outgoing.attachment.id, { path: outgoing.path, url: outgoing.url });
@@ -1410,6 +1414,7 @@ export class AppStore {
       state: { kind: "complete" },
       createdAt: Date.now(),
       attachments: attachments.map((outgoing) => outgoing.attachment),
+      replyTo: quote,
     };
     this.append(message, chatID);
 
@@ -1446,6 +1451,7 @@ export class AppStore {
         width: outgoing.attachment.width ?? null,
         height: outgoing.attachment.height ?? null,
       })),
+      ...(quote ? { reply_to: quote.messageID } : {}),
     });
     return chatID;
   }

@@ -353,4 +353,9 @@ export const zh: Record<string, string> = {
   "Your bots and their chats sync from the relay once this phone hears from your Runner.": "这部手机收到 Runner 的消息后，你的智能体和聊天会从中继同步过来。",
   "Your bots run on your own computers. Get a pairing code from a computer that already has your identity: choose Pair a Device in the desktop app, or run lorca pair in a terminal. Then scan or paste the code.": "你的智能体在你自己的电脑上运行。请从已有你身份的电脑获取配对码：在桌面应用中选择“配对设备”，或在终端运行 lorca pair，然后扫描或粘贴配对码。",
   "Your browser opens a {name} sign-in. The tokens are shared with your paired Devices, encrypted with your account key; the relay cannot read them.": "浏览器会打开 {name} 登录页面。令牌会使用你的账户密钥加密并同步到已配对的设备；中继无法读取。",
+  "You": "你",
+  "Reply…": "回复…",
+  "Replying to {name}": "回复 {name}",
+  "Cancel reply": "取消回复",
+  "In reply to {name}: {text}": "回复 {name}：{text}",
 };
