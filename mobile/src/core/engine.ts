@@ -477,6 +477,12 @@ class Engine {
     await core.request("bash.stop", { chat_id: chatId, message_id: messageId });
   }
 
+  /// Sends a command the bot is waiting on to the background: the bot's call returns and the
+  /// command runs on, out of the way of Stop in the chat.
+  async sendCommandToBackground(chatId: string, messageId: string) {
+    await core.request("bash.background", { chat_id: chatId, message_id: messageId });
+  }
+
   // MARK: - Routines
 
   /// Pauses or resumes a routine; a resumed schedule counts from now.

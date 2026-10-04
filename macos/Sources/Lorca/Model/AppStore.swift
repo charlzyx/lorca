@@ -1026,6 +1026,22 @@ final class AppStore {
         _ = try await client.request("bash.stop", ["chat_id": chatID, "message_id": messageID])
     }
 
+    /// Sends a command the bot is waiting on to the background (`bash.background`): the bot's
+    /// call returns and the command runs on, out of the way of Stop in the chat.
+    func sendCommandToBackground(chatID: Chat.ID, messageID: Message.ID) async throws {
+        guard !isMock else {
+            update(messageID, in: chatID) { message in
+                guard case var .tool(tool) = message.body, var run = tool.run else { return }
+                run.background = true
+                tool.run = run
+                tool.isRunning = false
+                message.body = .tool(tool)
+            }
+            return
+        }
+        _ = try await client.request("bash.background", ["chat_id": chatID, "message_id": messageID])
+    }
+
     /// The demo has no Runner: an answer or a Stop ends the command at once.
     private func finishMockCommand(chatID: Chat.ID, messageID: Message.ID, state: CommandRun.State) {
         update(messageID, in: chatID) { message in
@@ -1404,6 +1420,12 @@ final class AppStore {
             // One that was running before this app heard of it has run long enough.
             return now.timeIntervalSince(commandStarts[message.id] ?? .distantPast) >= Self.taskDelay
         } ?? []
+    }
+
+    /// The commands in `chatID` that a bot's call still waits on, which Run in Background sends
+    /// there.
+    func foregroundCommands(in chatID: Chat.ID) -> [Message] {
+        chat(chatID)?.messages.filter(\.runsInForeground) ?? []
     }
 
     /// Notes when a command starts running in its terminal, and tells the observers once it has

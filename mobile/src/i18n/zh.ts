@@ -258,6 +258,7 @@ export const zh: Record<string, string> = {
   "Role": "角色",
   "Routines": "例行任务",
   "Routines are recurring tasks this bot runs on a schedule. Ask it in chat to set one up.": "例行任务是这个智能体按计划重复运行的任务。在聊天中让它帮你设置。",
+  "Run in Background": "在后台运行",
   "Run Now": "立即运行",
   "Runner": "Runner",
   "Running": "正在运行",

@@ -605,6 +605,32 @@ final class ChatViewController: NSViewController {
         store.stopResponding(in: chatID)
         composer.isResponding = false
     }
+
+    /// Run Command in Background (⌃B): every command in the chat that a bot's call still waits
+    /// on goes to the background, and the calls return.
+    @objc func runCommandsInBackground(_ sender: Any?) {
+        guard let chatID else { return }
+        for message in store.foregroundCommands(in: chatID) {
+            Task { @MainActor in
+                do {
+                    try await store.sendCommandToBackground(chatID: chatID, messageID: message.id)
+                } catch {
+                    NSSound.beep()
+                }
+            }
+        }
+    }
+}
+
+extension ChatViewController: NSMenuItemValidation {
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(runCommandsInBackground(_:)) {
+            // Disabled, ⌃B stays the composer's.
+            guard let chatID else { return false }
+            return !store.foregroundCommands(in: chatID).isEmpty
+        }
+        return true
+    }
 }
 
 // MARK: - Table

@@ -105,7 +105,7 @@ async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
         #[cfg(feature = "runner")]
         verb if verb.starts_with("mcp.") => crate::plugins::mcp_json::serve_request(app, verb, body).await,
         #[cfg(feature = "runner")]
-        "bash.stdin" | "bash.stop" => crate::shell::serve(app, &request.verb, body).await,
+        "bash.stdin" | "bash.stop" | "bash.background" => crate::shell::serve(app, &request.verb, body).await,
         other => Err(format!("Unknown request {other}")),
     }
 }

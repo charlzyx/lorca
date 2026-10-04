@@ -397,6 +397,7 @@ fn follow(run: &mut CommandRun, summary: &mut String, session: &BashSession) {
     run.session_id = Some(session.id().to_string());
     run.command = session.command().chars().take(crate::model::APP_COMMAND_CHARS).collect();
     run.state = state.into();
+    run.background = session.background();
     run.prompt = if state == "waiting" { session.prompt() } else { None };
     run.output = (!lines.is_empty()).then(|| lines.join("\n"));
     run.outcome = end.map(|end| end.describe());
@@ -505,9 +506,9 @@ async fn watch(app: Arc<App>, session: Arc<BashSession>) {
     }
 }
 
-/// `bash.stdin` and `bash.stop` for a command's card on this Runner, from the local app or a
-/// sealed request: `{ chat_id, message_id, text?, enter? }`. The text is written to the command
-/// and dropped; nothing records it.
+/// `bash.stdin`, `bash.stop`, and `bash.background` for a command's card on this Runner, from the
+/// local app or a sealed request: `{ chat_id, message_id, text?, enter? }`. The text is written to
+/// the command and dropped; nothing records it.
 pub async fn serve(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, String> {
     let chat_id = body["chat_id"].as_str().ok_or("missing chat_id")?;
     let message_id = body["message_id"].as_str().ok_or("missing message_id")?;
@@ -530,6 +531,14 @@ pub async fn serve(app: &Arc<App>, verb: &str, body: &Value) -> Result<Value, St
         "bash.stop" => {
             session.stop("Stopped");
             Ok(json!({ "stopped": true }))
+        }
+        // The bot's call waiting on it returns, and the command runs on as if started there.
+        "bash.background" => {
+            if !session.send_to_background() {
+                return Err("The command has already ended".into());
+            }
+            app.shell_sessions.sync_row(app, session.id());
+            Ok(json!({ "background": true }))
         }
         other => Err(format!("Unknown request {other}")),
     }

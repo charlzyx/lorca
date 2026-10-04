@@ -4071,6 +4071,51 @@ mod tests {
         assert!(command_cue(app, &job).unwrap().contains("built"));
     }
 
+    /// Run in Background on a command the bot is waiting on: its call returns, and from then on
+    /// it is a background command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_user_sends_a_running_command_to_the_background() {
+        use lorca_agent::tools::{BashSessions, BashTool};
+        let (scratch, chef) = chef_in_a_dm();
+        let app = &scratch.0;
+        let mut turn = turn_state(app, &chef, "dev");
+        let sessions: Arc<dyn BashSessions> = Arc::new(crate::shell::TurnSessions::new(app, "chat", "b1"));
+        let bash = BashTool::with_sessions(scratch.1.clone(), sessions);
+        let args = json!({ "command": "echo building; while true; do echo tick; sleep 0.1; done", "description": "Build" });
+        let send = async {
+            let row = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let running = app.messages("chat").into_iter().find(|m| run_of(m).is_some_and(|run| run.state == "running" && run.session_id.is_some()));
+                    if let Some(row) = running {
+                        return row;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the command runs");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            crate::api::dispatch(app, "bash.background", json!({ "chat_id": "chat", "message_id": row.id })).await
+        };
+        let ((row, result), sent) = tokio::join!(call_tool(&mut turn, &bash, "call-1", args), send);
+        assert_eq!(sent, Ok(json!({ "background": true })));
+        let text = result.unwrap().text_content();
+        assert!(text.starts_with("building\n") && text.contains("[The user sent the command to the background, where it runs on as session "), "{text}");
+        let card = || run_of(&app.message("chat", &row.id).unwrap()).unwrap();
+        assert_eq!((card().state.as_str(), card().background), ("running", true));
+        let Body::Tool { is_running, .. } = &app.message("chat", &row.id).unwrap().body else { panic!("a tool row") };
+        assert!(!is_running, "the call returned");
+
+        turn.finish();
+        assert!(!card().handed_over, "Running tasks shows it, not the chat");
+        crate::runtime::cancel_chat(app, "chat");
+        assert_eq!(card().state, "running", "Stop leaves it running");
+        app.shell_sessions.shutdown(app);
+        let late = crate::api::dispatch(app, "bash.background", json!({ "chat_id": "chat", "message_id": row.id })).await;
+        assert_eq!(late, Err("The command has already ended".to_string()));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn input_the_bot_types_goes_through_auto_review() {

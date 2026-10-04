@@ -220,6 +220,8 @@ export interface CommandRun {
   prompt?: string;
   /** The bot left the command to the user: its turn ended with the command still running, or it waits on the command at a question. */
   handed_over?: boolean;
+  /** It runs in the background: the bot started it there, or the user sent it. Stop in the chat leaves it running. */
+  background?: boolean;
   /** Its last lines, as the bottom of a terminal shows them. Never what was typed. */
   output?: string;
   /** The Runner it runs on, for the question: "Workbench". */
@@ -244,6 +246,13 @@ export function hasEnded(run: CommandRun): boolean {
 export function runsInTerminal(message: Message | undefined): boolean {
   const run = message?.body.kind === "tool" ? message.body.run : undefined;
   return !!run && isLive(run) && !!run.session_id;
+}
+
+/// A `bash` row whose command runs in its terminal while the bot's call still waits on it: Run in
+/// Background sends it there, and the call returns.
+export function runsInForeground(message: Message | undefined): boolean {
+  if (message?.body.kind !== "tool") return false;
+  return message.body.is_running && runsInTerminal(message) && !message.body.run?.background;
 }
 
 /// Whether a tool row shows as a command's card: while the command needs the user. That is while
