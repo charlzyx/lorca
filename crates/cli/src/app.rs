@@ -257,7 +257,7 @@ impl App {
         // since the last upload has no copy, and every newly paired Device needs one.
         state.machine_blob_hash = None;
         let (events, _) = broadcast::channel(512);
-        let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?;
+        let http = lorca_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
             config,

@@ -1891,6 +1891,7 @@ dependencies = [
  "lorca-agent",
  "lorca-models",
  "lorca-provider-auth",
+ "lorca-tls",
  "open",
  "process-wrap",
  "pulldown-cmark",
@@ -1912,7 +1913,6 @@ dependencies = [
  "tracing-subscriber",
  "usage-rs",
  "uuid",
- "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
  "x25519-dalek",
 ]
@@ -1932,6 +1932,7 @@ dependencies = [
  "libc",
  "lorca-models",
  "lorca-provider-auth",
+ "lorca-tls",
  "rand 0.8.8",
  "regex",
  "reqwest 0.12.28",
@@ -2018,6 +2019,19 @@ dependencies = [
  "tracing-subscriber",
  "usage-rs",
  "uuid",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "lorca-tls"
+version = "0.1.10"
+dependencies = [
+ "reqwest 0.12.28",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-platform-verifier",
+ "tokio",
+ "tracing",
  "webpki-roots 1.0.9",
 ]
 

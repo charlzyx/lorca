@@ -4,6 +4,7 @@ members = [
   "crates/agent",
   "crates/models",
   "crates/provider-auth",
+  "crates/tls",
   "crates/relay",
   "crates/cli",
   "crates/mobile",
