@@ -484,7 +484,9 @@ impl BashSession {
                     on_output(self);
                 }
                 _ = sleep_until_some(wake) => {}
-                _ = cancel.cancelled() => return Stop::Cancelled,
+                // A command sent to the background as the call is cancelled (the user's new message
+                // interrupting the step) runs on: the call reads as sent there.
+                _ = cancel.cancelled() => return if !in_background && self.background() { Stop::Backgrounded } else { Stop::Cancelled },
             }
         }
     }
@@ -1348,6 +1350,36 @@ mod tests {
 
         session.stop("Stopped");
         assert!(!session.send_to_background(), "it ended");
+    }
+
+    /// Send now sends the command to the background and cancels the step at once: the call reads
+    /// as sent there, whichever it saw first, and the command runs on.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_sent_to_the_background_outlives_its_cancelled_call() {
+        let t = Arc::new(tools(WAITING_AFTER));
+        let cancel = CancellationToken::new();
+        let running = tokio::spawn({
+            let (t, cancel) = (t.clone(), cancel.clone());
+            async move { t.bash.execute("call", json!({"command": "echo building; while true; do echo tick; sleep 0.1; done"}), cancel, Arc::new(|_| {})).await }
+        });
+        let session = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(session) = t.host.0.lock().unwrap().values().next().cloned().filter(|s| s.preview().contains("tick")) {
+                    return session;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(session.send_to_background());
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), running).await.expect("the call returned").unwrap().unwrap();
+        assert!(result.text_content().contains("The user sent the command to the background"), "{}", result.text_content());
+        assert!(session.end().is_none(), "it runs on");
+        session.stop("Stopped");
     }
 
     #[cfg(unix)]

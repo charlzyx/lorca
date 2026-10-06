@@ -175,6 +175,18 @@ impl Sessions {
         self.entries.lock().unwrap().retain(|e| e.session.as_ref().is_none_or(|s| s.id() != id));
     }
 
+    /// Send now in the chat: every command running there goes to the background and runs on,
+    /// so a call waiting on one returns and the turn reads the user's message at once.
+    pub fn background_chat(&self, app: &App, chat_id: &str) {
+        let sessions: Vec<Arc<BashSession>> =
+            self.entries.lock().unwrap().iter().filter(|e| e.chat_id == chat_id).filter_map(|e| e.session.clone()).filter(|s| !s.background()).collect();
+        for session in sessions {
+            if session.send_to_background() {
+                self.sync_row(app, session.id());
+            }
+        }
+    }
+
     /// Stop in the chat: every session there ends, and its card says so, except a command
     /// running in the background, which Running tasks stops.
     pub fn stop_chat(&self, chat_id: &str) {

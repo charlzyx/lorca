@@ -1227,6 +1227,17 @@ final class AppStore {
         perform("chats.rename", ["chat_id": id, "title": trimmed])
     }
 
+    /// What a group is for; every member reads it in its system prompt.
+    func setDescription(_ text: String, of chatID: Chat.ID) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let index = chats.firstIndex(where: { $0.id == chatID }), chats[index].isGroup,
+            chats[index].groupDescription != trimmed
+        else { return }
+        chats[index].groupDescription = trimmed
+        emit(.chatChanged(chatID))
+        perform("chats.set_description", ["chat_id": chatID, "description": trimmed])
+    }
+
     func addBot(_ botID: Bot.ID, to chatID: Chat.ID) {
         guard let index = chats.firstIndex(where: { $0.id == chatID }),
             chats[index].canAddBot,
@@ -1294,19 +1305,21 @@ final class AppStore {
 
     /// Sends the message and returns the chat it landed in. Mentions are references the chat's
     /// bot acts on (it can message that bot); the message itself stays here. `mentions` are the
-    /// bots picked from the `@` menu, which the CLI hands the bot by id.
+    /// bots picked from the `@` menu, which the CLI hands the bot by id. `replyTo` is the message
+    /// the user answers, which the bot reads quoted.
     @discardableResult
-    func send(_ text: String, attachments: [OutgoingAttachment] = [], mentions: [Bot.ID] = [], in chatID: Chat.ID) -> Chat.ID {
+    func send(_ text: String, attachments: [OutgoingAttachment] = [], mentions: [Bot.ID] = [], replyTo: Message.ID? = nil, in chatID: Chat.ID) -> Chat.ID {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty, let chat = chat(chatID) else { return chatID }
 
         // The files are known here already; the CLI keeps the ids the bubble shows.
         for outgoing in attachments { attachmentURLs[outgoing.attachment.id] = outgoing.url }
-        let message = Message(author: .you, body: .text(trimmed), attachments: attachments.map(\.attachment))
+        let quote = replyTo.flatMap { id in chat.messages.first { $0.id == id } }.flatMap(ReplyQuote.init(quoting:))
+        let message = Message(author: .you, body: .text(trimmed), attachments: attachments.map(\.attachment), replyTo: quote)
         append(message, to: chatID)
 
         if isMock {
-            replyEngine?.respond(to: trimmed, in: chat)
+            replyEngine?.respond(to: trimmed, in: chat, messageID: message.id)
             return chatID
         }
 
@@ -1326,18 +1339,18 @@ final class AppStore {
                 self.emit(.chatsChanged)
             }
         }
-        perform(
-            "chats.send",
-            [
-                "chat_id": chatID, "text": trimmed, "message_id": message.id, "mentions": mentions,
-                "attachments": attachments.map { outgoing in
-                    [
-                        "id": outgoing.attachment.id, "path": outgoing.url.path, "name": outgoing.attachment.name,
-                        "mime": outgoing.attachment.mime, "width": outgoing.attachment.width as Any,
-                        "height": outgoing.attachment.height as Any,
-                    ]
-                },
-            ])
+        var params: [String: Any] = [
+            "chat_id": chatID, "text": trimmed, "message_id": message.id, "mentions": mentions,
+            "attachments": attachments.map { outgoing in
+                [
+                    "id": outgoing.attachment.id, "path": outgoing.url.path, "name": outgoing.attachment.name,
+                    "mime": outgoing.attachment.mime, "width": outgoing.attachment.width as Any,
+                    "height": outgoing.attachment.height as Any,
+                ]
+            },
+        ]
+        if let quote { params["reply_to"] = quote.messageID }
+        perform("chats.send", params)
         return chatID
     }
 
@@ -1463,6 +1476,21 @@ final class AppStore {
         if working { runningJobs.append((id, chatID, botID, nil)) }
         emit(.respondingChanged(chatID))
         emit(.chatsChanged)
+    }
+
+    /// Has the bot's turn read a message it holds for its next step now: a command it waits on
+    /// goes to the background, and a reply in progress stops where it got to.
+    func sendNow(_ messageID: Message.ID, in chatID: Chat.ID) {
+        if isMock {
+            replyEngine?.sendNow(chatID: chatID)
+            return
+        }
+        perform("chats.send_now", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Marks a message the mock turn holds, or no longer holds.
+    func setMockQueued(_ messageID: Message.ID, in chatID: Chat.ID, _ queued: Bool) {
+        update(messageID, in: chatID) { $0.queued = queued }
     }
 
     func stopResponding(in chatID: Chat.ID) {

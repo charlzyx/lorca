@@ -172,7 +172,7 @@ export const MAX_ATTACHMENT_BYTES = 100 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
 
 export type Body =
-  | { kind: "text"; text: string; attachments?: Attachment[] }
+  | { kind: "text"; text: string; attachments?: Attachment[]; reply_to?: ReplyTo | null }
   | {
       kind: "tool";
       name: string;
@@ -288,6 +288,21 @@ export interface Message {
   created_at: number;
   /** Later model-context position when this message steered work already in flight. */
   promoted_at?: number;
+  /** A message of the user's the bot's turn holds for its next step; Send now has it read now. */
+  queued?: boolean;
+}
+
+/// A message quoted by the user's reply: who wrote it and how it opens, as the core keeps it with
+/// the reply, so the quote reads the same where the original has not loaded.
+export interface ReplyTo {
+  message_id: string;
+  author: Author;
+  text: string;
+}
+
+/// A finished text message, the user's or a bot's, which a reply can answer.
+export function canBeQuoted(message: Message): boolean {
+  return message.body.kind === "text" && message.state.kind === "complete" && message.author.kind !== "system";
 }
 
 export function isComplete(message: Message): boolean {
@@ -306,6 +321,8 @@ export interface ChatMeta {
   title?: string | null;
   bot_ids: string[];
   owner_bot_id?: string;
+  /// What a group is for, which every member reads in its system prompt.
+  description?: string | null;
   is_pinned: boolean;
   created_at: number;
 }
