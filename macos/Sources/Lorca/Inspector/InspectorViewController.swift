@@ -12,6 +12,7 @@ final class InspectorViewController: NSViewController {
     private let profile = SectionView(title: L("Profile"))
     private let nameRow = EditableRow(key: L("Name"), placeholder: L("Name"))
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
+    private let accessRow = SummaryActionRow(key: L("Access"), value: "", actionTitle: L("Edit…"))
     private let runtime = SectionView(title: L("Runs with"))
     private let memory = SectionView(title: L("Memory"))
     private let routines = SectionView(title: L("Routines"))
@@ -78,7 +79,7 @@ final class InspectorViewController: NSViewController {
 
         nameRow.field.alignment = .right
         descriptionRow.onAction = { [weak self] in self?.editDescription() }
-        profile.setRows([nameRow, descriptionRow])
+        profile.setRows([nameRow, descriptionRow, accessRow])
         groupNameRow.field.alignment = .right
         groupDescriptionRow.onAction = { [weak self] in self?.editGroupDescription() }
         group.setRows([groupNameRow, groupDescriptionRow])
@@ -328,8 +329,10 @@ final class InspectorViewController: NSViewController {
     private func showProfile(of bot: Bot) {
         // The Name row keeps what the user is typing, and puts the name back after.
         nameRow.setValue(bot.name)
-        guard changed(profile, to: [bot.id, bot.description]) else { return }
+        guard changed(profile, to: [bot.id, bot.description, bot.permissions]) else { return }
         descriptionRow.setValue(bot.description)
+        accessRow.setValue((bot.permissions ?? BotPermissions()).summary)
+        accessRow.onAction = { [weak self] in self?.presentAsSheet(BotAccessViewController(botID: bot.id)) }
         nameRow.onCommit = { [weak self] in self?.commitProfile(of: bot.id) }
     }
 

@@ -1448,10 +1448,26 @@ pub fn saved_tools(app: &App, plugin: &Installed) -> Vec<Value> {
                 "title": tool.title.clone().or_else(|| tool.annotations.as_ref().and_then(|a| a.title.clone())),
                 "description": utf8_prefix(about, 300),
                 "read_only": tool.annotations.as_ref().and_then(|a| a.read_only_hint).unwrap_or(false),
+                "capability": if tool.annotations.as_ref().and_then(|a| a.read_only_hint).unwrap_or(false)
+                    || plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &tool.name)) { "read" }
+                    else if plugin.manifest.tools.draft.iter().any(|pattern| pattern_matches(pattern, &tool.name)) { "draft" } else { "write" },
                 "hidden": plugin.manifest.tools.hides(&tool.name),
             })
         })
         .collect()
+}
+
+/// The Access editor includes protocol resource readers alongside a server's own tools.
+pub fn permission_tools(app: &App, plugin: &Installed) -> Vec<Value> {
+    let mut tools = saved_tools(app, plugin);
+    if offered(app, plugin).iter().any(|(_, _, _, resources)| *resources) {
+        for (tool, _) in resource_tools(&plugin.manifest.name) {
+            if !tools.iter().any(|entry| entry["name"] == tool.name.as_ref()) {
+                tools.push(json!({ "name": tool.name, "description": tool.description, "capability": "read", "hidden": false }));
+            }
+        }
+    }
+    tools
 }
 
 /// How many tools a plugin's servers offered when they last connected; none before they have.
@@ -1464,6 +1480,8 @@ pub fn saved_tool_count(app: &App, plugin: &Installed) -> Option<usize> {
 /// `before_tool_call` boundary ([`review_call`]).
 pub struct PluginTool {
     app: Arc<App>,
+    /// Bound for a bot turn or routine check. Catalogs used only for inspection omit it.
+    policy_context: Option<(Bot, String)>,
     plugin_id: String,
     plugin_name: String,
     server_name: String,
@@ -1548,6 +1566,7 @@ struct CatalogState {
 /// search or a call by name connects it.
 pub struct PluginCatalog {
     app: Arc<App>,
+    policy_context: Option<(Bot, String)>,
     local: Vec<Arc<dyn Tool>>,
     groups: Vec<PluginGroup>,
     state: Mutex<CatalogState>,
@@ -1555,8 +1574,12 @@ pub struct PluginCatalog {
 
 impl PluginCatalog {
     fn new(app: Arc<App>, local: Vec<Arc<dyn Tool>>) -> Self {
+        Self::for_context(app, local, None)
+    }
+
+    fn for_context(app: Arc<App>, local: Vec<Arc<dyn Tool>>, policy_context: Option<(Bot, String)>) -> Self {
         let installed = app.plugins.lock().unwrap().installed().to_vec();
-        let mut catalog = PluginCatalog { app, local, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
+        let mut catalog = PluginCatalog { app, policy_context, local, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
         for plugin in &installed {
             let saved = saved_servers(&catalog.app, plugin);
             catalog.groups.push(plugin_group(&catalog.app, plugin, &saved));
@@ -1598,6 +1621,7 @@ impl PluginCatalog {
                 || plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &original_name));
             let executable = Arc::new(PluginTool {
                 app: self.app.clone(),
+                policy_context: self.policy_context.clone(),
                 plugin_id: plugin.manifest.id.clone(),
                 plugin_name: plugin.manifest.name.clone(),
                 server_name: server_name.to_string(),
@@ -1629,6 +1653,19 @@ impl PluginCatalog {
     /// Connects a plugin's servers and takes their live tool lists. The problems are why a
     /// server could not connect.
     async fn connect_plugin(&self, plugin: &Installed, cancel: &CancellationToken) -> Vec<String> {
+        if let Some((bot, chat_id)) = &self.policy_context {
+            let current = self.app.bot(&bot.id);
+            let allowed = current.as_ref().is_some_and(|bot| bot.permissions.as_ref().and_then(|policy| policy.connections.as_ref())
+                .is_none_or(|connections| connections.get(&plugin.manifest.id).is_some_and(|grant| !grant.capabilities.is_empty())));
+            if !allowed {
+                let denied = crate::permissions::AccessDenied {
+                    tool: "connection discovery".into(), connection_id: Some(plugin.manifest.id.clone()), capability: None,
+                    reason: format!("connection {} is excluded from this bot's access", plugin.manifest.id),
+                };
+                let refusal = crate::permissions::refuse(&self.app, chat_id, bot, denied);
+                return vec![refusal.reason.unwrap_or_default()];
+            }
+        }
         if self.state.lock().unwrap().connected.contains(&plugin.manifest.id) {
             return Vec::new();
         }
@@ -1659,6 +1696,8 @@ impl PluginCatalog {
     fn plugin_tool(&self, name: &str) -> Option<Arc<PluginTool>> {
         self.state.lock().unwrap().tools.get(name).map(|tool| tool.tool.clone())
     }
+
+    pub fn is_plugin_tool(&self, name: &str) -> bool { self.plugin_tool(name).is_some() }
 
     /// The plugin a tool belongs to, by name, for the working row's "Using GitHub…".
     pub fn plugin_name(&self, tool_name: &str) -> Option<String> {
@@ -1779,6 +1818,11 @@ pub fn turn_catalog(app: &Arc<App>, local: Vec<Arc<dyn Tool>>) -> Arc<PluginCata
     Arc::new(PluginCatalog::new(app.clone(), local))
 }
 
+/// Execution catalogs bind every MCP call to the bot and chat for a final policy check.
+pub fn bot_catalog(app: &Arc<App>, bot: &Bot, chat_id: &str, local: Vec<Arc<dyn Tool>>) -> Arc<PluginCatalog> {
+    Arc::new(PluginCatalog::for_context(app.clone(), local, Some((bot.clone(), chat_id.into()))))
+}
+
 /// The installed plugins as the system prompt names them.
 pub fn plugin_briefs(app: &App) -> Vec<PluginBrief> {
     let store = app.plugins.lock().unwrap();
@@ -1824,7 +1868,7 @@ pub struct PluginBrief {
 enum Access {
     ReadOnly,
     /// It may change things. `description` is its live server's, for the review.
-    Changes { description: String },
+    Changes { description: String, capability: crate::permissions::Capability },
     Stopped,
 }
 
@@ -1852,7 +1896,12 @@ async fn access(app: &Arc<App>, tool: &PluginTool, cancel: &CancellationToken) -
     if live_tool.as_ref().and_then(|live| live.annotations.as_ref()).and_then(|annotations| annotations.read_only_hint) == Some(true) {
         return Access::ReadOnly;
     }
-    Access::Changes { description: live_tool.and_then(|live| live.description.map(|description| description.to_string())).unwrap_or_default() }
+    let draft = app.plugins.lock().unwrap().get(&tool.plugin_id)
+        .is_some_and(|plugin| plugin.manifest.tools.draft.iter().any(|pattern| pattern_matches(pattern, &name)));
+    Access::Changes {
+        description: live_tool.and_then(|live| live.description.map(|description| description.to_string())).unwrap_or_default(),
+        capability: if draft { crate::permissions::Capability::Draft } else { crate::permissions::Capability::Write },
+    }
 }
 
 /// Whether a script's call to `name` reaches a plugin tool that only reads (see `access`).
@@ -1861,6 +1910,47 @@ pub async fn is_read_only(app: &Arc<App>, catalog: &PluginCatalog, name: &str, c
         Some(tool) => matches!(access(app, &tool, cancel).await, Access::ReadOnly),
         None => false,
     }
+}
+
+async fn authorize_plugin(app: &Arc<App>, bot: &Bot, tool: &PluginTool, cancel: &CancellationToken) -> Result<(), crate::permissions::AccessDenied> {
+    use crate::permissions::{self, Capability};
+    let name = tool.tool.name.as_ref();
+    permissions::check_connection_tool(app, bot, &tool.plugin_id, name)?;
+    let capability = match access(app, tool, cancel).await {
+        Access::ReadOnly => Capability::Read,
+        Access::Changes { capability, .. } => capability,
+        Access::Stopped => return Err(permissions::AccessDenied { tool: name.into(), connection_id: Some(tool.plugin_id.clone()), capability: None, reason: "the call was stopped".into() }),
+    };
+    permissions::check_connection(app, bot, &tool.plugin_id, name, capability)
+}
+
+/// Reusable check for routine checks and staged execution, using live/trusted classifications.
+pub async fn authorize_catalog_tool(app: &Arc<App>, catalog: &PluginCatalog, bot: &Bot, name: &str, cancel: &CancellationToken) -> Result<(), crate::permissions::AccessDenied> {
+    let tool = catalog.plugin_tool(name).ok_or_else(|| crate::permissions::AccessDenied {
+        tool: name.into(), connection_id: None, capability: None, reason: "the connection tool is no longer available".into(),
+    })?;
+    authorize_plugin(app, bot, &tool, cancel).await
+}
+
+/// Authorization for an exact staged local/codemode tool name; review and execution remain
+/// separate. Callers must also compare policy_fingerprint and the owning Runner themselves.
+pub async fn authorize_tool(app: &Arc<App>, bot: &Bot, name: &str, cancel: &CancellationToken) -> Result<(), crate::permissions::AccessDenied> {
+    if !name.contains("__") {
+        return crate::permissions::check_tool(app, bot, name);
+    }
+    let catalog = turn_catalog(app, Vec::new());
+    if let Some(tool) = catalog.plugin_tool(name) {
+        return authorize_plugin(app, bot, &tool, cancel).await;
+    }
+    // A missing cached declaration may connect only an instance the bot can access.
+    let prefix = name.split_once("__").map(|(prefix, _)| prefix).unwrap_or_default();
+    let plugin = app.plugins.lock().unwrap().installed().iter().find(|plugin| plugin.manifest.id == prefix || codemode::to_identifier(&plugin.manifest.id) == prefix).cloned();
+    if let Some(plugin) = plugin {
+        let original = name.split_once("__").map(|(_, name)| name).unwrap_or_default();
+        crate::permissions::check_connection_tool(app, bot, &plugin.manifest.id, original)?;
+        catalog.connect_plugin(&plugin, cancel).await;
+    }
+    authorize_catalog_tool(app, &catalog, bot, name, cancel).await
 }
 
 /// Auto-review, and the user's answer on a card when it asks, for a plugin call a script makes:
@@ -1878,11 +1968,18 @@ pub async fn review_call(
 ) -> Option<BeforeToolCallResult> {
     let tool = catalog.plugin_tool(&ctx.tool_call.name)?;
     let name = tool.tool.name.to_string();
-    let review_description = match access(app, &tool, ctx.cancel).await {
-        Access::ReadOnly => return None,
+    if let Err(denied) = crate::permissions::check_connection_tool(app, bot, &tool.plugin_id, &name) {
+        return Some(crate::permissions::refuse(app, chat_id, bot, denied));
+    }
+    let (capability, review_description) = match access(app, &tool, ctx.cancel).await {
+        Access::ReadOnly => (crate::permissions::Capability::Read, String::new()),
         Access::Stopped => return Some(crate::local_review::blocked("Stopped".into())),
-        Access::Changes { description } => description,
+        Access::Changes { description, capability } => (capability, description),
     };
+    if let Err(denied) = crate::permissions::check_connection(app, bot, &tool.plugin_id, &name, capability) {
+        return Some(crate::permissions::refuse(app, chat_id, bot, denied));
+    }
+    if capability == crate::permissions::Capability::Read { return None; }
     // The script the call comes from says what the whole batch is for.
     let script = ctx.parent.filter(|parent| parent.name == codemode::CODEMODE_TOOL_NAME).and_then(|parent| parent.arguments["code"].as_str());
     let outcome = super::review::decide(app, bot, chat_id, trigger, &tool.plugin_id, &tool.plugin_name, &name, &review_description, ctx.args, script, ctx.cancel).await;
@@ -2086,6 +2183,7 @@ impl Tool for PluginTool {
         (!self.read_only).then_some(ToolExecutionMode::Sequential)
     }
     async fn execute(&self, _id: &str, args: Value, cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+        self.check_policy(&cancel).await?;
         if self.kind != ToolKind::Call {
             return self.resources(args, cancel).await;
         }
@@ -2095,6 +2193,8 @@ impl Tool for PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let mut params = CallToolRequestParams::default();
+        // A sign-in, connection or review may have awaited while the user revoked access.
+        self.check_policy(&cancel).await?;
         params.name = tool.clone().into();
         params.arguments = args.as_object().cloned();
         // A call the user stops, or one that runs out of time, is called off at the server too
@@ -2155,6 +2255,17 @@ impl Tool for PluginTool {
 }
 
 impl PluginTool {
+    async fn check_policy(&self, cancel: &CancellationToken) -> Result<(), ToolError> {
+        let Some((bot, chat_id)) = &self.policy_context else { return Ok(()) };
+        match authorize_plugin(&self.app, bot, self, cancel).await {
+            Ok(()) => Ok(()),
+            Err(denied) => {
+                let result = crate::permissions::refuse(&self.app, chat_id, bot, denied);
+                Err(ToolError(result.reason.unwrap_or_default()))
+            }
+        }
+    }
+
     /// A resource tool's call: a page of the server's resources or templates, or one resource's
     /// contents, shaped as a tool's result, so a script reads `structuredContent` either way.
     async fn resources(&self, args: Value, cancel: CancellationToken) -> Result<ToolResult, ToolError> {
@@ -2164,6 +2275,7 @@ impl PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let peer = server.service.peer();
+        self.check_policy(&cancel).await?;
         let page = args["cursor"].as_str().and_then(|cursor| serde_json::from_value::<rmcp::model::PaginatedRequestParams>(json!({ "cursor": cursor })).ok());
         let asked = async {
             Ok::<Value, String>(match self.kind {
@@ -2588,6 +2700,86 @@ mod tests {
         serde_json::from_value(json!({ "name": name, "description": description, "inputSchema": serde_json::from_str::<Value>(schema).unwrap() })).unwrap()
     }
 
+    /// A real MCP child records every tools/call. Policy errors cannot reach it, even when
+    /// the account saved Always allow or a codemode script directly executes the bound tool.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bot_permissions_gate_real_mcp_calls_and_ignore_forged_cached_readonly() {
+        use crate::permissions::{BotPermissions, Capability};
+        use lorca_agent::{AgentContext, DirectRunner};
+        use lorca_agent::types::{AssistantMessage, ToolCall};
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let bot = app.state.lock().unwrap().bots[0].clone();
+        let chat_id = app.dm_with(&bot.id, None).unwrap().meta.id;
+        let calls_path = scratch.1.join("mcp-calls");
+        let script = r#"import json, sys
+for line in sys.stdin:
+    req = json.loads(line)
+    if 'id' not in req: continue
+    method = req['method']
+    if method == 'initialize':
+        result = {'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'mail','version':'1'}}
+    elif method == 'tools/list':
+        result = {'tools':[{'name':name,'inputSchema':{'type':'object','properties':{}},'annotations':{'readOnlyHint':name=='list_messages'}} for name in ['list_messages','create_draft','send_message','cached_readonly']]}
+    elif method == 'tools/call':
+        name = req['params']['name']
+        with open(sys.argv[1],'a') as file: file.write(name+'\n')
+        result = {'content':[{'type':'text','text':name+' ran'}]}
+    else: result = {}
+    print(json.dumps({'jsonrpc':'2.0','id':req['id'],'result':result}), flush=True)
+"#;
+        let mut cached: Vec<_> = ["list_messages", "create_draft", "send_message", "cached_readonly"].iter().map(|name| mcp_tool(name, name, r#"{"type":"object","properties":{}}"#)).collect();
+        for tool in &mut cached {
+            // The disk claims all calls only read; only the live child's mark is authority.
+            tool.annotations = Some(serde_json::from_value(json!({"readOnlyHint": true})).unwrap());
+        }
+        crate::config::write_json_private(&catalog_path(app, "mail-work"), &SavedCatalog { servers: BTreeMap::from([("api".into(), SavedServer { instructions: None, tools: cached, resources: true })]) }).unwrap();
+        let manifest = super::super::Manifest::parse(&json!({
+            "id": "mail-work", "name": "Mail Work", "servers": {"api": {"type":"stdio","command":"python3","args":["-u","-c",script,calls_path]}},
+            "tools": {"draft": ["create_draft"]}
+        })).unwrap();
+        super::super::install(app, manifest, "inline").unwrap();
+        let policy: BotPermissions = serde_json::from_value(json!({"connections":{"mail-work":{"capabilities":["read","draft"]}},"shell":false,"filesystem":"none"})).unwrap();
+        app.update_bot(&bot.id, |bot| bot.permissions = Some(policy.clone())).unwrap();
+        let profile = crate::api::dispatch(app, "bots.permissions", json!({"id": bot.id})).await.unwrap();
+        assert_eq!(profile["bot"]["permissions"], json!(policy));
+        assert!(profile["local_tools"].as_array().unwrap().contains(&json!("codemode")));
+        let connection = profile["connections"].as_array().unwrap().iter().find(|entry| entry["id"] == "mail-work").unwrap();
+        assert!(connection["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "read_mcp_resource" && tool["capability"] == "read"));
+        app.add_auto_review_rule(AutoReviewRule { id: "always".into(), text: "Always send".into(), behavior: "allow".into(), tool: Some("mail-work/send_message".into()) });
+        let catalog = bot_catalog(app, &bot, &chat_id, Vec::new());
+        let cancel = CancellationToken::new();
+        let assistant = AssistantMessage::empty("test", "test");
+        let context = AgentContext { system_prompt: String::new(), messages: vec![], tools: vec![], cache_points: vec![] };
+        let args = json!({});
+        for name in ["send_message", "cached_readonly"] {
+            let name = tool_name("mail-work", name);
+            let call = ToolCall { id: name.clone(), name: name.clone(), arguments: args.clone() };
+            let parent = ToolCall { id: "script".into(), name: "codemode".into(), arguments: json!({"code":"await tools.mail_work__send_message({})"}) };
+            let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: Some(&parent) };
+            let refused = review_call(app, &catalog, &chat_id, &super::super::review::Trigger::default(), &bot, false, &ctx).await.unwrap();
+            assert!(refused.block && refused.reason.unwrap().contains("write access"));
+            assert!(catalog.plugin_tool(&name).unwrap().execute("direct", args.clone(), cancel.clone(), Arc::new(|_| {})).await.is_err());
+        }
+        assert!(!calls_path.exists(), "no denied MCP call ran");
+        assert!(authorize_tool(app, &bot, "mail_work__create_draft", &cancel).await.is_ok());
+        assert!(matches!(access(app, &catalog.plugin_tool("mail_work__create_draft").unwrap(), &cancel).await, Access::Changes { capability: Capability::Draft, .. }));
+        let script = "const result = await tools.mail_work__list_messages({}); text(result);";
+        let codemode = lorca_agent::codemode::CodemodeTool::new(catalog.clone(), Default::default());
+        let run = codemode.run_script("read", script, cancel.clone(), &DirectRunner).await.unwrap();
+        assert!(!run.result.is_error, "{}", run.result.text_content());
+        assert_eq!(std::fs::read_to_string(&calls_path).unwrap(), "list_messages\n");
+        // A resource tool shares its connection's grants too. Revoking during the turn wins.
+        app.update_bot(&bot.id, |bot| bot.permissions = Some(BotPermissions { connections: Some(BTreeMap::new()), ..policy })).unwrap();
+        for name in ["list_messages", "create_draft", "read_mcp_resource"] {
+            let tool = catalog.plugin_tool(&tool_name("mail-work", name)).unwrap();
+            assert!(tool.execute("revoked", args.clone(), cancel.clone(), Arc::new(|_| {})).await.is_err());
+        }
+        assert_eq!(std::fs::read_to_string(&calls_path).unwrap(), "list_messages\n", "revoked calls reach no service");
+    }
+
     fn catalog_tool(app: &Arc<App>, plugin_id: &str, plugin_name: &str, original_name: &str, description: &str, schema: &str) -> Arc<CatalogTool> {
         let name = tool_name(plugin_id, original_name);
         let tool = mcp_tool(original_name, description, schema);
@@ -2602,6 +2794,7 @@ mod tests {
             server_instructions: String::new(),
             tool: Arc::new(PluginTool {
                 app: app.clone(),
+                policy_context: None,
                 plugin_id: plugin_id.into(),
                 plugin_name: plugin_name.into(),
                 server_name: "test".into(),

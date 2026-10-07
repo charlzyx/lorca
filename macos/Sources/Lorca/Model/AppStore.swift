@@ -681,6 +681,17 @@ final class AppStore {
         perform("bots.update", params)
     }
 
+    func botPermissionCatalog(_ id: Bot.ID) async throws -> BotPermissionCatalog {
+        try await client.request("bots.permissions", ["id": id], as: BotPermissionCatalog.self)
+    }
+
+    /// Only the user's profile editor writes access. A failed save stays in the sheet.
+    func setBotPermissions(_ id: Bot.ID, policy: BotPermissions) async throws {
+        if !isMock { _ = try await client.request("bots.update", ["id": id, "permissions": policy.json]) }
+        if let index = bots.firstIndex(where: { $0.id == id }) { bots[index].permissions = policy }
+        emit(.rosterChanged)
+    }
+
     /// The bot's symbol and accent, the look under and behind its image.
     func setBotLook(_ id: Bot.ID, symbolName: String, accent: Accent) {
         guard let index = bots.firstIndex(where: { $0.id == id }) else { return }

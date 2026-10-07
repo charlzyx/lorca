@@ -423,6 +423,7 @@ struct Bot: Identifiable, Hashable {
     /// A custom profile image, kept as a `file` blob like a message attachment. Shown in place
     /// of the symbol and accent once this computer has the bytes.
     var avatar: Attachment? = nil
+    var permissions: BotPermissions? = nil
     var createdAt: Date
 }
 
@@ -629,14 +630,16 @@ struct PermissionRequest: Hashable {
 
     var isPending: Bool { decision == .pending }
     var isInstall: Bool { tool == "install" }
+    var isAccess: Bool { tool == "access" }
     /// A shell command on the bot's Runner.
-    var isShell: Bool { pluginID == "computer" }
+    var isShell: Bool { pluginID == "computer" && !isAccess }
     /// A sign-in card: Sign in starts the OAuth flow on the Runner.
     var isConnect: Bool { tool == "connect" }
 
     /// "wants to use GitHub" / "wants to install GitHub" / "needs a sign-in to GitHub" /
     /// "wants to run a command on Workbench"
     var verbPhrase: String {
+        if isAccess { return L("needs additional access") }
         if isConnect { return L("needs a sign-in to %@", pluginName) }
         if isShell { return L("wants to run a command on %@", pluginName) }
         return isInstall ? L("wants to install %@", pluginName) : L("wants to use %@", pluginName)
@@ -658,6 +661,7 @@ struct PermissionRequest: Hashable {
     /// The buttons a pending card offers: (title, decision). A shell command offers Always
     /// allow only with a rule to add.
     var choices: [(String, String)] {
+        if isAccess { return [(L("Edit Access…"), "access"), (L("Dismiss"), "deny")] }
         if isConnect { return [(L("Sign in"), "allow"), (L("Not now"), "deny")] }
         if isInstall { return [(L("Allow"), "allow"), (L("Deny"), "deny")] }
         if isShell && rule == nil { return [(L("Allow once"), "allow"), (L("Deny"), "deny")] }

@@ -339,6 +339,7 @@ enum Wire {
         var model: String?
         var thinking: String?
         var avatar: Attachment?
+        var permissions: BotPermissions?
         var createdAt: Double
     }
 
@@ -649,6 +650,7 @@ extension Wire.Bot {
             model: model,
             thinking: thinking,
             avatar: avatar.map { Attachment(id: $0.id, name: $0.name, mime: $0.mime, size: $0.size, width: $0.width, height: $0.height) },
+            permissions: permissions,
             createdAt: Date(timeIntervalSince1970: createdAt)
         )
     }

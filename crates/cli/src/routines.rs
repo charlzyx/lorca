@@ -445,15 +445,20 @@ pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
         Ok(dm) => dm,
         Err(error) => return failed(error.to_string()),
     };
+    if let Err(denied) = crate::permissions::check_tool(app, &bot, "codemode") {
+        let refusal = crate::permissions::refuse(app, &dm.meta.id, &bot, denied);
+        return failed(refusal.reason.unwrap_or_default());
+    }
     let files: Vec<Arc<dyn Tool>> =
         lorca_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
-    let catalog = crate::plugins::mcp::turn_catalog(app, files);
+    let files = crate::permissions::guarded::tools(app, &bot, &dm.meta.id, files);
+    let catalog = crate::plugins::mcp::bot_catalog(app, &bot, &dm.meta.id, files);
     let store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: dm.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =
         crate::scripts::ModelsAsk::new(app, &dm.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
     let options = CodemodeOptions { mcp_types: !crate::plugins::mcp::plugin_briefs(app).is_empty(), timeout: CHECK_TIMEOUT, ..CodemodeOptions::default() };
     let codemode = CodemodeTool::new(catalog.clone(), options).with_store(store).with_functions(functions);
-    let runner = CheckRunner { app: app.clone(), catalog };
+    let runner = CheckRunner { app: app.clone(), catalog, bot, chat_id: dm.meta.id.clone() };
     match codemode.run_script(&format!("check-{}", routine.id), code, cancel.clone(), &runner).await {
         Err(error) => failed(error.0),
         Ok(run) => {
@@ -495,12 +500,23 @@ fn clipped(text: &str, max: usize) -> String {
 struct CheckRunner {
     app: Arc<App>,
     catalog: Arc<crate::plugins::mcp::PluginCatalog>,
+    bot: Bot,
+    chat_id: String,
 }
 
 #[cfg(feature = "runner")]
 #[async_trait::async_trait]
 impl ToolRunner for CheckRunner {
     async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        let allowed = if CHECK_FILE_TOOLS.contains(&tool.name()) {
+            crate::permissions::check_tool(&self.app, &self.bot, tool.name())
+        } else {
+            crate::plugins::mcp::authorize_catalog_tool(&self.app, &self.catalog, &self.bot, tool.name(), &cancel).await
+        };
+        if let Err(denied) = allowed {
+            let refusal = crate::permissions::refuse(&self.app, &self.chat_id, &self.bot, denied);
+            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(refusal.reason.unwrap_or_default()) }, is_error: true, blocked: true };
+        }
         let reads = CHECK_FILE_TOOLS.contains(&tool.name()) || crate::plugins::mcp::is_read_only(&self.app, &self.catalog, tool.name(), &cancel).await;
         if !reads {
             let refusal = format!("{} can change things, and a check only looks: leave it to the run the check starts.", tool.name());
@@ -579,10 +595,26 @@ mod tests {
                 thinking: None,
                 legacy_instructions: String::new(),
                 workdir: None,
+                permissions: None,
                 created_at: 0.0,
             });
         }
         ScratchApp(app, home)
+    }
+
+    #[cfg(feature = "runner")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bot_permissions_apply_to_unattended_check_reads() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let routine = create(app, "b1", "Inbox", "every 1h", "Report changes", Some("return await tools.ls({});"), true).unwrap();
+        let policy = serde_json::from_value(serde_json::json!({"filesystem":"none","shell":false})).unwrap();
+        app.update_bot("b1", |bot| bot.permissions = Some(policy)).unwrap();
+        let result = run_check(app, &routine, &CancellationToken::new()).await;
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("filesystem access is disabled")), "{:?}", result.error);
+        app.update_bot("b1", |bot| bot.permissions.as_mut().unwrap().tools = Some(std::collections::BTreeSet::new())).unwrap();
+        let result = run_check(app, &routine, &CancellationToken::new()).await;
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("codemode")), "{:?}", result.error);
     }
 
     #[test]
