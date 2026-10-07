@@ -38,6 +38,7 @@ enum Wire {
         var models: [Model]?
         var runningChatIds: [String]
         var runningTurns: [RunningTurn]?
+        var attention: AttentionView?
     }
 
     /// A model the CLI's catalog offers, in the catalog's order.
@@ -519,6 +520,7 @@ enum Wire {
         var state: State
         var createdAt: Double
         var queued: Bool?
+        var notification: String?
     }
 
     struct RosterChanged: Decodable {
@@ -710,6 +712,7 @@ extension Wire.Message {
             },
             replyTo: self.body.replyTo.map { ReplyQuote(messageID: $0.messageId, author: $0.author.toModel(), text: $0.text) })
         message.queued = queued ?? false
+        message.notification = notification
         return message
     }
 }

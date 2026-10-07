@@ -940,6 +940,8 @@ struct Message: Identifiable, Hashable {
     var replyTo: ReplyQuote?
     /// A message of the user's the bot's turn holds for its next step; Send now has it read now.
     var queued = false
+    /// summary, urgent, or quiet, supplied by the CLI for structured attention messages.
+    var notification: String?
 
     init(
         id: String = "msg-\(UUID().uuidString.lowercased())",

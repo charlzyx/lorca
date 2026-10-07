@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 
 enum StoreEvent {
+    case attentionChanged
     case snapshotReplaced
     case rosterChanged
     case chatsChanged
@@ -70,6 +71,7 @@ final class AppStore {
     private(set) var routines: [Routine] = []
     /// Auto-review, shared through the roster.
     private(set) var autoReview = AutoReview()
+    private(set) var attention = AttentionView()
     /// The account's provider credentials, the same on every Device.
     private(set) var providers: [ProviderCredential] = []
     /// The models the CLI's catalog offers, for the Model and Thinking pickers.
@@ -274,6 +276,7 @@ final class AppStore {
         }
         routines = (snapshot.routines ?? []).map { $0.toModel() }
         autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
+        attention = snapshot.attention ?? AttentionView()
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
         runningJobs = (snapshot.runningTurns ?? []).map { ($0.jobId, $0.chatId, $0.botId, $0.routineId) }
@@ -292,6 +295,11 @@ final class AppStore {
         }
 
         switch name {
+        case "attention.changed":
+            if let incoming = decode(AttentionView.self) {
+                attention = incoming
+                emit(.attentionChanged)
+            }
         case "snapshot":
             if let snapshot = decode(Wire.Snapshot.self) { apply(snapshot: snapshot) }
 

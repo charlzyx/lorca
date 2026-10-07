@@ -175,6 +175,9 @@ pub struct App {
     /// history). Message and roster events are held back and state is not written per
     /// message; the cycle saves once and emits one snapshot when the page is applied.
     pub bulk_sync: AtomicBool,
+    /// This process has checked the encrypted attention records after an upgrade from a
+    /// build that advanced last_seq without recognizing that blob kind.
+    pub attention_backfilled: AtomicBool,
     /// The machine key of the account the sync loop has pulled from the relay since this
     /// process started: its roster, Devices, and credentials. `sync.account` waits on it.
     pub account_pulled: watch::Sender<Option<String>>,
@@ -281,6 +284,7 @@ impl App {
             relay_problem: Mutex::new(None),
             presence_stale: AtomicBool::new(false),
             bulk_sync: AtomicBool::new(false),
+            attention_backfilled: AtomicBool::new(false),
             account_pulled: watch::Sender::new(None),
             pairings: Mutex::new(HashMap::new()),
             accepting: Mutex::new(None),
@@ -444,6 +448,7 @@ impl App {
             && matches!(
                 event,
                 Event::MessageAdded { .. }
+                    | Event::AttentionChanged(_)
                     | Event::MessageUpdated { .. }
                     | Event::MessageRemoved { .. }
                     | Event::ChatRemoved { .. }
@@ -669,6 +674,9 @@ impl App {
     /// its place ahead of older messages. A chat goes up under the message order lock, so no new
     /// message lands between its old ones.
     pub fn push_history(&self) {
+        if let Err(error) = crate::attention::push_history(self) {
+            tracing::warn!(%error, "queueing attention history");
+        }
         let (avatars, chats): (Vec<Attachment>, Vec<(String, u32)>) = {
             let state = self.state.lock().unwrap();
             (
@@ -1072,6 +1080,7 @@ impl App {
             self.push_roster();
         }
         self.emit(self.roster_summary());
+        crate::attention::changed(self);
     }
 
     /// Creates the bot and its direct chat in one roster change, so other Devices (and the
@@ -1794,6 +1803,7 @@ impl App {
             "models": models_out(),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
+            "attention": crate::attention::view(self).unwrap_or_default(),
         })
     }
 }

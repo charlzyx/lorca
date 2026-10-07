@@ -157,6 +157,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
         <>
           <Stack.Toolbar placement="left">
             <Stack.Toolbar.Button icon="gearshape" accessibilityLabel={t("Settings")} onPress={() => router.push("/settings")} />
+            <Stack.Toolbar.Button icon="tray.full" accessibilityLabel={t("Attention")} onPress={() => router.push("/attention")} />
           </Stack.Toolbar>
           <Stack.Toolbar placement="right">
             <Stack.Toolbar.Menu icon="square.and.pencil" accessibilityLabel={t("New")}>
@@ -173,6 +174,7 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
         <>
           <Stack.Toolbar placement="left" tintColor={p.secondaryLabel}>
             <Stack.Toolbar.Button icon={AndroidIcons.settings} accessibilityLabel={t("Settings")} onPress={() => router.push("/settings")} />
+            <Stack.Toolbar.Button accessibilityLabel={t("Attention")} onPress={() => router.push("/attention")}>{t("Attention")}</Stack.Toolbar.Button>
           </Stack.Toolbar>
           <Stack.Toolbar placement="right" tintColor={p.secondaryLabel}>
             <Stack.Toolbar.Menu icon={AndroidIcons.add} accessibilityLabel={t("New")}>

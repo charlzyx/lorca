@@ -388,6 +388,7 @@ extension NSToolbarItem.Identifier {
     static let devicePicker = NSToolbarItem.Identifier("lorca.devicePicker")
     static let settingsNavigation = NSToolbarItem.Identifier("lorca.settingsNavigation")
     static let runningTasks = NSToolbarItem.Identifier("lorca.runningTasks")
+    static let attention = NSToolbarItem.Identifier("lorca.attention")
 }
 
 // Standard toolbar items sit on glass platters; a borderless custom-view item doesn't. AppKit moves
@@ -400,6 +401,7 @@ extension MainWindowController: NSToolbarDelegate {
             .flexibleSpace,
             .inspectorTrackingSeparator,
             .flexibleSpace,
+            .attention,
             .inspectorToggle,
         ]
     }
@@ -413,6 +415,15 @@ extension MainWindowController: NSToolbarDelegate {
         itemForItemIdentifier identifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
+        if identifier == .attention {
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            item.label = L("Attention")
+            item.toolTip = L("Attention")
+            item.image = NSImage(systemSymbolName: "tray.full", accessibilityDescription: L("Attention"))
+            item.target = root
+            item.action = #selector(RootSplitViewController.showAttention(_:))
+            return item
+        }
         if identifier == .settingsNavigation {
             // Back and forward through the settings panes, ahead of the title as in System Settings.
             // The images carry their words: the group writes a label into an image without one,

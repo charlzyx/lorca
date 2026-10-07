@@ -62,6 +62,9 @@ fn store_avatar(app: &Arc<App>, params: &Value) -> Result<Option<Option<Attachme
 const UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
+    if method.starts_with("attention.") {
+        return crate::attention::dispatch(app, method, params, None);
+    }
     match method {
         "hello" => Ok(json!({
             "version": crate::config::VERSION,

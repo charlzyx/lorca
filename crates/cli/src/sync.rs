@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,chat,machine,credentials,attention,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -222,7 +222,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,machine,credentials,attention,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -339,6 +339,21 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
 
 /// Pulls the log from `last_seq` until a page comes back empty.
 async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    // An older build can already have consumed the relay log while ignoring attention.
+    // Replay this bounded slot family once when its new local table is empty; ordinary
+    // first sync already reads it through NOT_CHAT_KINDS.
+    if !app.attention_backfilled.load(Ordering::Relaxed) {
+        if app.state.lock().unwrap().last_seq > 0 && app.store.attention_rows().map_err(|error| RelayError { status: None, message: error.to_string() })?.is_empty() {
+            let mut since = 0;
+            loop {
+                let (blobs, _) = app.relay.list_blobs(url, token, since, "attention").await?;
+                let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+                for blob in &blobs { apply_blob(app, machine_file, blob); }
+                since = last;
+            }
+        }
+        app.attention_backfilled.store(true, Ordering::Relaxed);
+    }
     if app.state.lock().unwrap().last_seq == 0 && first_sync(app, url, token, machine_file).await? == FirstSync::CannotPage {
         // A relay that cannot page a chat: replay its log. It keeps the latest roster, which
         // in a replay comes after the messages, so that is taken first as a preview.
@@ -734,6 +749,11 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     let Ok(dek) = machine_file.dek() else { return };
 
     match blob.kind.as_str() {
+        "attention" => {
+            if let Err(error) = crate::attention::receive(app, &ciphertext) {
+                tracing::warn!(%error, "attention blob");
+            }
+        }
         "roster" => match crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &ciphertext) {
             Ok(roster) => apply_roster(app, roster),
             Err(error) => tracing::warn!(%error, "roster blob"),
@@ -931,6 +951,62 @@ mod tests {
         let home = std::env::temp_dir().join(format!("lorca-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn attention_arrives_in_live_pulls_and_backfills_after_an_older_build_consumed_the_log() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicUsize;
+        use crate::attention::{Category, Report, Source};
+        let sender = scratch_app();
+        crate::identity::create(&sender.0, Some("Runner".into())).unwrap();
+        let bot = sender.0.state.lock().unwrap().bots[0].clone();
+        let chat = sender.0.dm_with(&bot.id, None).unwrap();
+        for key in ["older-decision", "new-blocker"] {
+            crate::attention::report(&sender.0, Report {
+                key: key.into(), category: Category::Blocker, title: key.into(), summary: "Private coordinator work".into(),
+                next_action: "Review the source".into(), source: Source { chat_id: chat.meta.id.clone(), task_id: None, message_id: None, review_id: None },
+                coordinator_bot_id: Some(bot.id.clone()), urgent: false, quiet: true,
+            }, Some(&bot.id), 0).unwrap();
+        }
+        let queued: Vec<_> = sender.0.store.outbox().unwrap().into_iter().filter(|blob| blob.kind == "attention").collect();
+        let blobs: Vec<serde_json::Value> = queued.iter().zip([50, 101]).map(|(blob, seq)| serde_json::json!({
+            "id":blob.id,"kind":"attention","seq":seq,"recipient_machine_pubkey":null,
+            "ciphertext":crate::keys::b64(&blob.ciphertext),"created_at":1,
+        })).collect();
+        let backfills = Arc::new(AtomicUsize::new(0));
+        let counted = backfills.clone();
+        let server = Router::new().route("/v1/blobs", get(move |Query(query): Query<HashMap<String,String>>| {
+            let blobs = blobs.clone(); let counted = counted.clone();
+            async move {
+                let kinds = query.get("kinds").cloned().unwrap_or_default();
+                let since: i64 = query["since"].parse().unwrap();
+                if kinds == "attention" && since == 0 { counted.fetch_add(1, Ordering::Relaxed); }
+                let selected: Vec<_> = blobs.into_iter().filter(|blob| kinds.split(',').any(|kind| kind == "attention") && blob["seq"].as_i64().unwrap() > since).collect();
+                Json(serde_json::json!({"blobs":selected,"seq":101}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let receiver = || {
+            let receiver = scratch_app();
+            *receiver.0.machine.lock().unwrap() = sender.0.machine_file();
+            *receiver.0.state.lock().unwrap() = sender.0.state.lock().unwrap().clone();
+            receiver.0.state.lock().unwrap().last_seq = 100;
+            receiver
+        };
+        let live = receiver(); live.0.attention_backfilled.store(true, Ordering::Relaxed);
+        pull_blobs(&live.0, &url, "test", &live.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(crate::attention::view(&live.0).unwrap().items.len(), 1, "normal live polling includes attention");
+        let upgraded = receiver();
+        pull_blobs(&upgraded.0, &url, "test", &upgraded.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(crate::attention::view(&upgraded.0).unwrap(), crate::attention::view(&sender.0).unwrap(), "records an older build skipped are recovered");
+        pull_blobs(&upgraded.0, &url, "test", &upgraded.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(backfills.load(Ordering::Relaxed), 1, "an empty account does not replay on every cycle");
+        server.abort();
     }
 
     #[tokio::test]

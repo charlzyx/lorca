@@ -329,3 +329,28 @@ async fn attesting_a_machine_takes_a_bearer_and_keeps_keys_apart() {
     let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap_err();
     assert_eq!(refused.status, Some(410));
 }
+
+#[tokio::test]
+async fn attention_slots_round_trip_as_ciphertext_at_protocol_three() {
+    assert_eq!(PROTOCOL, lorca::relay::PROTOCOL);
+    let relay = Relay::start(1_000_000).await;
+    let dek = lorca::keys::random_32();
+    let payload = serde_json::json!({"source":{"chat_id":"private-chat"},"summary":"Private decision"});
+    for (id, summary) in [("attention-first", "Private decision"), ("attention-latest", "Updated decision")] {
+        let mut payload = payload.clone(); payload["summary"] = summary.into();
+        relay.client.put_blob(&relay.url, &relay.token, OutboxItem {
+            id: id.into(), kind: "attention".into(), recipient: None,
+            ciphertext: lorca::crypto::encrypt_json(&dek, "attention", &payload).unwrap(),
+            slot: Some(lorca::app::Slot::latest("opaque-attention-slot")), group: None,
+        }).await.unwrap();
+    }
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "attention").await.unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "attention-latest");
+    let bytes = lorca::keys::unb64(&blobs[0].ciphertext).unwrap();
+    let opened: serde_json::Value = lorca::crypto::decrypt_json(&dek, "attention", &bytes).unwrap();
+    assert_eq!(opened["summary"], "Updated decision");
+    assert!(lorca::crypto::decrypt_json::<serde_json::Value>(&lorca::keys::random_32(), "attention", &bytes).is_err());
+    let response = relay.http.get(format!("{}/v1/blobs?kinds=attention", relay.url)).bearer_auth(&relay.token).header("lorca-protocol", "2").send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
+}

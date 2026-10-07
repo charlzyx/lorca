@@ -142,6 +142,9 @@ class Engine {
 
   private apply(event: string, data: any) {
     switch (event) {
+      case "attention.changed":
+        useStore.setState({ attention: data });
+        break;
       case "snapshot":
         replaceSnapshot(data as Snapshot);
         break;

@@ -21,6 +21,7 @@ use crate::routes::{ApiError, ApiResult};
 pub const KINDS: &[&str] = &[
     "roster",
     "chat",
+    "attention",
     "job",
     "job_cancel",
     "job_result",
