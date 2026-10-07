@@ -568,6 +568,14 @@ final class InspectorViewController: NSViewController {
             let runnerName = runner?.name ?? L("its Runner")
             rows.append(NoteRow(text: L("No plugins on %@ yet. Add one from the marketplace, or ask %@ to find one.", runnerName, bot.name)))
         }
+        if let runner, runner.plugins.contains(where: { $0.id == "playwright" }) {
+            let browser = ActionRow(key: L("Browser Sessions"), value: runner.name, tint: .secondaryLabelColor, actionTitle: L("Manage…"))
+            browser.onAction = { [weak self] in
+                guard let self, case let .chat(chatID) = self.selection else { return }
+                self.presentAsSheet(BrowserSessionsViewController(bot: bot, chatID: chatID, runner: runner))
+            }
+            rows.append(browser)
+        }
         rows.append(marketplaceRow)
         plugins.setRows(rows)
     }

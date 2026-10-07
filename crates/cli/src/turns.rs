@@ -142,6 +142,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(SearchPlugins { app: app.clone() }),
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
+        Arc::new(crate::browser::SessionTool { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
     ];
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
@@ -154,7 +155,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     // turn, and so does its prompt cache.
     let mut scriptable: Vec<Arc<dyn Tool>> = tools.iter().filter(|tool| SCRIPTABLE_TOOLS.contains(&tool.name())).cloned().collect();
     scriptable.push(crate::shell::script_bash(app, &workdir));
-    let plugin_tools = crate::plugins::mcp::turn_catalog(app, scriptable);
+    let plugin_tools = crate::plugins::mcp::turn_catalog_for_bot(app, scriptable, &bot.id, &chat.meta.id);
     let script_store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: chat.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =
         crate::scripts::ModelsAsk::new(app, &chat.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
@@ -581,6 +582,12 @@ impl LoopHooks for TurnHooks {
     }
 
     async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
+        if let Err(error) = self.app.browser_sessions.wait_if_taken_over(&self.app, &self.bot.id, ctx.cancel).await {
+            return Some(crate::local_review::blocked(error));
+        }
+        if let Some(refused) = crate::browser::review_call(&self.app, &self.bot, &self.chat_id, &self.trigger, self.unattended, &ctx).await {
+            return Some(refused);
+        }
         if let Some(refused) = crate::plugins::mcp::review_call(&self.app, &self.plugin_tools, &self.chat_id, &self.trigger, &self.bot, self.unattended, &ctx).await {
             return Some(refused);
         }

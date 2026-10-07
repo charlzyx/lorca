@@ -226,6 +226,8 @@ pub struct App {
     /// Connected MCP servers.
     #[cfg(feature = "runner")]
     pub mcp: crate::plugins::mcp::Pool,
+    #[cfg(feature = "runner")]
+    pub browser_sessions: crate::browser::Sessions,
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
@@ -308,6 +310,8 @@ impl App {
             updates: crate::update::Updater::default(),
             #[cfg(feature = "runner")]
             mcp: crate::plugins::mcp::Pool::new(),
+            #[cfg(feature = "runner")]
+            browser_sessions: crate::browser::Sessions::default(),
             #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
             http,
@@ -541,6 +545,8 @@ impl App {
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
+        #[cfg(feature = "runner")]
+        self.browser_sessions.reset();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
@@ -560,6 +566,8 @@ impl App {
         if files.is_dir() {
             std::fs::remove_dir_all(&files)?;
         }
+        let browser = self.config.home.join("browser");
+        if browser.is_dir() { std::fs::remove_dir_all(browser)?; }
         // The other Devices' turns went with the account.
         self.turns_changed();
         self.emit(Event::IdentityChanged { has_identity: false });

@@ -80,6 +80,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             crate::marketplace::check_in_background(app);
             Ok(app.snapshot())
         }
+        method if method.starts_with("browser.") => crate::browser::dispatch(app, method, params).await,
 
         "identity.create" => {
             let phrase = identity::create(app, opt_string(&params, "device_name")).map_err(|e| e.to_string())?;

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-02T10:13:03Z",
+  "updated": "2026-10-07T17:57:43Z",
   "plugins": [
     {
       "id": "github",
@@ -104,11 +104,11 @@
     {
       "id": "playwright",
       "name": "Browser",
-      "description": "Opens web pages in a headless browser on the Runner to read them, fill forms, and take screenshots.",
+      "description": "Persistent visible browser profiles owned by each bot on its Runner, with human takeover, sign-in, and encrypted screenshot evidence.",
       "category": "research",
       "featured": true,
       "author": "Microsoft",
-      "version": "1",
+      "version": "2",
       "icon": "globe",
       "homepage": "https://github.com/microsoft/playwright-mcp",
       "tags": ["browser", "web", "scrape", "screenshot", "playwright"],
@@ -120,7 +120,7 @@
         {
           "name": "Reading a page",
           "description": "How to read a page without filling the context.",
-          "content": "# Reading a page\n\nNavigate with browser_navigate, then read browser_snapshot once. Prefer the snapshot over screenshots: it is text. Close tabs you opened when done."
+          "content": "# Reading a page\n\nUse browser_session to list, create, and explicitly open a profile on your assigned Runner before calling Browser tools. Each profile belongs to one bot and has its own account sign-in. Navigate with browser_navigate, then read browser_snapshot. The user can Take Over for sign-in and explicitly Return to Bot; wait during takeover and never use another input route. Keep the session and its tabs for later work. browser_take_screenshot attaches encrypted verification evidence to the current chat; a screenshot alone does not establish that a task passed."
         }
       ]
     },
