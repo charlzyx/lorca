@@ -1,8 +1,18 @@
 //! When a routine runs: an interval (`every 30m`, `every 2h`, `every 1d`) or a five-field cron
-//! expression (`0 9 * * 1-5`) read in the Runner's local time. `describe` says it in words the
+//! expression (`0 9 * * 1-5`) read in an explicit IANA timezone. `describe` says it in words the
 //! way Grok Bot's routine panel does; `next_after` finds the next firing.
 
 use crate::memory::{local_time, local_tm, start_of_local_day};
+use chrono::{Datelike, TimeZone};
+use chrono_tz::Tz;
+
+pub fn timezone(name: &str) -> Result<Tz, String> {
+    name.trim().parse().map_err(|_| format!("Unknown timezone {name:?}. Use an IANA timezone such as America/New_York, Asia/Singapore, or UTC."))
+}
+
+pub fn default_timezone() -> String {
+    "UTC".into()
+}
 
 /// The shortest gap between two runs of one routine.
 pub const MIN_INTERVAL_SECS: i64 = 5 * 60;
@@ -89,12 +99,13 @@ fn parse_every(rest: &str) -> Result<Schedule, String> {
             (amount, unit)
         }
     };
-    let secs = match unit {
-        "m" | "min" | "mins" | "minute" | "minutes" => amount * 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => amount * 3600,
-        "d" | "day" | "days" => amount * 86_400,
+    let multiplier = match unit {
+        "m" | "min" | "mins" | "minute" | "minutes" => 60,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86_400,
         _ => return Err(format!("Could not read the interval {rest:?}. Use every 30m, every 2h, or every 1d.")),
     };
+    let secs = amount.checked_mul(multiplier).ok_or("That interval is longer than a year.")?;
     if secs < MIN_INTERVAL_SECS {
         return Err("That runs too often. A routine runs at most every five minutes.".into());
     }
@@ -153,6 +164,16 @@ fn parse_value(text: &str, min: u32, max: u32, names: &[&str]) -> Result<u32, St
 }
 
 impl Schedule {
+    /// UTC instants are identical on all Devices. Missing DST minutes skip; a repeated local
+    /// minute fires at its earlier instant only. Intervals always count elapsed seconds.
+    pub fn next_after_in(&self, after: i64, zone: &str) -> Option<i64> {
+        let zone = timezone(zone).ok()?;
+        match self {
+            Schedule::Every(secs) => after.checked_add(*secs),
+            Schedule::Cron(cron) => cron.next_after_in(after, zone),
+        }
+    }
+
     /// The first time this schedule fires strictly after `after` (unix seconds), in the local
     /// time zone. `None` when nothing matches in the next two years.
     pub fn next_after(&self, after: i64) -> Option<i64> {
@@ -199,6 +220,36 @@ fn describe_interval(secs: i64) -> String {
 }
 
 impl Cron {
+    fn next_after_in(&self, after: i64, zone: Tz) -> Option<i64> {
+        let mut date = zone.timestamp_opt(after, 0).single()?.date_naive();
+        let horizon = after.checked_add(2 * 366 * 86_400)?;
+        for _ in 0..=733 {
+            let month_ok = self.months & (1 << date.month()) != 0;
+            let dom_ok = self.days_of_month & (1 << date.day()) != 0;
+            let dow_ok = self.days_of_week & (1 << date.weekday().num_days_from_sunday()) != 0;
+            let day_ok = match (self.dom_restricted, self.dow_restricted) {
+                (true, true) => dom_ok || dow_ok,
+                (true, false) => dom_ok,
+                (false, true) => dow_ok,
+                (false, false) => true,
+            };
+            if month_ok && day_ok {
+                for hour in (0..24).filter(|hour| self.hours & (1 << hour) != 0) {
+                    for minute in (0..60).filter(|minute| self.minutes & (1 << minute) != 0) {
+                        let local = date.and_hms_opt(hour, minute, 0)?;
+                        if let Some(at) = zone.from_local_datetime(&local).earliest().map(|at| at.timestamp()) {
+                            if at > after && at <= horizon {
+                                return Some(at);
+                            }
+                        }
+                    }
+                }
+            }
+            date = date.succ_opt()?;
+        }
+        None
+    }
+
     fn next_after(&self, after: i64) -> Option<i64> {
         let horizon = after + 2 * 366 * 86_400;
         let mut t = after - after.rem_euclid(60) + 60;
@@ -344,6 +395,14 @@ pub fn when_label(at: i64, now: i64) -> String {
     }
 }
 
+/// An absolute timestamp with its IANA zone and UTC offset, independent of this Device's
+/// timezone and the time it renders the roster.
+pub fn when_in(at: i64, zone: &str) -> Option<String> {
+    let zone = timezone(zone).ok()?;
+    let at = zone.timestamp_opt(at, 0).single()?;
+    Some(format!("{} ({zone})", at.format("%Y-%m-%d %H:%M %:z")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +485,48 @@ mod tests {
         assert_eq!(when_label(at("2026-09-18", "09:00"), now), "tomorrow 9:00 AM");
         assert_eq!(when_label(at("2026-09-21", "09:00"), now), "Monday 9:00 AM");
         assert_eq!(when_label(at("2026-10-01", "08:30"), now), "2026-10-01 8:30 AM");
+    }
+
+    fn utc(text: &str) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(text).unwrap().timestamp()
+    }
+
+    #[test]
+    fn explicit_timezones_use_the_same_instant_on_every_device() {
+        let morning = parse("0 9 * * *").unwrap();
+        let after = utc("2026-10-08T00:00:00Z");
+        assert_eq!(morning.next_after_in(after, "Asia/Singapore"), Some(utc("2026-10-08T01:00:00Z")));
+        assert_eq!(morning.next_after_in(after, "America/New_York"), Some(utc("2026-10-08T13:00:00Z")));
+        assert_eq!(when_in(utc("2026-10-08T01:00:00Z"), "Asia/Singapore").as_deref(), Some("2026-10-08 09:00 +08:00 (Asia/Singapore)"));
+        assert!(timezone("Mars/Base").is_err());
+        assert_eq!(morning.next_after_in(after, "Mars/Base"), None);
+        assert_eq!(parse("every 1d").unwrap().next_after_in(after, "America/New_York"), Some(after + 86_400));
+        assert!(parse("every 9223372036854775807d").is_err());
+    }
+
+    #[test]
+    fn daylight_saving_gaps_skip_and_folds_fire_only_at_the_earlier_instant() {
+        let zone = "America/New_York";
+        let morning = parse("0 9 * * *").unwrap();
+        assert_eq!(morning.next_after_in(utc("2026-03-07T14:00:00Z"), zone), Some(utc("2026-03-08T13:00:00Z")), "a 23-hour day");
+        assert_eq!(morning.next_after_in(utc("2026-10-31T13:00:00Z"), zone), Some(utc("2026-11-01T14:00:00Z")), "a 25-hour day");
+        let gap = parse("30 2 * * *").unwrap();
+        assert_eq!(gap.next_after_in(utc("2026-03-08T00:00:00Z"), zone), Some(utc("2026-03-09T06:30:00Z")), "02:30 does not exist on March 8");
+        let fold = parse("30 1 * * *").unwrap();
+        let first = utc("2026-11-01T05:30:00Z");
+        assert_eq!(fold.next_after_in(first - 60, zone), Some(first));
+        assert_eq!(fold.next_after_in(first, zone), Some(utc("2026-11-02T06:30:00Z")), "the repeated 01:30 never fires again");
+        assert_eq!(fold.next_after_in(utc("2026-11-01T06:00:00Z"), zone), Some(utc("2026-11-02T06:30:00Z")), "restarting inside the fold does not repeat it");
+    }
+
+    #[test]
+    fn explicit_cron_handles_month_boundaries_and_half_hour_dst() {
+        let first = parse("30 8 1 * *").unwrap();
+        assert_eq!(first.next_after_in(utc("2026-09-30T23:00:00Z"), "Asia/Singapore"), Some(utc("2026-10-01T00:30:00Z")));
+        let fold = parse("45 1 * * *").unwrap();
+        let zone = "Australia/Lord_Howe";
+        let first = utc("2026-04-04T14:45:00Z");
+        assert_eq!(fold.next_after_in(first - 60, zone), Some(first));
+        assert_eq!(fold.next_after_in(first, zone), Some(utc("2026-04-05T15:15:00Z")));
     }
 }

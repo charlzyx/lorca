@@ -643,8 +643,18 @@ pub struct Routine {
     pub name: String,
     /// The task, written to the bot, handed to it on every run.
     pub prompt: String,
-    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time.
+    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`.
     pub schedule: String,
+    #[serde(default = "crate::schedule::default_timezone")]
+    pub timezone: String,
+    #[serde(default)]
+    pub missed_run_policy: crate::routine_health::MissedRunPolicy,
+    /// The last scheduled occurrence admitted or skipped; independent of model runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scheduled_at: Option<f64>,
+    /// Check health written by the assigned Runner and persisted with the encrypted roster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::routine_health::CheckHealth>,
     pub is_enabled: bool,
     /// When the schedule started counting: creation, or the last resume.
     pub enabled_at: f64,
@@ -653,7 +663,7 @@ pub struct Routine {
     /// How the last run ended: `sent`, `pass`, or `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<String>,
-    /// Why Lorca paused it, when it did: `away`.
+    /// Why Lorca paused it, when it did: `away` or `authentication`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
     /// JavaScript the Runner runs at each due time before the bot does, without a model: a
@@ -667,7 +677,10 @@ pub struct Routine {
 impl Routine {
     /// The time the next run counts from: the last run, else when the routine was armed.
     pub fn anchor(&self) -> i64 {
-        self.last_run_at.unwrap_or(0.0).max(self.enabled_at) as i64
+        self.last_run_at.unwrap_or(0.0)
+            .max(self.last_scheduled_at.unwrap_or(0.0))
+            .max(self.health.as_ref().and_then(|health| health.last_check_at).unwrap_or(0.0))
+            .max(self.enabled_at) as i64
     }
 
     /// When the next run is due, or `None` when paused or the schedule is unreadable.
@@ -681,7 +694,9 @@ impl Routine {
         if !self.is_enabled {
             return None;
         }
-        crate::schedule::parse(&self.schedule).ok()?.next_after(since.max(self.anchor()))
+        let next = crate::schedule::parse(&self.schedule).ok()?.next_after_in(since.max(self.anchor()), &self.timezone)?;
+        let retry = self.health.as_ref().map(|health| health.retry_at.unwrap_or(0.0).max(health.model.retry_at.unwrap_or(0.0))).unwrap_or(0.0);
+        Some(next.max(retry as i64))
     }
 }
 

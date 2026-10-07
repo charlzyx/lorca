@@ -251,6 +251,7 @@ impl App {
         let plugins = crate::plugins::Store::load(&config);
         let marketplace = crate::marketplace::Updates::load(&config);
         let store = LocalStore::open(&config.database_path())?;
+        store.set_routine_runtime_key(machine.as_ref().and_then(|machine| machine.dek().ok()));
         let mut state = store.load_state()?;
         for bot in &mut state.bots {
             bot.normalize_description();
@@ -336,6 +337,7 @@ impl App {
 
     pub fn save_machine(&self) -> anyhow::Result<()> {
         let machine = self.machine.lock().unwrap().clone();
+        self.store.set_routine_runtime_key(machine.as_ref().and_then(|machine| machine.dek().ok()));
         match machine {
             Some(machine) => config::write_json_private(&self.config.machine_path(), &machine),
             None => Ok(()),
@@ -1352,11 +1354,19 @@ impl App {
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
-            update(routine);
-            routine.clone()
+            let index = state.routines.iter().position(|routine| routine.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
+            let previous = state.routines[index].clone();
+            update(&mut state.routines[index]);
+            // Admission checkpoints and health commit before publishing, even during a
+            // bulk relay pull. A failed write does not admit uncheckpointed work.
+            if let Err(error) = self.store.save_state(&state) {
+                state.routines[index] = previous;
+                return Err(error);
+            }
+            state.routines[index].clone()
         };
-        self.roster_changed(true);
+        self.push_roster();
+        self.emit(self.roster_summary());
         Ok(routine)
     }
 
@@ -1377,14 +1387,49 @@ impl App {
     /// next run is due (or the next check, for a routine with one), and whether a run is going
     /// on right now.
     fn routines_out(&self, state: &State) -> Vec<Value> {
-        state.routines.iter().map(|routine| self.routine_out(routine)).collect()
+        state.routines.iter().map(|routine| self.routine_out_with_state(routine, state)).collect()
     }
 
     pub fn routine_out(&self, routine: &Routine) -> Value {
+        self.routine_out_with_state(routine, &self.state.lock().unwrap())
+    }
+
+    fn routine_out_with_state(&self, routine: &Routine, state: &State) -> Value {
         let mut out = serde_json::to_value(routine).unwrap_or_default();
         out["schedule_text"] = json!(crate::schedule::parse(&routine.schedule).map(|s| s.describe()).unwrap_or_else(|_| routine.schedule.clone()));
         out["next_run_at"] = json!(crate::routines::next_run_shown(self, routine).map(|t| t as f64));
-        out["is_running"] = json!(self.is_routine_running(&routine.id));
+        out["next_run_text"] = json!(routine.next_run_at().and_then(|at| crate::schedule::when_in(at, &routine.timezone)));
+        let running = self.is_routine_running(&routine.id);
+        let runner = state.bots.iter().find(|bot| bot.id == routine.bot_id).map(|bot| bot.runner_id.as_str());
+        let available = runner.is_some_and(|id| self.this_device_id().as_deref() == Some(id) || state.device_online.contains(id));
+        out["is_running"] = json!(running);
+        out["runner_id"] = json!(runner);
+        out["runner_available"] = json!(available);
+        let health = routine.health.as_ref();
+        let status = if routine.paused_reason.as_deref() == Some("authentication") {
+            "blocked"
+        } else if !routine.is_enabled {
+            "paused"
+        } else if !available {
+            "waiting_for_runner"
+        } else if running {
+            "running"
+        } else {
+            match health.and_then(|health| health.model.status.or(health.status)) {
+                Some(crate::routine_health::CheckStatus::Quiet) => "quiet",
+                Some(crate::routine_health::CheckStatus::Failed) => "failed",
+                Some(crate::routine_health::CheckStatus::Blocked) => "blocked",
+                _ if routine.last_outcome.as_deref() == Some("error") => "failed",
+                _ => "ready",
+            }
+        };
+        out["state"] = json!(status);
+        out["recovery_action"] = if status == "waiting_for_runner" {
+            json!("Start Lorca or lorca serve on the assigned Runner. For an owned computer that stays available, install the CLI service with lorca service install.")
+        } else {
+            json!(health.and_then(|health| health.model.recovery_action.as_deref().or(health.recovery_action.as_deref())))
+        };
+        out["retry_at"] = json!(health.map(|health| health.retry_at.unwrap_or(0.0).max(health.model.retry_at.unwrap_or(0.0))).filter(|at| *at > 0.0));
         out
     }
 
@@ -1931,6 +1976,10 @@ mod tests {
             name: id.into(),
             prompt: String::new(),
             schedule: "every 1h".into(),
+            timezone: "UTC".into(),
+            missed_run_policy: Default::default(),
+            last_scheduled_at: None,
+            health: None,
             is_enabled: true,
             enabled_at: 1.0,
             last_run_at: None,

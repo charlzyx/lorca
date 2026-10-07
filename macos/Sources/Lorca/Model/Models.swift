@@ -709,7 +709,7 @@ struct Routine: Identifiable, Hashable {
     var name: String
     /// The task, written to the bot, handed to it on every run.
     var prompt: String
-    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time.
+    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`.
     var schedule: String
     /// The schedule in words: "Weekdays at 9:00 AM".
     var scheduleText: String
@@ -725,13 +725,39 @@ struct Routine: Identifiable, Hashable {
     /// The script the Runner runs at each due time before the bot does; the bot runs only when
     /// it finds something. `nextRunAt` is then the next check.
     var check: String? = nil
+    var timezone: String = "UTC"
+    var missedRunPolicy: String = "coalesce"
+    var nextRunText: String? = nil
+    var state: String = "ready"
+    var runnerAvailable: Bool = true
+    var lastCheckAt: Date? = nil
+    var lastSuccessfulCheckAt: Date? = nil
+    var retryAt: Date? = nil
+    var recoveryAction: String? = nil
+
+    var stateText: String {
+        if isRunning { return L("Running…") }
+        switch state {
+        case "waiting_for_runner": return L("Waiting for Runner")
+        case "quiet": return L("Quiet · nothing new")
+        case "failed": return L("Failed")
+        case "blocked": return L("Blocked")
+        case "paused": return pausedReason == "away" ? L("Paused while you were away") : L("Paused")
+        default: return isEnabled ? L("On") : L("Paused")
+        }
+    }
+
+    var nextSummary: String {
+        nextRunText ?? nextRunAt.map { Format.upcoming($0) } ?? "—"
+    }
 
     /// The line under the name in the inspector: the schedule, then what is going on.
     var detail: String {
         if isRunning { return L("%@ · Running…", scheduleText) }
+        if ["waiting_for_runner", "failed", "blocked"].contains(state) { return "\(scheduleText) · \(stateText)" }
         guard isEnabled else { return pausedReason == "away" ? L("%@ · Paused while you were away", scheduleText) : L("%@ · Paused", scheduleText) }
-        if let nextRunAt {
-            return check == nil ? L("%@ · Next %@", scheduleText, Format.upcoming(nextRunAt)) : L("%@ · Next check %@", scheduleText, Format.upcoming(nextRunAt))
+        if nextRunAt != nil {
+            return check == nil ? L("%@ · Next %@", scheduleText, nextSummary) : L("%@ · Next check %@", scheduleText, nextSummary)
         }
         return scheduleText
     }

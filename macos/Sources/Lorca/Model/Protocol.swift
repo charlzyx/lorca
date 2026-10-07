@@ -81,6 +81,11 @@ enum Wire {
     }
 
     struct Routine: Decodable {
+        struct Health: Decodable {
+            var lastCheckAt: Double?
+            var lastSuccessAt: Double?
+            var retryAt: Double?
+        }
         var id: String
         var botId: String
         var name: String
@@ -95,14 +100,37 @@ enum Wire {
         var isRunning: Bool?
         var check: String?
         var createdAt: Double
+        var timezone: String?
+        var missedRunPolicy: String?
+        var nextRunText: String?
+        var state: String?
+        var runnerAvailable: Bool?
+        var recoveryAction: String?
+        var retryAt: Double?
+        var health: Health?
 
         func toModel() -> Lorca.Routine {
             Lorca.Routine(
                 id: id, botID: botId, name: name, prompt: prompt, schedule: schedule, scheduleText: Format.schedule(scheduleText ?? schedule),
                 isEnabled: isEnabled, pausedReason: pausedReason, lastRunAt: lastRunAt.map { Date(timeIntervalSince1970: $0) },
                 lastOutcome: lastOutcome, nextRunAt: nextRunAt.map { Date(timeIntervalSince1970: $0) }, isRunning: isRunning ?? false,
-                createdAt: Date(timeIntervalSince1970: createdAt), check: check)
+                createdAt: Date(timeIntervalSince1970: createdAt), check: check,
+                timezone: timezone ?? "UTC", missedRunPolicy: missedRunPolicy ?? "coalesce", nextRunText: nextRunText,
+                state: state ?? (isEnabled ? "ready" : "paused"), runnerAvailable: runnerAvailable ?? true,
+                lastCheckAt: health?.lastCheckAt.map { Date(timeIntervalSince1970: $0) },
+                lastSuccessfulCheckAt: health?.lastSuccessAt.map { Date(timeIntervalSince1970: $0) },
+                retryAt: (retryAt ?? health?.retryAt).map { Date(timeIntervalSince1970: $0) }, recoveryAction: recoveryAction)
         }
+    }
+
+    struct ServiceStatus: Decodable {
+        var installed: Bool
+        var runningPid: Int?
+        var supervised: Bool
+        var log: String
+        var installCommand: String
+        var statusCommand: String
+        var detail: String
     }
 
     struct RoutineChanged: Decodable {

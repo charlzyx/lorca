@@ -513,7 +513,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // Routines live in the roster; any Device edits them, the bot's Runner runs them. A
         // routine's check is the bot's to write, on its Runner, with the routines tool.
         "routines.create" => {
-            let routine = routines::create(
+            let routine = routines::create_with_policy(
                 app,
                 &string(&params, "bot_id")?,
                 &string(&params, "name")?,
@@ -521,14 +521,16 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 params["prompt"].as_str().unwrap_or(""),
                 None,
                 params["enabled"].as_bool().unwrap_or(true),
+                params["timezone"].as_str(),
+                params["missed_run_policy"].as_str(),
             )?;
             Ok(json!({ "routine": app.routine_out(&routine) }))
         }
         "routines.update" => {
             let id = string(&params, "id")?;
             let mut routine = app.routine(&id).ok_or("Unknown routine")?;
-            if params.get("name").is_some() || params.get("schedule").is_some() || params.get("prompt").is_some() {
-                routine = routines::edit(app, &id, opt_string(&params, "name").as_deref(), opt_string(&params, "schedule").as_deref(), params["prompt"].as_str(), None)?;
+            if ["name", "schedule", "prompt", "timezone", "missed_run_policy"].iter().any(|field| params.get(field).is_some()) {
+                routine = routines::edit_with_policy(app, &id, opt_string(&params, "name").as_deref(), opt_string(&params, "schedule").as_deref(), params["prompt"].as_str(), None, params["timezone"].as_str(), params["missed_run_policy"].as_str())?;
             }
             if let Some(enabled) = params["enabled"].as_bool() {
                 routine = routines::set_enabled(app, &id, enabled)?;
@@ -543,7 +545,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             routines::run_now(app, &string(&params, "id")?)?;
             Ok(Value::Null)
         }
-        "routines.describe" => routines::describe(&string(&params, "schedule")?),
+        "routines.describe" => routines::describe_with_policy(&string(&params, "schedule")?, params["timezone"].as_str(), params["missed_run_policy"].as_str()),
+        "device.service_status" => {
+            let runner = opt_string(&params, "id").or_else(|| app.this_device_id()).ok_or("No identity on this Device")?;
+            if app.this_device_id().as_deref() == Some(&runner) {
+                #[cfg(feature = "cli")]
+                { crate::service::status_out(&app.config) }
+                #[cfg(not(feature = "cli"))]
+                { Err("This Device does not run a CLI service.".into()) }
+            } else {
+                crate::requests::ask(app, &runner, "service.status", json!({})).await
+            }
+        }
 
         // The marketplace: plugins, each with the Runners that have it, and bots to add from a
         // template (`bots.create { template_id }`).

@@ -81,6 +81,12 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     let routine = match job.routine_id.as_deref() {
         Some(id) => match app.routine(id) {
             Some(routine) => {
+                // A manual/event job may have waited on the relay or chat lock since the
+                // Runner suspended authentication. Recovery requires an explicit resume.
+                if routine.paused_reason.as_deref() == Some("authentication") {
+                    app.notice(&job.chat_id, format!("Routine · {} is paused. Reconnect the provider or integration on its assigned Runner, then resume it.", routine.name));
+                    return TurnOutcome::Skipped;
+                }
                 crate::routines::started(app, id);
                 let marker = Message::new(&job.chat_id, Author::System, Body::Notice { text: format!("Routine · {}", routine.name), routine_id: Some(id.to_string()) });
                 trigger = Trigger { message_id: marker.id.clone(), routine: Some(routine.clone()) };
@@ -97,6 +103,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     let provider = match providers::provider_for(app, &bot.provider, bot.model.as_deref(), providers::thinking_level(&bot)) {
         Ok(provider) => provider,
         Err(reason) => {
+            if let Some(id) = job.routine_id.as_deref() {
+                crate::routines::model_result(app, id, Some(&reason));
+            }
             let label = app.credentials.lock().unwrap().label(&bot.provider);
             app.notice(&job.chat_id, format!("{} cannot run yet: {reason}. Connect {label} in Settings.", bot.name));
             return TurnOutcome::Skipped;
@@ -334,6 +343,11 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     }
     let mut state = sink.0.lock().unwrap();
     state.finish();
+    if !cancel.is_cancelled() {
+        if let Some(id) = job.routine_id.as_deref() {
+            crate::routines::model_result(app, id, state.last_error.as_deref().filter(|_| state.failed));
+        }
+    }
     let outcome = if state.sent {
         TurnOutcome::Sent
     } else if failed || state.failed {
@@ -1586,20 +1600,19 @@ fn routines_prompt(app: &App, bot: &Bot) -> String {
     let mut prompt = String::from(
         "\nRoutines: a routine is a task you run on a schedule in your direct chat with the user, with nobody typing: a \
          morning brief, an hourly check, a weekly report. When the user wants something done regularly, set it up with \
-         the routines tool (a name, a schedule, and the task written as an instruction to yourself), then say the schedule \
+         the routines tool (a name, a schedule, an explicit IANA timezone, a missed-run policy, and the task written as an instruction to yourself), then say the schedule \
          back in words. To watch for something, give the routine a check, a script that runs without you and starts the \
-         run only when it finds something. Edit, pause, resume, run, or delete one when asked.\n",
+         run only when it finds something. coalesce runs once after an outage; skip discards occurrences more than 60 seconds late. Connection failures back off; three authentication failures pause it. Reconnect the provider or integration on your assigned Runner before resuming. Edit, pause, resume, run, or delete one when asked.\n",
     );
     let routines = app.routines_of(&bot.id);
     if !routines.is_empty() {
-        let now = now_secs() as i64;
         prompt.push_str("Your routines:\n");
         for routine in routines {
             // A check's next time moves with every check, and would change this prompt as often.
             let state = match routine.next_run_at() {
                 None => "paused".to_string(),
                 Some(_) if routine.check.is_some() => "checks first".to_string(),
-                Some(next) => format!("next {}", crate::schedule::when_label(next, now)),
+                Some(next) => format!("next {}", crate::schedule::when_in(next, &routine.timezone).unwrap_or_default()),
             };
             prompt.push_str(&format!("- {} · {} · {state}\n", routine.name, schedule_words(&routine.schedule)));
         }
@@ -2633,9 +2646,10 @@ impl Tool for Routines {
          create takes a name, a schedule, and a prompt (the task, written as an instruction to yourself, with everything a \
          run needs since the user is not there to answer), and a check when one fits; edit changes any of those on an \
          existing one (check \"\" removes the check); pause, resume, run (a run right now), and delete take the routine's \
-         name. A schedule is every 30m, every 2h, every 1d, or five cron fields in your Runner's local time (0 9 * * 1-5 is \
+         name. Set an IANA timezone (UTC is the default) and missed_run_policy skip or coalesce (one run after an outage). \
+         A schedule is every 30m, every 2h, every 1d, or five cron fields in that timezone (0 9 * * 1-5 is \
          weekdays at 9:00 AM); at most one run per five minutes. Set one up when the user asks for something regular, and \
-         tell them the schedule in words.\n\
+         tell them the schedule and timezone in words.\n\
          A check is JavaScript your Runner runs at each due time before you, with no model, so a quiet one runs no turn: \
          use one to watch something (an inbox, a repository, a feed, a page). It runs like a codemode script with only the \
          read-only plugin tools, read, grep, find, ls, store() and load() (shared with your scripts in your direct chat), and \
@@ -2652,6 +2666,8 @@ impl Tool for Routines {
                 "routine": { "type": "string", "description": "The routine's name, for edit, pause, resume, run, and delete" },
                 "name": { "type": "string", "description": "A short name, for create or a rename" },
                 "schedule": { "type": "string", "description": "every 30m, every 2h, every 1d, or five cron fields like 0 9 * * 1-5" },
+                "timezone": { "type": "string", "description": "IANA timezone for cron, such as America/New_York or Asia/Singapore; defaults to UTC" },
+                "missed_run_policy": { "type": "string", "enum": ["skip", "coalesce"], "description": "skip discards occurrences more than 60 seconds late; coalesce runs once after an outage (default)" },
                 "prompt": { "type": "string", "description": "What to do on each run, as an instruction to yourself" },
                 "check": { "type": "string", "description": "JavaScript run before each run, returning what needs you or nothing; \"\" on edit removes it" },
                 "enabled": { "type": "boolean", "description": "create: start it on (default) or paused" }
@@ -2666,14 +2682,13 @@ impl Tool for Routines {
     async fn execute(&self, _id: &str, args: Value, cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
         let field = |key: &str| args[key].as_str().map(str::trim).filter(|v| !v.is_empty());
         let action = field("action").unwrap_or("");
-        let now = now_secs() as i64;
         let line = |routine: &Routine| {
             let state = match crate::routines::next_run_shown(&self.app, routine) {
-                Some(next) if routine.check.is_some() => format!("next check {}", crate::schedule::when_label(next, now)),
-                Some(next) => format!("next run {}", crate::schedule::when_label(next, now)),
+                Some(next) if routine.check.is_some() => format!("next check {}", crate::schedule::when_in(next, &routine.timezone).unwrap_or_default()),
+                Some(next) => format!("next run {}", crate::schedule::when_in(next, &routine.timezone).unwrap_or_default()),
                 None => "paused".to_string(),
             };
-            format!("{} · {} · {state}", routine.name, schedule_words(&routine.schedule))
+            format!("{} · {} ({}) · {:?} missed runs · {state}", routine.name, schedule_words(&routine.schedule), routine.timezone, routine.missed_run_policy)
         };
         // A check runs once as it is saved: a bad one shows now, its first run records what is
         // already there, and the schedule counts from it.
@@ -2723,7 +2738,7 @@ impl Tool for Routines {
                 let schedule = field("schedule").ok_or("schedule is required")?;
                 let prompt = field("prompt").ok_or("prompt is required")?;
                 let enabled = args["enabled"].as_bool().unwrap_or(true);
-                let routine = crate::routines::create(&self.app, &self.bot.id, name, schedule, prompt, field("check"), enabled).map_err(ToolError)?;
+                let routine = crate::routines::create_with_policy(&self.app, &self.bot.id, name, schedule, prompt, field("check"), enabled, field("timezone"), field("missed_run_policy")).map_err(ToolError)?;
                 let state = if routine.is_enabled { "It is on." } else { "It starts paused." };
                 let mut text = format!("Created routine {}. {state} Runs post in your direct chat with the user.", line(&routine));
                 if routine.check.is_some() {
@@ -2734,7 +2749,7 @@ impl Tool for Routines {
             "edit" => {
                 let target = find(field("routine").ok_or("routine is required: the routine's current name")?)?;
                 let check = args["check"].as_str();
-                let routine = crate::routines::edit(&self.app, &target.id, field("name"), field("schedule"), field("prompt"), check).map_err(ToolError)?;
+                let routine = crate::routines::edit_with_policy(&self.app, &target.id, field("name"), field("schedule"), field("prompt"), check, field("timezone"), field("missed_run_policy")).map_err(ToolError)?;
                 let mut text = format!("Updated routine {}.", line(&routine));
                 if check.is_some() && routine.check.is_some() {
                     text.push_str(&tried(routine.clone()).await);
