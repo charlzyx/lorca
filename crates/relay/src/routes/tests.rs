@@ -329,3 +329,28 @@ async fn attesting_a_machine_takes_a_bearer_and_keeps_keys_apart() {
     let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap_err();
     assert_eq!(refused.status, Some(410));
 }
+
+#[tokio::test]
+async fn handoff_request_report_and_cancellation_round_trip_in_independent_slots() {
+    let relay = Relay::start(0).await;
+    let key = [42; 32];
+    let make = |id: &str, role: &str, text: &str| OutboxItem {
+        id: id.into(), kind: "handoff".into(), recipient: None,
+        ciphertext: lorca::crypto::encrypt(&key, "handoff", text.as_bytes()).unwrap(),
+        slot: Some(lorca::app::Slot::latest(format!("handoff-test-1-{role}"))), group: None,
+    };
+    relay.client.put_blob(&relay.url, &relay.token, make("request", "request", "contract")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("started", "report", "running")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("finished", "report", "completed with evidence")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("cancel", "cancel", "requester cancelled")).await.unwrap();
+    let (rows, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, lorca::sync::POLL_KINDS).await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["request", "finished", "cancel"]);
+    for (row, expected) in rows.iter().zip(["contract", "completed with evidence", "requester cancelled"]) {
+        let ciphertext = lorca::keys::unb64(&row.ciphertext).unwrap();
+        assert_ne!(ciphertext, expected.as_bytes());
+        assert_eq!(lorca::crypto::decrypt(&key, "handoff", &ciphertext).unwrap(), expected.as_bytes());
+    }
+    let health: Value = relay.http.get(format!("{}/v1/health", relay.url)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["protocol"], 3);
+    assert!(!db::SEALED_KINDS.contains(&"handoff"));
+}

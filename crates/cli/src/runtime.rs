@@ -117,6 +117,8 @@ fn user_turn_job(app: &Arc<App>, chat_id: &str, bot_id: &str, trigger_message_id
         bot_id: bot_id.to_string(),
         kind: "turn".into(),
         trigger_message_id: trigger_message_id.to_string(),
+        task_id: None,
+        handoff: None,
         requested_by: app.this_device_id().unwrap_or_default(),
         routine_id: None,
         check: None,
@@ -138,6 +140,8 @@ pub fn command_job(app: &App, chat_id: &str, bot_id: &str, card_id: &str) -> Job
         bot_id: bot_id.to_string(),
         kind: "command".into(),
         trigger_message_id: card_id.to_string(),
+        task_id: None,
+        handoff: None,
         requested_by: app.this_device_id().unwrap_or_default(),
         check: None,
         routine_id: None,
@@ -232,7 +236,11 @@ fn begin_job(
     routine_id: Option<String>,
     runner_id: Option<String>,
     cancel: CancellationToken,
-) {
+) -> bool {
+    let mut running = app.running_jobs.lock().unwrap();
+    if running.contains_key(job_id) {
+        return false;
+    }
     // A job on another Runner outlives this process; `resume_sent_jobs` picks up its wait.
     if let Some(runner_id) = &runner_id {
         let sent = SentJob {
@@ -247,7 +255,7 @@ fn begin_job(
             tracing::error!(%error, %job_id, "keeping a job sent to another Runner");
         }
     }
-    app.running_jobs.lock().unwrap().insert(
+    running.insert(
         job_id.to_string(),
         RunningJob {
             chat_id: chat_id.to_string(),
@@ -258,7 +266,9 @@ fn begin_job(
             activity: None,
         },
     );
+    drop(running);
     app.local_turns_changed();
+    true
 }
 
 fn finish_job(app: &App, job_id: &str) {
@@ -337,6 +347,8 @@ async fn run_room(
                 kind: "room_turn".into(),
                 check: None,
                 trigger_message_id: trigger.clone(),
+                task_id: None,
+                handoff: None,
                 routine_id: None,
                 requested_by: app.this_device_id().unwrap_or_default(),
                 from_bot_id: None,
@@ -448,6 +460,9 @@ async fn wait_for_result(
 /// since the first pull may carry a result that landed meanwhile. A group exchange this Device
 /// was running does not resume; only the member turn in flight shows.
 pub fn resume_sent_jobs(app: &Arc<App>) {
+    if let Err(error) = crate::handoffs::resume(app) {
+        tracing::error!(%error, "recovering handoffs");
+    }
     let jobs = match app.store.sent_jobs() {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -566,8 +581,12 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// outcome goes back to the requesting Device when the job came from another one. It registers
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) {
+    if let Err(error) = crate::handoffs::stage_job(&app, &job) {
+        tracing::error!(%error, job_id = %job.id, "persisting handoff admission");
+        return;
+    }
     let cancel = CancellationToken::new();
-    begin_job(
+    if !begin_job(
         &app,
         &job.id,
         &job.chat_id,
@@ -575,7 +594,12 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) 
         job.routine_id.clone(),
         None,
         cancel.clone(),
-    );
+    ) {
+        if let Some(id) = remote_blob_id {
+            tokio::spawn(async move { crate::sync::delete_remote_blob(&app, &id).await });
+        }
+        return;
+    }
     tokio::spawn(async move {
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
@@ -608,8 +632,16 @@ async fn run_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken) -> Tu
 
 /// Runs a job with its working record already installed.
 async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) -> TurnOutcome {
+    let admitted = match crate::handoffs::begin_job(app, &job) {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            app.notice(&job.chat_id, format!("Could not start handoff: {error}"));
+            false
+        }
+    };
+    let report_cancel = cancel.clone();
     #[cfg(feature = "runner")]
-    let outcome = if cancel.is_cancelled()
+    let outcome = if !admitted || cancel.is_cancelled()
         || (job.kind == "turn"
             && app.take_steering_message(&job.chat_id, &job.trigger_message_id))
     {
@@ -623,10 +655,14 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
     };
     #[cfg(not(feature = "runner"))]
     let outcome = {
+        let _ = admitted;
         let _ = cancel;
         app.notice(&job.chat_id, "This Device does not run bots; assign the bot to a Runner.");
         TurnOutcome::Skipped
     };
+    if let Err(error) = crate::handoffs::finish_job(app, &job, outcome, report_cancel.is_cancelled()) {
+        tracing::error!(%error, job_id = %job.id, "reporting handoff outcome");
+    }
     finish_job(app, &job.id);
     outcome
 }
@@ -1013,6 +1049,8 @@ mod tests {
             check: None,
             kind: "turn".into(),
             trigger_message_id: "message".into(),
+            task_id: None,
+            handoff: None,
             routine_id: None,
             requested_by: String::new(),
             from_bot_id: None,

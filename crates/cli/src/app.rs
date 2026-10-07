@@ -153,6 +153,8 @@ pub struct App {
     pub credentials: Mutex<Credentials>,
     pub state: Mutex<State>,
     pub store: LocalStore,
+    /// Serializes encrypted handoff record merges and admission on this Device.
+    pub handoff_lock: Mutex<()>,
     pub events: broadcast::Sender<Event>,
     pub relay: RelayClient,
     pub outbox_notify: Notify,
@@ -271,6 +273,7 @@ impl App {
             credentials: Mutex::new(credentials),
             state: Mutex::new(state),
             store,
+            handoff_lock: Mutex::new(()),
             events,
             relay: RelayClient::new()?,
             outbox_notify: Notify::new(),

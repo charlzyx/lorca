@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,chat,machine,credentials,handoff,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -222,7 +222,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,machine,credentials,handoff,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -488,6 +488,9 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
+            // A relay that has not upgraded to protocol 3 refuses the new kind. Durable
+            // handoff state waits for that upgrade, with its job still behind it in the queue.
+            Err(error) if kind == "handoff" => return Err(error),
             Err(error) if error.is_client_error() && !error.is_unauthorized() => {
                 tracing::warn!(%error, %kind, "relay rejected blob; dropping");
                 if kind == "credentials" {
@@ -775,6 +778,14 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
+        "handoff" => match crate::crypto::decrypt_json::<crate::handoffs::HandoffUpdate>(&dek, "handoff", &ciphertext) {
+            Ok(update) => {
+                if let Err(error) = crate::handoffs::apply_update(app, update) {
+                    tracing::warn!(%error, "handoff update");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "handoff blob"),
+        },
         "job" => {
             let Ok(machine) = machine_file.machine() else { return };
             match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
@@ -1004,4 +1015,24 @@ mod tests {
         app.state.lock().unwrap().listed_machines.remove(&fresh);
         assert!(unknown().is_empty(), "unpaired from another Device");
     }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn an_older_relay_refusal_preserves_the_handoff_and_its_queued_job() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let handoff_id = app.push_blob("handoff", None, vec![1, 2, 3]);
+        let job_id = app.push_blob("job", Some("runner".into()), vec![4, 5, 6]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().route("/v1/blobs", axum::routing::put(|| async {
+            (axum::http::StatusCode::BAD_REQUEST, axum::Json(serde_json::json!({"error": "Unknown blob kind"})))
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let result = drain_outbox(app, &url, "test-token").await;
+        server.abort();
+        assert_eq!(result.unwrap_err().status, Some(400));
+        assert_eq!(app.store.outbox().unwrap().iter().map(|item| item.id.as_str()).collect::<Vec<_>>(), [handoff_id.as_str(), job_id.as_str()]);
+    }
+
 }

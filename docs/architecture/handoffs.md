@@ -1,0 +1,35 @@
+# Handoffs
+
+`crates/cli/src/handoffs.rs` owns durable bot delegation. A handoff is a request and its attempts, with a stable `handoff-<UUID>` id. Each attempt has a new job id, the requesting bot and chat, the source Runner, an optional canonical parent `task_id`, the recipient bot, its DM and Runner, the message and supplied context, expected output, acceptance criteria, hop count, and creation time. The destination for reports is the requesting bot's source chat. Task ids and output versions are references to their owning records.
+
+## Admission and delivery
+
+`message_bot { bot_id, message, context?, expected_output?, acceptance_criteria?, task_id? }` creates the contract and returns `handoff_id`, `job_id`, `target_runner_id`, the request, and its delivery state. `task_id` defaults to the requesting turn's task. A bot cannot delegate to itself or a member of its current group; the eight-hop limit also applies to handoffs.
+
+The CLI encrypts the handoff's local record with the account DEK and stores it as a binary ciphertext in SQLite's `handoffs` table. The contract's encrypted `handoff` relay update and a remote Runner's sealed `job` envelope enter the outbox in the same transaction as the record. A local recipient starts through the same job lifecycle. The DM's existing handoff marker names the durable id and includes the supplied context, expected output and criteria. `Job.handoff` carries the complete contract, and the system prompt reloads it independently of chat compaction. `Job.task_id` carries task context without claiming parent-task ownership or completion.
+
+Delivery is `queued_local` for this Runner, `queued_relay` when the relay reports the recipient Runner online, `waiting_for_runner` when it is offline, and `waiting_for_relay` when this Device has no relay configured. These queue states describe admission, not execution. A Runner claim changes the view to `running`; a terminal report changes it to `finished`. A relay serving protocol 3 accepts the handoff kind; an older relay’s refusal leaves the handoff and its job queued until the relay is upgraded. The handoff remains inspectable indefinitely, including while an offline Runner's job waits on the relay; the ordinary five-minute remote-turn display timeout does not expire it.
+
+## Reports and continuation
+
+The recipient can call `handoffs { action: report, status: completed | failed | blocked | cancelled, summary, result_links?, evidence? }`. The tool binds the handoff and active job to this turn, ends the delegated turn, and returns the saved report. A completion needs a result link or a response/output produced in this turn. A report includes textual evidence and structured references in the canonical task-evidence shape: `kind`, `label`, and the relevant chat/message, file attachment, HTTPS URL, output id/version, or review id. An output version is `{ kind: output, label, chat_id, message_id, output_id, version }`; its message id names the immutable version. Link validation checks the reference shape, not an independent review of its contents.
+
+The Runner automatically reports when the turn ends without an explicit report. A final response produces `completed` with the response's message link, an execution failure produces `failed`, a turn without a response produces `blocked`, and a hard Stop produces `cancelled`. Terminal provider failures take precedence over partial output. Evidence names observed tool outcomes and their message ids; output metadata on produced message rows contributes immutable output references. Completion is the recipient's claim. The requesting bot reads the report and checks the acceptance criteria before completing a parent task.
+
+A `handoff` update carries its request and can arrive before the request's own blob. Requests, Runner reports and requester cancellations have separate relay slots per attempt, all encrypted with the account DEK. A terminal Runner report supersedes its running claim. A cancellation is a separate sticky record and wins a concurrent finish. A late report merges into its original attempt and cannot replace a later follow-up.
+
+The source Runner adds a deterministic result message (`report-<request job id>`) to the source chat and starts a deterministic `handoff_result` job for the requesting bot. The report includes result links and evidence, so the coordinator continues its work without waiting for another message from the specialist. Duplicate updates preserve one result message and one continuation. Other paired Devices keep the encrypted handoff state and receive the ordinary encrypted chat message. AppKit opens `lorca://message?chat_id=…&message_id=…` links inside Lorca, loading older transcript pages through the local CLI before revealing the message.
+
+## Inspection, follow-up and recovery
+
+The `handoffs` tool offers `list`, `get`, `follow_up`, `cancel`, and `report`. It scopes inspection to handoffs where the bot is a participant. The local API offers:
+
+- `handoffs.list { bot_id?, chat_id?, task_id?, outstanding? }` — locally synced records, including blocked work when `outstanding` is true.
+- `handoffs.get { handoff_id }` — the current contract, delivery, report, and attempt history.
+- `handoffs.follow_up { bot_id, handoff_id, job_id, message }` — the requesting bot retries a terminal attempt with more instructions, retaining context, output contract and criteria.
+- `handoffs.cancel { bot_id, handoff_id, job_id, reason }` — the requesting bot cancels the attempt and queues a sealed `job_cancel` for a remote recipient.
+- `handoffs.report { bot_id, handoff_id, job_id, status, summary, result_links?, evidence? }` — the recipient reports its current attempt.
+
+Mutations run on the bound bot's Runner. Follow-up and cancellation compare the supplied job id under the handoff lock, so stale inspections cannot replace newer work. A still-running attempt is cancelled before it is replaced. Inspection reads local synced state on every paired Device, including after a restart.
+
+A queued local job is recorded before it waits for the chat lock. Execution claims are encrypted before effects start; duplicate envelopes cannot execute an already claimed, finished, cancelled, or superseded attempt. Startup (`runtime::resume_sent_jobs`) resumes queued local handoff work and pending result delivery. A claim left running by the previous process becomes a failure with interruption evidence; the Runner leaves effects for explicit inspection and follow-up. A coordinator continuation interrupted after its claim gets a notice and retains its report for inspection. Terminal reports, their return messages and continuation state survive restarts.

@@ -139,6 +139,10 @@ impl LocalStore {
                  runner_id  TEXT NOT NULL,
                  sent_at    REAL NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS handoffs (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              PRAGMA user_version = 1;",
         )?;
         crate::config::set_private(path)?;
@@ -1009,6 +1013,31 @@ impl LocalStore {
             .map_err(Into::into)
     }
 
+    /// Handoff contracts and reports stay encrypted even in the local database. Queue the
+    /// corresponding relay update and job in the same transaction as admission.
+    pub fn save_handoff(&self, id: &str, ciphertext: &[u8], outbox: &[OutboxItem]) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute("INSERT INTO handoffs (id, ciphertext) VALUES (?1, ?2)
+                    ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext", params![id, ciphertext])?;
+        for item in outbox {
+            queue_outbox_tx(&tx, item)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn handoff(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.connection.lock().unwrap().query_row("SELECT ciphertext FROM handoffs WHERE id = ?1", [id], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
+    pub fn handoffs(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM handoffs ORDER BY id")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
     pub fn clear(&self) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
@@ -1027,6 +1056,7 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "handoffs",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
