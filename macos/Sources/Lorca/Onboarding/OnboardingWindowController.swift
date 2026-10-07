@@ -89,6 +89,16 @@ final class OnboardingViewController: NSViewController {
         super.init(nibName: nil, bundle: nil)
     }
 
+    #if DEBUG
+    /// Captures the real closing page over a synthetic account, without identity operations.
+    func showCompletionCaptureFixture() {
+        precondition(store.isMock, "UI captures require LORCA_MOCK=1")
+        _ = view
+        origin = .created
+        transition(to: .done)
+    }
+    #endif
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 

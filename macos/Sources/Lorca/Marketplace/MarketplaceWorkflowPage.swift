@@ -59,8 +59,23 @@ final class MarketplaceWorkflowPage: MarketplacePage {
         super.init(market: market)
     }
 
+    #if DEBUG
+    private var isCaptureFixture = false
+
+    /// Injects only presentation data; the production renderer builds every control.
+    convenience init(market: MarketplaceViewController, captureProgress: WorkflowProgress) {
+        self.init(market: market, pack: captureProgress.setup.pack, runnerID: captureProgress.setup.runnerId)
+        precondition(store.isMock, "UI captures require LORCA_MOCK=1")
+        progress = captureProgress
+        isCaptureFixture = true
+    }
+    #endif
+
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG
+        if isCaptureFixture { render(); return }
+        #endif
         store.observe(self) { [weak self] event in
             guard let self, !self.editing else { return }
             switch event {

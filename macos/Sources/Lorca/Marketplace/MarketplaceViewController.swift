@@ -30,6 +30,18 @@ final class MarketplaceViewController: NSViewController {
     private let notice = BackgroundView()
     private let noticeLabel = Build.label("", font: .systemFont(ofSize: 12.5), lines: 2)
     private var noticeTask: Task<Void, Never>?
+    #if DEBUG
+    private var isCaptureFixture = false
+
+    /// Reuses the live page layout with supplied catalog data, without a CLI request.
+    convenience init(captureCatalog: Marketplace, size: NSSize, workflowsOnly: Bool = true) {
+        self.init(runnerID: "dev-workbench", size: size, workflowsOnly: workflowsOnly, onOpenChat: { _ in })
+        precondition(store.isMock, "UI captures require LORCA_MOCK=1")
+        catalog = captureCatalog
+        loading = .loaded
+        isCaptureFixture = true
+    }
+    #endif
 
     init(runnerID: Device.ID?, size: NSSize, workflowsOnly: Bool = false, onOpenChat: @escaping (Chat.ID) -> Void) {
         self.workflowsOnly = workflowsOnly
@@ -109,6 +121,9 @@ final class MarketplaceViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        #if DEBUG
+        if isCaptureFixture { return }
+        #endif
         store.observe(self) { [weak self] event in
             guard let self else { return }
             if case .rosterChanged = event {
@@ -121,6 +136,9 @@ final class MarketplaceViewController: NSViewController {
     // MARK: - Loading
 
     func load() {
+        #if DEBUG
+        if isCaptureFixture { return }
+        #endif
         loading = .loading
         reloadPages()
         Task { [weak self] in
