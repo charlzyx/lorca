@@ -8,6 +8,7 @@ import (
 	"unicode"
 
 	"github.com/egoist/lorca/desktop/model"
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -167,8 +168,9 @@ func (m *mainWindow) chatView(c *ui.Context, chatID string) {
 			chatEmptyState(c, m, chat, members, s, bottom)
 		}
 		if !s.list.AtEnd() && len(rows) > 0 {
+			// A glass disc, like the composer it floats above.
 			jump := ui.ButtonBase(c).Key("jump").Absolute().Right(horizontalInset).Bottom(bottom+14).Size(28, 28).Radius(14).Center().
-				Border(1, p.ComposerBorder).Background(p.Popover).TextColor(p.Label2).Shadow(0, 2, 8, 0, ui.RGBA(0, 0, 0, 0.12)).
+				Material(glass.Glass{Interactive: true}).TextColor(p.Label2).
 				Label(L("Scroll to latest")).Tooltip(L("Scroll to latest (%@)", shortcutText("CmdOrCtrl+J")))
 			if jump.Hovered() {
 				jump.TextColor(p.Label)

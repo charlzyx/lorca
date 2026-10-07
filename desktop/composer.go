@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/lorca/desktop/model"
 	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/plugins/glass"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -203,7 +204,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 	var field *ui.Element
 	outer.Children(func() {
 		field = ui.Grid(c).ColumnTracks(ui.Fixed(28), ui.Fr(1), ui.FitContent()).GapX(8).MinHeight(46).Padding(8).
-			Radius(22).Border(1, p.ComposerBorder).Background(p.ComposerField).Shadow(0, 6, 20, 0, ui.RGBA(0, 0, 0, 0.06)).Cursor(ui.CursorText)
+			Radius(22).Border(1, p.ComposerBorder).Material(glass.Glass{}).Cursor(ui.CursorText)
 		if !expanded {
 			width := field.Bounds().W - 16 - 28 - 16 - 28 - 12
 			if responding {
