@@ -2746,6 +2746,7 @@ for line in sys.stdin:
         let profile = crate::api::dispatch(app, "bots.permissions", json!({"id": bot.id})).await.unwrap();
         assert_eq!(profile["bot"]["permissions"], json!(policy));
         assert!(profile["local_tools"].as_array().unwrap().contains(&json!("codemode")));
+        assert!(profile["local_tools"].as_array().unwrap().contains(&json!("stage_review")));
         let connection = profile["connections"].as_array().unwrap().iter().find(|entry| entry["id"] == "mail-work").unwrap();
         assert!(connection["tools"].as_array().unwrap().iter().any(|tool| tool["name"] == "read_mcp_resource" && tool["capability"] == "read"));
         app.add_auto_review_rule(AutoReviewRule { id: "always".into(), text: "Always send".into(), behavior: "allow".into(), tool: Some("mail-work/send_message".into()) });

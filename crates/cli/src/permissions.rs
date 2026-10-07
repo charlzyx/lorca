@@ -276,6 +276,7 @@ pub const LOCAL_TOOLS: &[&str] = &[
     "create_bot",
     "edit_bot",
     "routines",
+    "stage_review",
     "search_plugins",
     "install_plugin",
     "connect_plugin",
@@ -403,6 +404,15 @@ mod tests {
         let none = BotPermissions { filesystem: FilesystemAccess::None, tools: Some(BTreeSet::new()), ..Default::default() };
         assert!(none.local_denial("codemode").is_some());
         assert!(none.local_denial("read").is_some());
+        let staging = BotPermissions {
+            tools: Some(BTreeSet::from(["stage_review".into()])),
+            connections: Some(BTreeMap::new()),
+            filesystem: FilesystemAccess::None,
+            shell: false,
+        };
+        assert_eq!(staging.local_denial("stage_review"), None);
+        assert!(staging.local_denial("bash").is_some(), "permission to stage a review does not authorize execution");
+        assert!(staging.connection_denial("mail-work", "send_message", Some(Capability::Write)).is_some());
         assert!(serde_json::from_value::<BotPermissions>(json!({"filesystem": "sandbox"})).is_err());
         assert!(serde_json::from_value::<BotPermissions>(json!({"shelll": true})).is_err());
         assert!(serde_json::from_value::<BotPermissions>(json!({"connections": {"mail": {"capabilities": ["admin"]}}})).is_err());
