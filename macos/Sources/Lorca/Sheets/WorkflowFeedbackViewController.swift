@@ -1,8 +1,12 @@
 import AppKit
 
+/// Injectable at the sheet boundary so native tests use synthetic responses without a CLI.
+typealias WorkflowFeedbackRequest = @MainActor (Bot.ID, String, [String: Any]) async throws -> [String: Any]
+
 /// Explicit feedback and immutable revision diffs. Every operation goes through the local CLI.
 final class WorkflowFeedbackViewController: SheetViewController {
     private let store = AppStore.shared
+    private let feedbackRequest: WorkflowFeedbackRequest
     private let bot: Bot
     private let chatID: Chat.ID
     private let column = Build.stack([], spacing: 12)
@@ -10,7 +14,10 @@ final class WorkflowFeedbackViewController: SheetViewController {
     private var fetching = false
     var onOpenOrigin: ((Chat.ID, Message.ID) -> Void)?
 
-    init(bot: Bot, chatID: Chat.ID) {
+    init(bot: Bot, chatID: Chat.ID, feedbackRequest: WorkflowFeedbackRequest? = nil) {
+        self.feedbackRequest = feedbackRequest ?? { botID, method, params in
+            try await AppStore.shared.workflowFeedback(botID: botID, method: method, params: params)
+        }
         self.bot = bot
         self.chatID = chatID
         super.init(title: L("Workflow feedback"), subtitle: L("Review specific improvements to %@'s routines and skills. Every change shows its evidence and diff before you accept it.", bot.name), width: 700)
@@ -60,7 +67,7 @@ final class WorkflowFeedbackViewController: SheetViewController {
             guard let self else { return }
             defer { self.fetching = false }
             do {
-                let result = try await self.store.workflowFeedback(botID: self.bot.id)
+                let result = try await self.feedbackRequest(self.bot.id, "feedback.list", [:])
                 self.render(result)
                 self.status.stringValue = ""
             } catch { self.status.stringValue = error.localizedDescription }
@@ -75,7 +82,7 @@ final class WorkflowFeedbackViewController: SheetViewController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await self.store.workflowFeedback(botID: self.bot.id, method: method, params: params)
+                _ = try await self.feedbackRequest(self.bot.id, method, params)
                 self.fetching = false
                 self.refresh()
             } catch {
@@ -207,6 +214,7 @@ final class WorkflowFeedbackViewController: SheetViewController {
 
 final class RecordWorkflowFeedbackViewController: SheetViewController {
     private let store = AppStore.shared
+    private let feedbackRequest: WorkflowFeedbackRequest
     private let botID: Bot.ID
     private let chatID: Chat.ID
     private let message: Message
@@ -218,7 +226,10 @@ final class RecordWorkflowFeedbackViewController: SheetViewController {
     private let excluded = NSButton(checkboxWithTitle: L("Exclude this material from feedback processing"), target: nil, action: nil)
     private let errorLabel = Build.label("", font: Theme.Font.caption, color: .systemRed, lines: 0)
     private let kinds = ["accepted", "rejected", "edited", "explicit", "ignored_alert"]
-    init(botID: Bot.ID, chatID: Chat.ID, message: Message) {
+    init(botID: Bot.ID, chatID: Chat.ID, message: Message, feedbackRequest: WorkflowFeedbackRequest? = nil) {
+        self.feedbackRequest = feedbackRequest ?? { botID, method, params in
+            try await AppStore.shared.workflowFeedback(botID: botID, method: method, params: params)
+        }
         self.botID = botID; self.chatID = chatID; self.message = message
         super.init(title: L("Record workflow feedback"), subtitle: L("Record your decision or correction with a link to this work. Ignored alerts stay neutral."), width: 580)
     }
@@ -237,7 +248,7 @@ final class RecordWorkflowFeedbackViewController: SheetViewController {
         }
         setButtons(confirm: L("Record"))
         Task { [weak self] in
-            guard let self, let data = try? await store.workflowFeedback(botID: botID) else { return }
+            guard let self, let data = try? await feedbackRequest(botID, "feedback.list", [:]) else { return }
             targets = data["targets"] as? [[String: Any]] ?? []
             target.addItems(withTitles: targets.map { $0["name"] as? String ?? "" })
         }
@@ -250,7 +261,7 @@ final class RecordWorkflowFeedbackViewController: SheetViewController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                _ = try await store.workflowFeedback(botID: botID, method: "feedback.record", params: ["feedback": feedback])
+                _ = try await feedbackRequest(botID, "feedback.record", ["feedback": feedback])
                 dismiss(nil)
             } catch { errorLabel.stringValue = error.localizedDescription; confirmButton.isEnabled = true }
         }
