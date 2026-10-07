@@ -127,6 +127,15 @@ func (m *mainWindow) pasteImage(s *composerState) bool {
 	return true
 }
 
+// frostedGlass is the composer's material: Liquid Glass over a blur of what scrolls under it, so
+// the messages behind it frost to faint lines, as under the Mac's NSGlassEffectView.
+type frostedGlass struct{}
+
+func (frostedGlass) PaintMaterial(p *ui.Painter, box ui.Rect, radii [4]float32) {
+	glass.Blur{Radius: 5}.PaintMaterial(p, box, radii)
+	glass.Glass{}.PaintMaterial(p, box, radii)
+}
+
 func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*model.Bot, chatS *chatState) *ui.Element {
 	p := colors(c)
 	s := &chatS.composer
@@ -204,7 +213,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 	var field *ui.Element
 	outer.Children(func() {
 		field = ui.Grid(c).ColumnTracks(ui.Fixed(28), ui.Fr(1), ui.FitContent()).GapX(8).MinHeight(46).Padding(8).
-			Radius(22).Border(1, p.ComposerBorder).Material(glass.Glass{}).Cursor(ui.CursorText)
+			Radius(22).Border(1, p.ComposerBorder).Material(frostedGlass{}).Cursor(ui.CursorText)
 		if !expanded {
 			width := field.Bounds().W - 16 - 28 - 16 - 28 - 12
 			if responding {
