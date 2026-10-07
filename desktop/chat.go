@@ -321,7 +321,8 @@ func (m *mainWindow) messageCell(c *ui.Context, chat *model.Chat, message *model
 			}
 			bubble := ui.Column(c).MaxWidthPercent(100).MinWidth(0).Padding(10, 14).Radius(14).FontSize(textMessage)
 			if isUser {
-				bubble.Background(p.Accent).TextColor(p.AccentText)
+				// A selection darkens the accent fill, where the accent's own highlight would vanish.
+				bubble.Background(p.Accent).TextColor(p.AccentText).SelectionColor(ui.RGBA(0, 0, 0, 0.28))
 			} else {
 				bubble.Background(p.BotBubble)
 			}

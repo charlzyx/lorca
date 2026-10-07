@@ -1,7 +1,9 @@
 package main
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/egoist/mygo/ui"
 )
@@ -29,5 +31,35 @@ func TestMessageSelectsAcrossBlocks(t *testing.T) {
 	want := "First paragraph.\nSecond paragraph.\none\ntwo\ncode line"
 	if got := tt.Clipboard(); got != want {
 		t.Errorf("copied %q, want %q", got, want)
+	}
+}
+
+// A right-click on a message's text offers Reply above Copy, as the Mac's does, and Reply starts a
+// reply to it.
+func TestMessageTextMenu(t *testing.T) {
+	m := demoWindow(t)
+	tt := ui.NewTester(m.frame(m.view), 1000, 700)
+	runPosts()
+	// The transcript settles at its end over its first frames.
+	for range 5 {
+		tt.Frame()
+	}
+	time.Sleep(300 * time.Millisecond)
+	tt.Frame()
+	bubble, ok := tt.Find("Great. Keep the announcement as a draft until I've reviewed it.")
+	if !ok {
+		t.Fatalf("no message: %q", tt.Texts())
+	}
+	tt.RightClickAt(bubble.X+40, bubble.Y+20)
+	if want := []string{L("Reply"), "-", "Copy", "-", "Select All"}; !slices.Equal(tt.Menu(), want) {
+		t.Fatalf("menu %q, want %q", tt.Menu(), want)
+	}
+	if err := tt.ChooseMenuItem(L("Reply")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Frame()
+	if m.chat.composer.reply == nil {
+		t.Error("Reply started no reply")
 	}
 }
