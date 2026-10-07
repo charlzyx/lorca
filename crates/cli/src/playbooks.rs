@@ -1388,6 +1388,97 @@ mod tests {
         assert!(draft(&f.app, &f.scope(), content("bad-evidence"), invalid).is_err());
     }
 
+    #[test]
+    fn opaque_credential_markers_are_stable_through_export_and_new_scope_save() {
+        let f = Fixture::new();
+        let credential = "opaque-provider-credential-for-export";
+        f.app.credentials.lock().unwrap().deepseek = Some(crate::credentials::ApiKeyCredential {
+            api_key: credential.into(),
+            base_url: None,
+            connected_at: 1,
+        });
+        let mut authored = content("portable-report");
+        authored.instructions = format!(
+            "Use the provided value: {credential}\nAPI_KEY={credential}\nAPI_KEY=«redacted credential»\nPASSWORD='«redacted 23 chars»'"
+        );
+        authored.examples = "TOKEN=«redacted credential»\nAPI_KEY=\"«redacted 42 chars»\"".into();
+        authored.references[0].text = "password: «redacted credential»".into();
+        authored.scripts[0].text =
+            "export API_KEY='«redacted credential»'\nTOKEN=«redacted 23 chars»".into();
+
+        let source = save(
+            &f.app,
+            &f.scope(),
+            None,
+            authored,
+            0,
+            "",
+            Provenance::default(),
+        )
+        .unwrap();
+        let exported = export(&f.app, &f.scope(), source["id"].as_str().unwrap()).unwrap();
+        let clean: PlaybookContent = serde_json::from_value(exported["content"].clone()).unwrap();
+        assert!(!exported.to_string().contains(credential));
+        assert!(clean
+            .instructions
+            .contains("Use the provided value: «redacted credential»"));
+        assert!(clean.instructions.contains("API_KEY=«redacted credential»"));
+        assert!(clean
+            .instructions
+            .contains("PASSWORD='«redacted 23 chars»'"));
+        assert_eq!(
+            clean.examples,
+            "TOKEN=«redacted credential»\nAPI_KEY=\"«redacted 42 chars»\""
+        );
+        assert_eq!(clean.references[0].text, "password: «redacted credential»");
+        assert_eq!(
+            clean.scripts[0].text,
+            "export API_KEY='«redacted credential»'\nTOKEN=«redacted 23 chars»"
+        );
+
+        let recipient = Scope::project(&f.project);
+        let mut imported = save(
+            &f.app,
+            &recipient,
+            None,
+            clean.clone(),
+            0,
+            "",
+            Provenance {
+                kind: "template_import".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(imported["id"], source["id"]);
+        assert_eq!(imported["content"], source["content"]);
+        assert_eq!(imported["hash"], source["hash"]);
+        for _ in 0..3 {
+            let round_trip = export(&f.app, &recipient, imported["id"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                round_trip, exported,
+                "Repeated export must not grow redaction markers"
+            );
+            let content: PlaybookContent =
+                serde_json::from_value(round_trip["content"].clone()).unwrap();
+            imported = save(
+                &f.app,
+                &recipient,
+                imported["id"].as_str(),
+                content,
+                imported["revision"].as_u64().unwrap(),
+                imported["hash"].as_str().unwrap(),
+                Provenance::default(),
+            )
+            .unwrap();
+            assert_eq!(imported["content"], source["content"]);
+            assert_eq!(
+                imported["hash"], source["hash"],
+                "Content hash must stay stable across scrubbing passes"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn api_requires_guards_and_never_blindly_overwrites() {
         let f = Fixture::new();
