@@ -34,8 +34,8 @@ func TestMessageSelectsAcrossBlocks(t *testing.T) {
 	}
 }
 
-// A right-click on a message's text offers Reply above Copy, as the Mac's does, and Reply starts a
-// reply to it.
+// A right-click on a message's text offers Reply above Copy and Select All, as the Mac's does:
+// Reply starts a reply to it, and the others act on its text.
 func TestMessageTextMenu(t *testing.T) {
 	m := demoWindow(t)
 	tt := ui.NewTester(m.frame(m.view), 1000, 700)
@@ -61,5 +61,20 @@ func TestMessageTextMenu(t *testing.T) {
 	tt.Frame()
 	if m.chat.composer.reply == nil {
 		t.Error("Reply started no reply")
+	}
+	// Select All and Copy from the same menu take the message's text. The reply's bar moved it.
+	for _, item := range []string{"Select All", "Copy"} {
+		for range 3 {
+			tt.Frame()
+		}
+		bubble, _ = tt.Find("Great. Keep the announcement as a draft until I've reviewed it.")
+		tt.RightClickAt(bubble.X+40, bubble.Y+20)
+		if err := tt.ChooseMenuItem(item); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+	}
+	if got := tt.Clipboard(); got != "Great. Keep the announcement as a draft until I've reviewed it." {
+		t.Errorf("copied %q", got)
 	}
 }

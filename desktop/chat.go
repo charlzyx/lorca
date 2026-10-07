@@ -339,12 +339,15 @@ func (m *mainWindow) messageCell(c *ui.Context, chat *model.Chat, message *model
 					s.flashID = ""
 				}
 			}
+			// Reply, from the bubble, and above Copy from its text, as on the Mac.
+			var replyMenu func(menu *ui.Menu)
 			if message.CanBeQuoted() {
-				bubble.ContextMenu(func(menu *ui.Menu) {
+				replyMenu = func(menu *ui.Menu) {
 					if menu.Item(L("Reply")).Chosen() {
 						m.startReply(s, message)
 					}
-				})
+				}
+				bubble.ContextMenu(replyMenu)
 			}
 			bubble.Children(func() {
 				if len(message.Attachments) > 0 {
@@ -366,7 +369,7 @@ func (m *mainWindow) messageCell(c *ui.Context, chat *model.Chat, message *model
 				}
 				body.Children(func() {
 					if text != "" {
-						markdownView(c, text, markdownOptions{OnUserBubble: isUser}).Grow(1).Shrink(1)
+						markdownView(c, text, markdownOptions{OnUserBubble: isUser, Menu: replyMenu}).Grow(1).Shrink(1)
 					}
 					if showTimestamps {
 						stamp := ui.Text(c, model.Clock(message.CreatedAt)).FontSize(textCaption).FixedLineHeight(15).TextColor(p.Label3).FontFeatures("tnum").NoWrap()

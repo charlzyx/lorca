@@ -27,6 +27,8 @@ type markdownOptions struct {
 	OnUserBubble bool
 	// Size is the body's text size, textMessage by default.
 	Size float32
+	// Menu adds items above Copy and Select All in the text's context menu, as a message's Reply.
+	Menu func(m *ui.Menu)
 }
 
 // openLink opens a link from a message: a web or mail link in the browser, anything else not at all.
@@ -54,6 +56,13 @@ func markdownView(c *ui.Context, text string, o markdownOptions) *ui.Element {
 	}
 	blocks := model.MarkdownBlocks(text)
 	body := ui.Column(c).Selectable().MinWidth(0).FontSize(o.Size).LineHeight(1.38)
+	if o.Menu != nil {
+		body.ContextMenu(func(m *ui.Menu) {
+			o.Menu(m)
+			m.Separator()
+			m.EditItems()
+		})
+	}
 	body.Children(func() { markdownBlocks(c, blocks, o, false) })
 	return body
 }
