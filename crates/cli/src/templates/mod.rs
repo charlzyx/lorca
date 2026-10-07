@@ -264,6 +264,14 @@ pub async fn export_preview(
     for status in &statuses {
         let source = format::namespace(&status.id);
         let service = service_id(status);
+        if status.id == service
+            && format::is_named_instance(&status.id)
+            && (selected.iter().any(|id| **id == service)
+                || namespaces.contains(&source)
+                || template.contains_text(&status.id))
+        {
+            return Err("The source connection is missing service_id metadata. Update its Runner's CLI before exporting this content.".into());
+        }
         let direct_instance = status.id != service && template.contains_text(&status.id);
         if namespaces.contains(&source) || direct_instance {
             if let Some(previous) = seen_services.insert(service.clone(), source.clone()) {

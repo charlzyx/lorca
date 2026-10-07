@@ -256,6 +256,9 @@ impl Template {
         }
         let mut ids = HashSet::new();
         for requirement in &self.requirements {
+            if is_named_instance(&requirement.service_id) {
+                return Err("A requirement must use a service_id, not a source account instance id. Update the source CLI and export again.".into());
+            }
             if !crate::plugins::is_id(&requirement.service_id) || requirement.service_id.len() > 100
             {
                 return Err(format!(
@@ -472,6 +475,14 @@ pub fn namespace(id: &str) -> String {
         .collect()
 }
 
+pub fn is_named_instance(id: &str) -> bool {
+    id.rsplit_once('-').is_some_and(|(service, suffix)| {
+        ["slack", "gmail", "google-calendar", "google-drive"].contains(&service)
+            && suffix.len() == 32
+            && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+    })
+}
+
 pub fn is_skill_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -532,6 +543,15 @@ mod tests {
 
     #[test]
     fn refuses_unknown_fields_versions_and_runtime_data() {
+        let named = Template {
+            requirements: vec![Requirement {
+                service_id: "gmail-0123456789abcdef0123456789abcdef".into(),
+            }],
+            ..Template::default()
+        };
+        assert!(Template::parse(&serde_json::to_string(&named).unwrap())
+            .unwrap_err()
+            .contains("source account instance"));
         for field in [
             "credentials",
             "provider",
