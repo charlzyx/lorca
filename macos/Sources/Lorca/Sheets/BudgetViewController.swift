@@ -195,6 +195,8 @@ final class BudgetViewController: SheetViewController {
             let ownedAdmission = budget?.jobKind == "event" || budget?.taskId != nil || target.kind == "task"
             let limits = try values()
             let params: [String: Any] = ["kind": target.kind, "id": target.id, "bot_id": bot.id, "chat_id": chatID, "runner_id": bot.runnerID, "limits": limits]
+            canEdit = false
+            scope.isEnabled = false
             confirmButton.isEnabled = false
             resume.isEnabled = false
             renew.isEnabled = false
@@ -210,6 +212,8 @@ final class BudgetViewController: SheetViewController {
                         _ = try await store.client.request("budgets.resume", recovery)
                     }
                     if resuming && ownedAdmission {
+                        canEdit = true
+                        scope.isEnabled = true
                         errorLabel.textColor = .secondaryLabelColor
                         errorLabel.stringValue = L("Allowance recovered. Retry the delivery in Events or run the task again in Tasks so its ownership and inbox admission are checked.")
                         errorLabel.isHidden = false
@@ -219,6 +223,9 @@ final class BudgetViewController: SheetViewController {
                     }
                     dismiss(nil)
                 } catch {
+                    canEdit = true
+                    scope.isEnabled = true
+                    errorLabel.textColor = .systemRed
                     errorLabel.stringValue = error.localizedDescription
                     errorLabel.isHidden = false
                     confirmButton.isEnabled = true

@@ -818,6 +818,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn routine_recovery_clears_its_run_projection_but_never_replenishes_another_scope() {
+        let (scratch, mut job) = app();
+        let app = &scratch.0;
+        let routine = crate::routines::create(
+            app,
+            &job.bot_id,
+            "Brief",
+            "every 1h",
+            "Summarize",
+            None,
+            true,
+        )
+        .unwrap();
+        job.routine_id = Some(routine.id.clone());
+        serve(
+            app,
+            "budgets.set",
+            &json!({"kind":"routine","id":routine.id,"limits":{"max_tokens":20}}),
+        )
+        .unwrap();
+        let context = for_job(app, &job).unwrap();
+        let (id, _, _) = context.reserve(10, 10, None, Pricing::Unknown).unwrap();
+        context.settle(&id, None).unwrap();
+        assert_eq!(view(app, "job", &job.id).state, "budget_exhausted");
+        serve(
+            app,
+            "budgets.set",
+            &json!({"kind":"routine","id":routine.id,"limits":{"max_tokens":100}}),
+        )
+        .unwrap();
+        serve(
+            app,
+            "budgets.resume",
+            &json!({"kind":"routine","id":routine.id,"request_id":"resume-brief","run":false}),
+        )
+        .unwrap();
+        assert!(
+            for_job(app, &job).is_ok(),
+            "the held routine can continue with its same Job id after explicit recovery"
+        );
+        assert_eq!(view(app, "job", &job.id).usage.tokens, 20);
+        assert_eq!(view(app, "routine", &routine.id).usage.tokens, 20);
+        serve(
+            app,
+            "budgets.set",
+            &json!({"kind":"job","id":job.id,"bot_id":job.bot_id,"limits":{"max_tokens":20}}),
+        )
+        .unwrap();
+        assert!(context.check().is_err());
+        serve(
+            app,
+            "budgets.resume",
+            &json!({"kind":"routine","id":routine.id,"request_id":"still-spent","run":false}),
+        )
+        .unwrap();
+        assert!(
+            for_job(app, &job).is_err(),
+            "recovering one scope never grants credit in another exhausted allowance"
+        );
+    }
+
+    #[tokio::test]
     async fn reservations_share_capacity_and_recovery_does_not_erase_usage() {
         let (scratch, job) = app();
         let app = &scratch.0;

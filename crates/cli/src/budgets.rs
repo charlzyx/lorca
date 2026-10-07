@@ -455,6 +455,15 @@ pub fn serve(app: &Arc<App>, method: &str, params: &Value) -> Result<Value, Stri
                     true,
                 ));
             }
+            let related = ledger.records.get(&record_key).and_then(|record| record.job.as_ref()).map(|job| {
+                let mut keys = vec![key("job", &job.id)];
+                if let Some(task) = &job.task_id { keys.push(key("task", task)); }
+                if let Some(routine) = &job.routine_id { keys.push(key("routine", routine)); }
+                keys
+            }).unwrap_or_default();
+            if related.iter().filter_map(|key| ledger.records.get(key)).any(|record| record.started_at.is_some() || !record.pending.is_empty()) {
+                return Err("Wait for the current work to stop before resuming its budget.".into());
+            }
             let record = ledger
                 .records
                 .get_mut(&record_key)
@@ -474,6 +483,19 @@ pub fn serve(app: &Arc<App>, method: &str, params: &Value) -> Result<Value, Stri
             record.view.updated_at = now_secs();
             let snapshot = record.view.clone();
             let job = record.job.clone();
+            // Exhaustion is projected to every scope of a run. Explicit recovery clears
+            // those projections too, while retaining all other scopes' consumption and
+            // refusing a scope whose own allowance is still spent.
+            for key in related.iter().filter(|key| **key != record_key) {
+                if let Some(record) = ledger.records.get_mut(key) {
+                    if matches!(record.view.state.as_str(), "budget_exhausted" | "interrupted") {
+                        record.view.state = "ready".into();
+                        record.view.reason = None;
+                        record.view.updated_at = now_secs();
+                        let _ = check(record);
+                    }
+                }
+            }
             ledger.receipts.insert(receipt.into(), json!(snapshot));
             Ok((snapshot, job, false))
         })?;
