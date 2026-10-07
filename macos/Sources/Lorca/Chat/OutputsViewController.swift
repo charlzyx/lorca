@@ -41,7 +41,7 @@ enum OutputFileActions {
 final class OutputsViewController: NSViewController {
     let chatID: Chat.ID
     private let store = AppStore.shared
-    private let rows = NSStackView()
+    private let rows = OutputStack()
     private let status = Build.label("", font: Theme.Font.caption, color: .secondaryLabelColor)
     private let earlier = NSButton(title: L("Load earlier outputs"), target: nil, action: nil)
     private var loading = false
@@ -121,7 +121,8 @@ final class OutputsViewController: NSViewController {
                     rows.addArrangedSubview(row)
                     row.widthAnchor.constraint(equalTo: rows.widthAnchor, constant: -12).isActive = true
                 }
-                status.stringValue = result.messages.isEmpty ? L("No outputs yet.") : L("%d output versions", result.messages.count)
+                let count = result.messages.count
+                status.stringValue = count == 0 ? L("No outputs yet.") : (count == 1 ? L("%d output version", count) : L("%d output versions", count))
                 earlier.isHidden = !result.hasMore
             } catch {
                 status.stringValue = L("Outputs unavailable: %@", error.localizedDescription)
@@ -132,6 +133,11 @@ final class OutputsViewController: NSViewController {
     @objc private func done() { dismiss(nil) }
     @objc private func refreshOutputs() { reload() }
     @objc private func loadEarlier() { store.loadOlderMessages(in: chatID) }
+
+    /// NSClipView positions a short flipped document at the top of its viewport.
+    private final class OutputStack: NSStackView {
+        override var isFlipped: Bool { true }
+    }
 }
 
 final class OutputRow: NSStackView {

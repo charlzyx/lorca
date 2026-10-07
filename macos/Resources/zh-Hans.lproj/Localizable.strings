@@ -845,3 +845,5 @@
 "Exit code: %d" = "退出代码：%d";
 "Open document" = "打开文档";
 "File unavailable: %@" = "文件不可用：%@";
+
+"%d output version" = "%d 个输出版本";
