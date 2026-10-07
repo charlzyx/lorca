@@ -33,7 +33,7 @@ export default function AttentionScreen() {
   return <>
     <Stack.Screen options={{ title: t("Attention") }} />
     <CloseToolbar label={t("Done")} onClose={() => router.back()} />
-    <ScrollView style={{ backgroundColor: p.groupedBackground }} contentContainerStyle={{ padding: 16 }}>
+    <ScrollView contentInsetAdjustmentBehavior="automatic" style={{ backgroundColor: p.groupedBackground }} contentContainerStyle={{ padding: 16 }}>
       <Section title={t("Notifications")}>
         <ToggleRow title={t("Coordinator summaries")} value={attention.preferences.summaries} onValueChange={(summaries) => preference({ summaries })} />
         <ToggleRow title={t("Urgent direct alerts")} value={attention.preferences.urgent_direct} onValueChange={(urgent_direct) => preference({ urgent_direct })} />
