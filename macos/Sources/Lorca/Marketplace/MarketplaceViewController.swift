@@ -145,7 +145,7 @@ final class MarketplaceViewController: NSViewController {
     func installedPlugin(_ id: MarketplacePlugin.ID) -> InstalledPlugin? {
         guard let runner else { return nil }
         // A server of the Runner's mcp.json that shares the id is not this plugin.
-        return runner.plugins.first { $0.id == id && !$0.isMcpServer } ?? installed[runner.id]?[id]
+        return runner.plugins.first { $0.marketplaceID == id && !$0.isMcpServer } ?? installed[runner.id]?.values.first { $0.marketplaceID == id }
     }
 
     /// Everything the picked Runner has, the marketplace's and the rest, in its own order.
@@ -245,6 +245,10 @@ final class MarketplaceViewController: NSViewController {
 
     /// Installs a plugin on the picked Runner, for every bot there.
     func install(_ plugin: MarketplacePlugin) {
+        if plugin.namedAccounts {
+            manageAccounts(plugin)
+            return
+        }
         guard let runner, !installing.contains(plugin.id) else { return }
         installing.insert(plugin.id)
         reloadPages()
@@ -265,7 +269,7 @@ final class MarketplaceViewController: NSViewController {
     private func nextStep(for plugin: InstalledPlugin, on runner: Device) -> String {
         switch plugin.state {
         case .ready: L("Added %@. Every bot on %@ can use it.", plugin.name, runner.name)
-        case .needsAuth: L("Added %@. It needs a sign-in: click Connect.", plugin.name)
+        case .needsAuth, .insufficientAccess: L("Added %@. It needs a sign-in: click Connect.", plugin.name)
         case .needsSetup: L("Added %@. It needs setup: click Set Up.", plugin.name)
         case .connecting, .error, .unknown: "\(plugin.name): \(plugin.detail)"
         }
@@ -274,7 +278,17 @@ final class MarketplaceViewController: NSViewController {
     /// The plugin's own sheet on the picked Runner: its sign-in, its setup, and Remove.
     func manage(_ pluginID: MarketplacePlugin.ID) {
         guard let runner else { return }
+        if let plugin = plugin(pluginID), plugin.namedAccounts {
+            manageAccounts(plugin)
+            return
+        }
         PluginViewController.present(pluginID: pluginID, runner: runner, bot: nil, from: self)
+    }
+
+    private func manageAccounts(_ plugin: MarketplacePlugin) {
+        guard let runner else { return }
+        let sheet = PluginAccountsViewController(serviceID: plugin.id, name: plugin.name, runner: runner)
+        presentAsSheet(sheet)
     }
 
     /// Adds the bot on the picked Runner and opens its chat, where it greets the user.

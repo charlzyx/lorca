@@ -10,6 +10,8 @@ final class PluginViewController: SheetViewController {
     private let bot: Bot?
 
     private let status = SectionView(title: L("Status"))
+    private let account = SectionView(title: L("Account"))
+    private let accountName = NSTextField()
     private let signIn = SectionView(title: L("Sign-in"))
     private let variables = SectionView(title: L("Setup", context: "plugin variables"))
     private let skills = SectionView(title: L("Skills"))
@@ -56,7 +58,7 @@ final class PluginViewController: SheetViewController {
         let actions = Build.stack(
             [saveButton, spacer, removeButton], orientation: .horizontal, spacing: 8)
 
-        for section in [status, signIn, variables, skills] {
+        for section in [status, account, signIn, variables, skills] {
             contentStack.addArrangedSubview(section)
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
@@ -71,6 +73,7 @@ final class PluginViewController: SheetViewController {
         signIn.isHidden = true
         variables.isHidden = true
         skills.isHidden = true
+        account.isHidden = true
         saveButton.isHidden = true
         note.stringValue =
             runner.isThisDevice
@@ -113,6 +116,20 @@ final class PluginViewController: SheetViewController {
     }
 
     private func render(_ detail: PluginDetail) {
+        setSheetTitle(detail.status.name)
+        account.isHidden = detail.status.serviceID == nil
+        if let serviceID = detail.status.serviceID {
+            if accountName.currentEditor() == nil { accountName.stringValue = detail.status.accountName ?? "" }
+            accountName.placeholderString = L("Work or Personal")
+            accountName.setAccessibilityLabel(L("Account name"))
+            let another = ActionRow(key: L("Accounts"), value: "", tint: .secondaryLabelColor, actionTitle: L("Manage Accounts…"))
+            another.onAction = { [weak self] in
+                guard let self else { return }
+                let name = detail.status.name.components(separatedBy: " · ").first ?? serviceID
+                self.presentAsSheet(PluginAccountsViewController(serviceID: serviceID, name: name, runner: self.store.device(self.runner.id) ?? self.runner))
+            }
+            account.setRows([FieldRow(key: L("Name"), field: accountName), another])
+        }
         var statusRows: [NSView] = [
             KeyValueRow(key: L("State"), value: detail.status.detail, tint: detail.status.stateColor)
         ]
@@ -179,7 +196,7 @@ final class PluginViewController: SheetViewController {
 
         fields = []
         variables.isHidden = detail.variables.isEmpty
-        saveButton.isHidden = detail.variables.isEmpty
+        saveButton.isHidden = detail.variables.isEmpty && detail.status.serviceID == nil
         variables.setRows(
             detail.variables.map { variable in
                 let field: NSTextField = variable.secret ? NSSecureTextField() : NSTextField()
@@ -213,8 +230,12 @@ final class PluginViewController: SheetViewController {
             guard let self else { return }
             defer { self.saveButton.isEnabled = true }
             do {
-                _ = try await self.store.setPluginVariables(
-                    self.pluginID, on: self.runner.id, variables: values)
+                if self.detail?.status.serviceID != nil && self.accountName.stringValue != self.detail?.status.accountName {
+                    _ = try await self.store.renamePluginAccount(self.pluginID, on: self.runner.id, accountName: self.accountName.stringValue)
+                }
+                if !values.isEmpty {
+                    _ = try await self.store.setPluginVariables(self.pluginID, on: self.runner.id, variables: values)
+                }
                 self.load()
             } catch {
                 self.alert(L("Couldn't save"), error.localizedDescription)

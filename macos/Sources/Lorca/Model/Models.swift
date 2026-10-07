@@ -461,6 +461,7 @@ struct InstalledPlugin: Identifiable, Hashable {
         case ready
         case needsSetup = "needs_setup"
         case needsAuth = "needs_auth"
+        case insufficientAccess = "insufficient_access"
         case connecting
         case error
         case unknown
@@ -475,6 +476,10 @@ struct InstalledPlugin: Identifiable, Hashable {
     var detail: String
     /// `mcp.json` for one of the Runner's own MCP servers, which the server sheet edits.
     var source: String? = nil
+    var serviceID: String? = nil
+    var accountName: String? = nil
+
+    var marketplaceID: String { serviceID ?? id }
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
     var isMcpServer: Bool { source == "mcp.json" }
@@ -484,7 +489,7 @@ struct InstalledPlugin: Identifiable, Hashable {
         case .ready: .systemGreen
         case .connecting: .controlAccentColor
         case .error: .systemRed
-        case .needsSetup, .needsAuth, .unknown: .systemOrange
+        case .needsSetup, .needsAuth, .insufficientAccess, .unknown: .systemOrange
         }
     }
 }
@@ -525,6 +530,7 @@ struct MarketplacePlugin: Identifiable, Hashable {
     var skills: [Skill]
     var variables: [Variable]
     var installedOn: [Device.ID]
+    var namedAccounts: Bool = false
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
     /// At least one server signs in with OAuth on the Runner.

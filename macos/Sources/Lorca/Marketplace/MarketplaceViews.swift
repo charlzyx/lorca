@@ -341,7 +341,7 @@ extension MarketplaceViewController {
             let label = Build.label(L("Added"), font: .systemFont(ofSize: 12.5), color: .secondaryLabelColor)
             label.setContentCompressionResistancePriority(.required, for: .horizontal)
             return Build.stack([check, label], orientation: .horizontal, spacing: 5)
-        case .needsAuth:
+        case .needsAuth, .insufficientAccess:
             return ActionButton(title: L("Connect")) { [weak self] in self?.manage(plugin.id) }
         case .needsSetup:
             return ActionButton(title: L("Set Up")) { [weak self] in self?.manage(plugin.id) }

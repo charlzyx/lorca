@@ -21,7 +21,7 @@ final class MarketplacePluginPage: MarketplacePage {
             let row = StatusRow()
             let action: String? =
                 switch installed.state {
-                case .needsAuth: L("Connect")
+                case .needsAuth, .insufficientAccess: L("Connect")
                 case .needsSetup: L("Set Up")
                 default: nil
                 }
