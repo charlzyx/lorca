@@ -94,15 +94,21 @@ final class BrowserSessionsViewController: SheetViewController {
         do {
             let data = try await store.client.request("browser.sessions", ["bot_id": bot.id])
             let list = try JSONDecoder().decode(BrowserSessionList.self, from: data)
-            sessions = list.sessions
-            capabilities = list.capabilities
-            if !sessions.contains(where: { $0.id == selectedID }) {
-                selectedID = sessions.first(where: \.selected)?.id ?? sessions.first?.id
-            }
-            render()
+            applySessionList(list)
         } catch {
             status.stringValue = error.localizedDescription
         }
+    }
+
+    /// Apply the CLI's decoded state through the same renderer used by native
+    /// fixture captures. No fixture data enters the browser execution path.
+    func applySessionList(_ list: BrowserSessionList) {
+        sessions = list.sessions
+        capabilities = list.capabilities
+        if !sessions.contains(where: { $0.id == selectedID }) {
+            selectedID = sessions.first(where: \.selected)?.id ?? sessions.first?.id
+        }
+        if isViewLoaded { render() }
     }
 
     private func render() {
