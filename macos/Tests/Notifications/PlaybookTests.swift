@@ -44,7 +44,10 @@ final class PlaybookTests: XCTestCase {
         XCTAssertEqual(controller.confirmButton.title, L("Save Skill"))
         let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 640, height: 700), styleMask: .borderless, backing: .buffered, defer: false)
         window.contentViewController = controller
+        tabs.selectTabViewItem(at: 4)
         window.layoutIfNeeded()
+        controller.view.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(text.frame.height, 0, "Read-only history must have a visible document frame")
         XCTAssertGreaterThan(controller.view.fittingSize.height, 400)
         XCTAssertLessThan(controller.view.fittingSize.height, 800)
         window.orderOut(nil)
