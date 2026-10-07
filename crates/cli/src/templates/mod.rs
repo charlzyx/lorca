@@ -419,7 +419,9 @@ pub async fn import_preview(app: &Arc<App>, text: &str, params: &Value) -> Value
         }
     };
     let mut issues = vec![];
-    if !template.scrub_known(&secrets::local(app)).is_empty() || !template.scrub().is_empty() {
+    let contained_saved_secret = !template.scrub_known(&secrets::local(app)).is_empty();
+    let contained_pattern_secret = !template.scrub().is_empty();
+    if contained_saved_secret || contained_pattern_secret {
         issues.push("The file contains credential-like text. Remove it before importing.".into());
     }
     if let Err(error) = validate_namespaces(&template) {
@@ -1099,7 +1101,10 @@ mod tests {
             true
         );
         let raw = serde_json::to_string(&Template {
-            memories: vec![provider_secret.into()],
+            memories: vec![
+                provider_secret.into(),
+                "API_KEY=abcdefghijklmnop123456789".into(),
+            ],
             ..Default::default()
         })
         .unwrap();
@@ -1107,6 +1112,10 @@ mod tests {
         let blocked = import_preview(&account.app, &raw, &params).await;
         assert_eq!(blocked["can_import"], false);
         assert!(issues_text(&blocked).contains("credential-like"));
+        assert!(!blocked["template"].to_string().contains(provider_secret));
+        assert!(!blocked["template"]
+            .to_string()
+            .contains("abcdefghijklmnop123456789"));
     }
 
     #[cfg(unix)]
