@@ -32,7 +32,7 @@ A confirmed result records `succeeded` or `failed`, bounded text/details, and an
 
 ## Storage and sync
 
-SQLite's `review_items` table contains only ids and account-DEK XChaCha20-Poly1305 ciphertext, with `review` as associated data. The full item and its encrypted outbox entry commit in one transaction. Mutations reserve space for the final outcome; a proposal that outgrows the record budget is refused before it replaces the saved version.
+SQLite's `review_items` table contains only ids and account-DEK XChaCha20-Poly1305 ciphertext, with `review` as associated data. The full item and its encrypted outbox entry commit in one transaction. A serialized payload fits in 32 KiB. Pending records fit in 368 KiB; approved/executing records fit in 416 KiB, reserving space for approval and outcome snapshots within the final 512 KiB budget. Results keep at most 2,000 text characters and 24 KiB of result data; error summaries keep 512 characters. A proposal that outgrows its record budget is refused before it replaces the saved version.
 
 The relay stores a dedicated `review` blob kind and the latest version in the hashed slot of `review/<id>`. It reads no payload, target, approval, or history. The CLI polls reviews in normal and first sync, includes them in bootstrap, and emits `reviews.changed { item, change }`. The owning Runner preserves its local claims over incoming echoes; other Devices retain newer revisions as encrypted rows. Account deletion/forgetting clears the table. A relay resync reuploads owned items. Protocol 3 supports the kind; the CLI checks `/v1/health` before draining its outbox, keeping ciphertext queued while an older relay requires an update.
 

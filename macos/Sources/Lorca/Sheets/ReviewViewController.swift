@@ -110,6 +110,10 @@ final class ReviewViewController: SheetViewController {
 
     private func setBusy(_ value: Bool) {
         busy = value
+        account.isEditable = !value && item.isEditable
+        resource.isEditable = !value && item.isEditable
+        rationale.isEditable = !value && item.isEditable
+        editor.isEditable = !value && item.isEditable
         for button in [save, approve, reject, cancel] { button.isEnabled = !value && item.isEditable }
         reload.isEnabled = !value
     }

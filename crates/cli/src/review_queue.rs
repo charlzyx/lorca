@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::app::{App, OutboxItem, Slot};
@@ -238,10 +238,11 @@ pub(crate) fn save(
     change: ReviewChange,
 ) -> Result<(), String> {
     let plain = serde_json::to_vec(item).map_err(|error| error.to_string())?;
-    let limit = if matches!(change, ReviewChange::Created | ReviewChange::Edited) {
-        MAX_ITEM_BYTES - 96 * 1024
-    } else {
-        MAX_ITEM_BYTES
+    // Reserve the remaining payload snapshots and bounded outcome before admission.
+    let limit = match item.state {
+        ReviewState::Pending => MAX_ITEM_BYTES - 144 * 1024,
+        ReviewState::Approved | ReviewState::Executing => MAX_ITEM_BYTES - 96 * 1024,
+        _ => MAX_ITEM_BYTES,
     };
     if plain.len() > limit {
         return Err("Review item is too large; create a separate proposal.".into());
@@ -453,6 +454,7 @@ pub async fn forward_task_outcome(app: &Arc<App>, item: &ReviewItem) -> Result<(
     Ok(())
 }
 
+#[cfg(feature = "runner")]
 pub(crate) fn local_bot(app: &App, item: &ReviewItem) -> Result<crate::model::Bot, String> {
     if app.this_device_id().as_deref() != Some(item.runner_id.as_str()) {
         return Err("This review belongs to another Runner.".into());

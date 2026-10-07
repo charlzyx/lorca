@@ -1087,7 +1087,7 @@ final class AppStore {
         let data = try await client.request("reviews.\(action)", params)
         let updated = try Wire.decoder.decode(ReviewItem.self, from: data)
         upsertReview(updated)
-        return updated
+        return review(updated.id) ?? updated
     }
 
     /// Pauses or resumes a routine. A resumed schedule counts from now.

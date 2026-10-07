@@ -216,6 +216,15 @@ fn apply_fields(item: &mut ReviewItem, params: &Value) -> Result<(), String> {
             return Err("task_id must reference a canonical task-UUID.".into());
         }
     }
+    if serde_json::to_vec(&item.payload)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 32 * 1024
+    {
+        return Err(
+            "A reviewed payload must fit in 32 KiB; put large content in a guarded file.".into(),
+        );
+    }
     Ok(())
 }
 
@@ -377,7 +386,10 @@ fn invalidate(
         next.preconditions = preconditions;
     }
     next.outcome = Some(ReviewOutcome {
-        summary: format!("Fresh review required: {why}"),
+        summary: format!(
+            "Fresh review required: {}",
+            why.chars().take(512).collect::<String>()
+        ),
         result: None,
         message_id: next.message_id(),
         at: now_secs(),
@@ -500,13 +512,17 @@ pub async fn execute_approved(app: &Arc<App>, id: &str) -> Result<(), String> {
     let (state, summary, output) = match result {
         Ok(result) => {
             let text = result.text_content();
-            let shown: String = text.chars().take(32000).collect();
+            let shown: String = text.chars().take(2000).collect();
             let failed = result.is_error
                 || result
                     .structured
                     .as_ref()
                     .and_then(|value| value["exit_code"].as_i64())
                     .is_some_and(|code| code != 0);
+            let mut output = json!({ "text": shown, "details": result.details });
+            if serde_json::to_vec(&output).map_err(|error| error.to_string())?.len() > 24 * 1024 {
+                output = json!({ "text": shown });
+            }
             (
                 if failed {
                     ReviewState::Failed
@@ -520,14 +536,14 @@ pub async fn execute_approved(app: &Arc<App>, id: &str) -> Result<(), String> {
                 } else {
                     "Approved version executed".into()
                 },
-                Some(json!({ "text": shown, "details": result.details })),
+                Some(output),
             )
         }
         Err(error) => (
             ReviewState::Uncertain,
             format!(
                 "Execution ended without a confirmed result: {}. Inspect the target before creating another proposal.",
-                error.0
+                error.0.chars().take(512).collect::<String>()
             ),
             None,
         ),

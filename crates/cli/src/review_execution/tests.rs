@@ -487,3 +487,35 @@ async fn an_old_relay_is_detected_before_encrypted_outbox_items_are_drained() {
         "forgetting the account clears encrypted review records"
     );
 }
+
+#[tokio::test]
+async fn size_admission_reserves_room_for_approval_and_the_terminal_outcome() {
+    let scratch = scratch();
+    let bot = scratch.app.state.lock().unwrap().bots[0].clone();
+    let dm = scratch.app.dm_with(&bot.id, None).unwrap();
+    let mut params = json!({ "bot_id": bot.id, "request_id": "sized-proposal", "origin": { "chat_id": dm.meta.id },
+        "target": { "account": "mail", "resource": "draft" }, "rationale": "r".repeat(300_000),
+        "payload": { "kind": "draft", "text": "x".repeat(32_000) } });
+    let item = mutate(&scratch.app, "reviews.create", &params, &bot.runner_id)
+        .await
+        .unwrap();
+    approve(&scratch.app, &item).await;
+    execute_approved(&scratch.app, &item.id).await.unwrap();
+    assert_eq!(
+        queue::get(&scratch.app, &item.id).unwrap().state,
+        ReviewState::Succeeded
+    );
+    params["request_id"] = json!("too-large");
+    params["payload"]["text"] = json!("x".repeat(33 * 1024));
+    assert!(
+        mutate(&scratch.app, "reviews.create", &params, &bot.runner_id)
+            .await
+            .unwrap_err()
+            .contains("32 KiB")
+    );
+    assert_eq!(
+        queue::list(&scratch.app).unwrap().len(),
+        1,
+        "failed admission writes no proposal"
+    );
+}
