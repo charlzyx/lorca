@@ -3,8 +3,7 @@
   "private": true,
   "version": "1.0.10",
   "workspaces": [
-    "web",
-    "desktop"
+    "web"
   ],
   "scripts": {
     "dev": "bun run scripts/dev.ts",
