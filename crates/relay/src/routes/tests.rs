@@ -137,6 +137,26 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
 }
 
 #[tokio::test]
+async fn encrypted_review_blobs_round_trip_and_keep_the_latest_version() {
+    let relay = Relay::start(0).await;
+    let make = |id: &str, version: u64| OutboxItem { id: id.into(), kind: "review".into(), recipient: None,
+        ciphertext: lorca::crypto::encrypt_json(&[9; 32], "review", &json!({ "id": "review-one", "version": version, "draft": "private draft" })).unwrap(),
+        slot: Some(lorca::app::Slot::latest(lorca::model::relay_name("review/review-one"))), group: None };
+    let first = make("review-first", 1);
+    relay.client.put_blob(&relay.url, &relay.token, first.clone()).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, first).await.unwrap();
+    let latest = make("review-last", 2);
+    relay.client.put_blob(&relay.url, &relay.token, latest.clone()).await.unwrap();
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "review").await.unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "review-last");
+    let ciphertext = lorca::keys::unb64(&blobs[0].ciphertext).unwrap();
+    assert_eq!(ciphertext, latest.ciphertext);
+    let content: Value = lorca::crypto::decrypt_json(&[9; 32], "review", &ciphertext).unwrap();
+    assert_eq!(content["version"], 2);
+}
+
+#[tokio::test]
 async fn binary_files_enforce_auth_metadata_quota_and_missing_objects() {
     let relay = Relay::start(4).await;
     let unauthenticated = relay

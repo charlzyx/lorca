@@ -139,6 +139,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(CreateBot { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
         Arc::new(EditBot { app: app.clone(), bot: bot.clone() }),
         Arc::new(Routines { app: app.clone(), bot: bot.clone() }),
+        Arc::new(crate::review_execution::StageReview { app: app.clone(), bot: bot.clone(), chat_id: chat.meta.id.clone(), trigger: trigger.clone() }),
         Arc::new(SearchPlugins { app: app.clone() }),
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
@@ -1512,7 +1513,8 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
     if let Some(routine) = routine {
         prompt.push_str(&format!(
             "\nThis turn is a run of your routine \"{}\" ({}). The user is not here: nobody answers a question now. Do the \
-             task in the routine marker below on your own, then reply with what the user should know, kept short. Answer \
+             task in the routine marker below on your own. Use stage_review to leave an editable draft or exact proposed action \
+             for later approval; an action held by Auto-review is staged automatically. Do not retry a staged call. Then reply with what the user should know, kept short. Answer \
              with exactly PASS when there is nothing new to report.\n",
             routine.name,
             schedule_words(&routine.schedule)

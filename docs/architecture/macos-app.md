@@ -1,5 +1,7 @@
 # macOS app
 
+The chat inspector's Review queue opens a sheet for the saved target, rationale, payload, version, and outcome. Save Changes clears approval; Approve binds to the displayed saved version. Reject, Cancel Item, and Reload work through the local CLI ([Review queue](review-queue.md)).
+
 SPM `Lorca.app`, AppKit.
 
 The app starts the bundled `lorca` (Contents/Resources/bin/lorca; `LORCA_CLI` overrides, PATH is the fallback) as `lorca serve --port <port>`, logs it under `~/Library/Logs/Lorca/` or `~/Library/Logs/Lorca Dev/`, and restarts it if it exits. Lorca uses port `4862`; Lorca Dev uses `4863`. If something already listens on that build's port, that instance is used.

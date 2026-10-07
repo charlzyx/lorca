@@ -1,0 +1,47 @@
+# Review queue
+
+`crates/cli/src/review_queue.rs` owns durable review records; `review_execution.rs` resumes their approved calls on the assigned Runner. A proposal has no permission waiter and keeps no model turn alive. The macOS AppKit app reads and edits it through the local CLI.
+
+## Proposal and ownership
+
+Every bot has `stage_review { payload, target: { account, resource }, rationale, task_id?, guarded_paths? }`. A payload is an editable `draft { text }`, a `shell { arguments }`, or a `plugin { plugin_id, server_name, tool, arguments }`. Plugin ids identify installs on the bot's Runner; `tool` is the original MCP name on the named server. Accepting a draft records its text as accepted. Sending or publishing that text requires a proposed executable call whose arguments contain the draft.
+
+When Auto-review holds an unattended routine's new shell command or effectful plugin call, the review boundary stages that exact call and returns its review id to the bot. The model or codemode script continues with a blocked-call result and no action runs. The bot reports the proposal and does not retry it. Input into an existing terminal remains tied to that live terminal's permission boundary.
+
+`ReviewItem` carries its `review-UUID` id, immutable `runner_id` and `bot_id`, `origin { chat_id, message_id?, routine_id?, task_id? }`, target, rationale, payload, `version`, `revision`, captured preconditions, state, approval, outcome, timestamps, and immutable history entries. An originating task id references the canonical task record. The queue keeps no task or connection records. A create request has a `request_id`; its deterministic id and encrypted receipt bind that id to its original proposal. Delivering it again returns the item, and reusing the id for different content fails.
+
+The Runner owns all mutations and execution. Paired Devices read their encrypted local projection while it is offline. Editing or deciding on another Device sends a sealed request to that Runner; an offline Runner produces an explicit error and the displayed item stays available. Removing the originating bot/chat or moving the bot prevents execution; the user can still reject or cancel its orphaned review.
+
+## Versions and decisions
+
+The states are `pending`, `approved`, `executing`, `succeeded`, `failed`, `rejected`, `cancelled`, and `uncertain`. Pending and approved items can be edited, rejected, or cancelled. Once execution starts, these decisions fail instead of claiming to undo an external effect.
+
+`reviews.list { chat_id?, task_id? }` and `reviews.get { id }` read the local projection. `reviews.create { bot_id, request_id, origin, payload, target, rationale, guarded_paths? }` creates on the bot's Runner. `reviews.edit`, `reviews.approve`, `reviews.reject`, and `reviews.cancel` require `id` and `expected_version`; edit accepts changed payload/target/rationale/guarded paths, and reject/cancel accept a reason. A stale version fails. Approval records the paired Device that decided, the version, and a SHA-256 digest of the complete reviewed payload, origin, target, rationale, and preconditions.
+
+An edit increments the version and clears approval. Preconditions are captured again as the user edits or approves. If they changed during approval, the item returns to pending with a new version and the user reviews it again. Every persisted transition increments the separate revision, so an older sync projection cannot undo a newer decision. History entries have stable ids, explicit changes, actor Device ids, versions, payload snapshots, timestamps, and the previous payload for edits.
+
+## Execution and preconditions
+
+The preconditions contain the current bot profile/assignment and Auto-review fingerprint, the routine's task/check/schedule/enablement when it is the source, the canonical working directory, and up to sixteen absolute guarded files with content hashes or an absent-file marker. Plugin proposals also bind to the installed manifest, variables and sign-in fingerprint, and the tool's live description and input/output schema. Secret values stay on the Runner; only their hash enters the item. Credential rotation conservatively asks for fresh review. A guarded file is at most 16 MiB.
+
+Execution waits for the originating chat's lock, checks the current bot/Runner/chat/routine and approving Device, resolves the exact MCP server/tool from its live connection, validates the exact argument types, and compares the preconditions and approval digest again. A mismatch returns to pending with a fresh version. The working directory is context for the Runner's own user authority. Guarded files cover the declared local prerequisites; a service's conditional arguments, such as its expected revision, remain part of the reviewed call and are enforced by that service.
+
+Before a call starts, SQLite atomically compares the previous encrypted record and commits an `executing` claim together with the encrypted relay outbox entry. That ciphertext CAS serializes competing Devices and CLI processes. The Runner executes one shell command to completion or one MCP call, without regenerating arguments through a model. Shell execution uses the bot's working directory and the Runner's shell environment; background execution is unavailable. A call has a ten-minute overall deadline, and is never retried automatically.
+
+A confirmed result records `succeeded` or `failed`, bounded text/details, and an outcome summary. A transport failure, timeout, or interrupted process records `uncertain`, since the external effect may already have happened. At startup, approved records resume and executing records become uncertain. A Runner reconstructing its own missing record from sync treats an old approval/claim as uncertain. The user inspects the target before creating another proposal; an uncertain call is not replayed.
+
+## Storage and sync
+
+SQLite's `review_items` table contains only ids and account-DEK XChaCha20-Poly1305 ciphertext, with `review` as associated data. The full item and its encrypted outbox entry commit in one transaction. Mutations reserve space for the final outcome; a proposal that outgrows the record budget is refused before it replaces the saved version.
+
+The relay stores a dedicated `review` blob kind and the latest version in the hashed slot of `review/<id>`. It reads no payload, target, approval, or history. The CLI polls reviews in normal and first sync, includes them in bootstrap, and emits `reviews.changed { item, change }`. The owning Runner preserves its local claims over incoming echoes; other Devices retain newer revisions as encrypted rows. Account deletion/forgetting clears the table. A relay resync reuploads owned items. Protocol 3 supports the kind; the CLI checks `/v1/health` before draining its outbox, keeping ciphertext queued while an older relay requires an update.
+
+## Origin and sibling records
+
+The Runner maintains one status/outcome notice in the originating chat, `review-status-<review id>`. Startup repairs it from the authoritative encrypted item after a crash between the two writes. Later turns read the outcome in their transcript. `ReviewItem::outcome_evidence()` gives `{ kind: review, label, review_id, chat_id, message_id }` for canonical task evidence. The optional `tasks.get`/`tasks.update` adapter appends that reference with the task's current revision and stable `review-<id>-outcome` request id. A review result never completes a task on its own.
+
+The optional `feedback.record` adapter forwards actual user approvals, rejections, and edits with their immutable history id as `event_id`, originating source references, and edit before/after payloads. It records no preference from cancellation, interruption, or silence. The item keeps those events and outcomes while a sibling recorder or task authority is unavailable, and the Runner retries forwarding. The feedback subject owns exclusions and the task subject owns evidence and completion.
+
+## AppKit
+
+Every chat inspector has a Review queue section. A row opens a sheet with the Runner, target account/resource, rationale, payload, guarded files, version, state, and outcome. Draft text is editable as text; shell/plugin arguments are editable as JSON. Save Changes creates a fresh version; Approve requires that the editor match the saved version the sheet displayed. Reject and Cancel Item decide without reviving the original turn. A synced change asks the user to Reload, and failed/offline requests leave their edit intact. The app receives no account key or integration credentials.

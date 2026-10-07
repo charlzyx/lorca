@@ -312,6 +312,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(lorca_agent::login_shell::environment());
             tokio::spawn(sync::run(app.clone()));
             tokio::spawn(routines::run(app.clone()));
+            tokio::spawn(lorca::review_execution::run(app.clone()));
             ws::serve(app, ready_stdout).await
         }
         Command::Identity { command } => match command {

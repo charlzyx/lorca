@@ -166,8 +166,8 @@ fn tls() -> Arc<rustls::ClientConfig> {
 
 /// The relay protocol this client speaks, sent as `Lorca-Protocol` with every request. A
 /// relay may refuse one it no longer serves with `426`. 1: group paging, `DELETE /v1/identity`.
-/// 2: `POST /v1/machines`.
-pub const PROTOCOL: u32 = 2;
+/// 2: `POST /v1/machines`. 3: durable subject records and sealed event envelopes.
+pub const PROTOCOL: u32 = 3;
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -230,6 +230,14 @@ impl RelayClient {
     pub async fn health(&self, url: &str) -> RelayResult<u32> {
         let value = Self::check(self.http().get(format!("{url}/v1/health")).send().await?).await?;
         Ok(value["protocol"].as_u64().unwrap_or(0) as u32)
+    }
+
+    pub async fn require_current_protocol(&self, url: &str) -> RelayResult<()> {
+        let protocol = self.health(url).await?;
+        if protocol < PROTOCOL {
+            return Err(RelayError { status: None, message: format!("This relay speaks protocol {protocol}; update the relay to protocol {PROTOCOL} to sync persistent reviews.") });
+        }
+        Ok(())
     }
 
     /// Signed by the identity: registers the identity (idempotent) and attests one machine.

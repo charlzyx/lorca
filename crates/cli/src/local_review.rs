@@ -75,15 +75,22 @@ pub async fn before_tool_call(
         return None;
     };
     if unattended {
+        let staged = crate::review_execution::stage_call(app, bot, chat_id, trigger, &ctx.tool_call.id,
+            crate::review_queue::ReviewPayload::Shell { arguments: ctx.args.clone() },
+            crate::review_queue::ReviewTarget { account: format!("Runner user on {runner_name}"), resource: workdir.display().to_string() },
+            reason.as_deref()).await;
+        let status = match staged {
+            Ok(item) => format!("Staged review {} (version {}). The user can edit and approve it later; the exact call resumes on this Runner. Do not retry it now.", item.id, item.version),
+            Err(error) => format!("Could not stage the action for review: {error}. Report the proposed action."),
+        };
         update(&|run| {
             run.state = "denied".into();
             run.reason = reason.clone();
-            run.outcome = Some("Needs your permission, and nobody was here to give it".into());
+            run.outcome = Some(status.clone());
         });
         return Some(blocked(format!(
-            "bash needs the user's permission ({}), and nobody is here to give it. Report what you would do; the user can add an Auto-review rule allowing it{}.",
+            "bash needs the user's permission ({}). {status}",
             reason.as_deref().unwrap_or("Auto-review is off, so every command asks"),
-            rule.map(|rule| format!(", such as “{rule}”")).unwrap_or_default()
         )));
     }
 

@@ -15,6 +15,7 @@ final class InspectorViewController: NSViewController {
     private let runtime = SectionView(title: L("Runs with"))
     private let memory = SectionView(title: L("Memory"))
     private let routines = SectionView(title: L("Routines"))
+    private let reviews = SectionView(title: L("Review queue"))
     private let plugins = SectionView(title: L("Plugins"))
     private let routing = SectionView(title: L("Where turns run"))
     private let addButton = NSButton()
@@ -90,6 +91,7 @@ final class InspectorViewController: NSViewController {
         column.addArrangedSubview(runtime)
         column.addArrangedSubview(memory)
         column.addArrangedSubview(routines)
+        column.addArrangedSubview(reviews)
         column.addArrangedSubview(plugins)
         column.addArrangedSubview(routing)
         column.setCustomSpacing(10, after: participants)
@@ -127,6 +129,7 @@ final class InspectorViewController: NSViewController {
             runtime.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             memory.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routines.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
+            reviews.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             plugins.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routing.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
         ])
@@ -138,7 +141,7 @@ final class InspectorViewController: NSViewController {
         super.viewDidLoad()
         store.observe(self) { [weak self] event in
             switch event {
-            case .chatChanged, .chatsChanged, .snapshotReplaced, .rosterChanged:
+            case .chatChanged, .chatsChanged, .snapshotReplaced, .rosterChanged, .reviewsChanged:
                 self?.reload()
             case let .respondingChanged(chatID):
                 // A turn ended (or started): what the bot remembers may have moved.
@@ -239,6 +242,19 @@ final class InspectorViewController: NSViewController {
             showPlugins(of: bot)
         }
         showRouting(members)
+        showReviews(in: chat)
+    }
+
+    private func showReviews(in chat: Chat) {
+        let items = store.reviews.filter { $0.origin.chatId == chat.id }
+            .sorted { $0.isEditable != $1.isEditable ? $0.isEditable : $0.id < $1.id }
+        guard changed(reviews, to: [chat.id, items.map { "\($0.id):\($0.revision)" }]) else { return }
+        reviews.setRows(items.isEmpty ? [NoteRow(text: L("Drafts and proposed actions wait here for your review."))] : items.map { item in
+            let row = ActionRow(key: item.target.resource, value: item.stateText, tint: .secondaryLabelColor, actionTitle: L("Review…"))
+            row.toolTip = item.rationale
+            row.onAction = { [weak self] in self?.presentAsSheet(ReviewViewController(item: item)) }
+            return row
+        })
     }
 
     /// Whether `state` differs from what `section` last showed; records it when it does.

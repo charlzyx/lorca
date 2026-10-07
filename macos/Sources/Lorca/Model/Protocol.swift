@@ -33,6 +33,7 @@ enum Wire {
         var bots: [Bot]
         var chats: [Chat]
         var routines: [Routine]?
+        var reviews: [ReviewItem]?
         var autoReview: AutoReview?
         var providers: [Provider]?
         var models: [Model]?

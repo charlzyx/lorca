@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,chat,machine,credentials,review,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -143,6 +143,10 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
     };
     let machine = machine_file.machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
 
+    // An older relay rejects unknown kinds with 400. Check before draining ciphertext so
+    // durable proposals remain queued until a relay supporting them is available.
+    app.relay.require_current_protocol(&url).await?;
+
     if !machine_file.registered {
         ensure_registered(app, &url).await?;
     }
@@ -222,7 +226,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,machine,credentials,review,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -464,6 +468,7 @@ pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayErr
             }
         }
         app.push_roster();
+        crate::review_queue::enqueue_owned(app);
         app.push_history();
     }
     app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
@@ -734,6 +739,9 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
     let Ok(dek) = machine_file.dek() else { return };
 
     match blob.kind.as_str() {
+        "review" => {
+            if let Err(error) = crate::review_queue::apply(app, &ciphertext) { tracing::warn!(%error, "review blob"); }
+        }
         "roster" => match crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &ciphertext) {
             Ok(roster) => apply_roster(app, roster),
             Err(error) => tracing::warn!(%error, "roster blob"),

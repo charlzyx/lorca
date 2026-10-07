@@ -434,6 +434,13 @@ impl Store {
         self.secrets.get(id).and_then(|s| s.get(key)).cloned()
     }
 
+    /// A review binds to the installed connection and its sign-in without carrying a secret
+    /// to another Device. Rotating or replacing credentials conservatively requires review.
+    pub fn review_fingerprint(&self, id: &str) -> Result<String, String> {
+        let plugin = self.get(id).ok_or("The reviewed connection was removed.")?;
+        Ok(crate::review_queue::fingerprint(&serde_json::json!({ "format": 1, "installed": plugin, "secrets": self.secrets.get(id) })))
+    }
+
     /// A remote server's saved sign-in (`oauth`) or the challenge it answered with (`challenge`),
     /// while the server is where it was then: tokens a server issued never go to another host,
     /// and a server moved to another host starts out signed out. One saved before sign-ins

@@ -4,6 +4,7 @@ import Foundation
 enum StoreEvent {
     case snapshotReplaced
     case rosterChanged
+    case reviewsChanged
     case chatsChanged
     case chatChanged(Chat.ID)
     case messageAdded(Chat.ID, Message.ID)
@@ -68,6 +69,7 @@ final class AppStore {
     private(set) var chats: [Chat] = []
     /// Every bot's routines, from the roster.
     private(set) var routines: [Routine] = []
+    private(set) var reviews: [ReviewItem] = []
     /// Auto-review, shared through the roster.
     private(set) var autoReview = AutoReview()
     /// The account's provider credentials, the same on every Device.
@@ -273,6 +275,7 @@ final class AppStore {
             return chat
         }
         routines = (snapshot.routines ?? []).map { $0.toModel() }
+        reviews = snapshot.reviews ?? []
         autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
@@ -292,6 +295,9 @@ final class AppStore {
         }
 
         switch name {
+        case "reviews.changed":
+            struct Change: Decodable { var item: ReviewItem }
+            if let change = decode(Change.self) { upsertReview(change.item) }
         case "snapshot":
             if let snapshot = decode(Wire.Snapshot.self) { apply(snapshot: snapshot) }
 
@@ -1054,6 +1060,35 @@ final class AppStore {
     }
 
     // MARK: - Routines
+
+    func review(_ id: String) -> ReviewItem? { reviews.first { $0.id == id } }
+
+    private func upsertReview(_ item: ReviewItem) {
+        if let index = reviews.firstIndex(where: { $0.id == item.id }) {
+            guard reviews[index].revision <= item.revision else { return }
+            reviews[index] = item
+        } else { reviews.append(item) }
+        emit(.reviewsChanged)
+    }
+
+    func refreshReview(_ id: String) async throws -> ReviewItem {
+        let data = try await client.request("reviews.get", ["id": id])
+        let item = try Wire.decoder.decode(ReviewItem.self, from: data)
+        upsertReview(item)
+        return item
+    }
+
+    /// A decision always names the version the sheet actually displayed. Errors leave the
+    /// editor intact; refreshing makes a conflict visible instead of silently approving it.
+    func changeReview(_ item: ReviewItem, action: String, fields: [String: Any] = [:]) async throws -> ReviewItem {
+        var params = fields
+        params["id"] = item.id
+        params["expected_version"] = item.version
+        let data = try await client.request("reviews.\(action)", params)
+        let updated = try Wire.decoder.decode(ReviewItem.self, from: data)
+        upsertReview(updated)
+        return updated
+    }
 
     /// Pauses or resumes a routine. A resumed schedule counts from now.
     func setRoutineEnabled(_ id: Routine.ID, _ enabled: Bool) {

@@ -139,6 +139,10 @@ impl LocalStore {
                  runner_id  TEXT NOT NULL,
                  sent_at    REAL NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS review_items (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              PRAGMA user_version = 1;",
         )?;
         crate::config::set_private(path)?;
@@ -1009,6 +1013,34 @@ impl LocalStore {
             .map_err(Into::into)
     }
 
+    /// Review contents and state are encrypted. Comparing the previous ciphertext makes a
+    /// claim atomic even when another CLI process has opened the same database.
+    pub fn save_review(&self, id: &str, previous: Option<&[u8]>, ciphertext: &[u8], upload: Option<&OutboxItem>) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        let changed = match previous {
+            Some(previous) => tx.execute("UPDATE review_items SET ciphertext = ?1 WHERE id = ?2 AND ciphertext = ?3", params![ciphertext, id, previous])?,
+            None => tx.execute("INSERT OR IGNORE INTO review_items (id, ciphertext) VALUES (?1, ?2)", params![id, ciphertext])?,
+        };
+        anyhow::ensure!(changed == 1, "This review changed. Reload it before deciding.");
+        if let Some(item) = upload {
+            queue_outbox_tx(&tx, item)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn review(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.connection.lock().unwrap().query_row("SELECT ciphertext FROM review_items WHERE id = ?1", [id], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
+    pub fn reviews(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM review_items ORDER BY id")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
     pub fn clear(&self) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
@@ -1027,6 +1059,7 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "review_items",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
