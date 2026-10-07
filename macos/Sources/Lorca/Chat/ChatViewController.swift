@@ -897,6 +897,12 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     metrics: metrics
                 )
                 messageCell.onReply = message.canBeQuoted ? { [weak self] in self?.startReply(to: message) } : nil
+                messageCell.capturePlaybookTitle = message.author.isYou ? L("Propose Standing Instructions…") : L("Save Workflow as Skill…")
+                messageCell.onCapturePlaybook = message.canBeQuoted && !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? { [weak self] in
+                        guard let self, let current = self.store.chat(chatID) else { return }
+                        self.presentAsSheet(CapturePlaybookViewController(chat: current, message: message))
+                    } : nil
                 messageCell.onQuoteClick = message.replyTo.map { quote in { [weak self] in self?.reveal(quote.messageID) } }
                 messageCell.onSendNow = { [weak self] in self?.store.sendNow(message.id, in: chat.id) }
 

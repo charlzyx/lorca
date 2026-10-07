@@ -151,6 +151,7 @@ pub struct App {
     pub identity: Mutex<Option<IdentityFile>>,
     pub machine: Mutex<Option<MachineFile>>,
     pub credentials: Mutex<Credentials>,
+    pub playbooks: Mutex<crate::playbooks::Library>,
     pub state: Mutex<State>,
     pub store: LocalStore,
     pub events: broadcast::Sender<Event>,
@@ -247,6 +248,7 @@ impl App {
         crate::catalog::load_cached(&config);
         let identity: Option<IdentityFile> = config::read_json(&config.identity_path());
         let machine: Option<MachineFile> = config::read_json(&config.machine_path());
+        let playbooks = crate::playbooks::Library::load(&config.home, machine.as_ref().and_then(|m| m.dek().ok()))?;
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config);
         let marketplace = crate::marketplace::Updates::load(&config);
@@ -269,6 +271,7 @@ impl App {
             identity: Mutex::new(identity),
             machine: Mutex::new(machine),
             credentials: Mutex::new(credentials),
+            playbooks: Mutex::new(playbooks),
             state: Mutex::new(state),
             store,
             events,
@@ -544,6 +547,7 @@ impl App {
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
+        *self.playbooks.lock().unwrap() = crate::playbooks::Library::default();
         *self.state.lock().unwrap() = State::default();
         self.store.clear()?;
         self.settings.lock().unwrap().relay_url = None;
@@ -551,7 +555,7 @@ impl App {
         *self.relay_problem.lock().unwrap() = None;
         // The sync session ends on this instead of waiting for its socket to say something.
         self.outbox_notify.notify_waiters();
-        for path in [self.config.identity_path(), self.config.machine_path(), self.config.credentials_path(), self.config.settings_path()] {
+        for path in [self.config.identity_path(), self.config.machine_path(), self.config.credentials_path(), self.config.settings_path(), self.config.home.join("playbooks.enc")] {
             if path.exists() {
                 std::fs::remove_file(&path)?;
             }
@@ -650,6 +654,7 @@ impl App {
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),
                 auto_review: state.auto_review.clone(),
+                playbooks: Some(self.playbooks.lock().unwrap().clone()),
                 updated_at: config::now_secs(),
             }
         };

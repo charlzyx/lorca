@@ -707,6 +707,8 @@ pub struct RosterBlob {
     pub routines: Vec<Routine>,
     #[serde(default)]
     pub auto_review: AutoReview,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playbooks: Option<crate::playbooks::Library>,
     pub updated_at: f64,
 }
 

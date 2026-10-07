@@ -35,6 +35,8 @@ The macOS app's DM inspector has a Routines section: a row per routine (clock, p
 
 ## Memory
 
+Reusable procedures live in [Playbooks](playbooks.md), with explicit bot or group-project scope, reviewed workflow capture and standing-instruction proposals, and encrypted revision history. The inspector offers Playbooks beside the bot's memory; saved skills are discovered on later turns and read on demand.
+
 Every bot keeps its own long-term memory on its Runner, in Grok Bot's shape of a curated profile over append-only logs, as plain markdown under `~/.lorca/workspaces/<bot id>/` (keyed by id, so a rename or a changed working directory never moves it; `crates/cli/src/memory.rs`):
 
 - `MEMORY.md` is the curated memory. Its first 200 lines or 24 KB, whichever cuts first, open in every turn's system prompt; past that nothing loads, and the prompt tells the bot how much is cut off and asks it to consolidate. The bot writes it only through `memory_update`, one dated entry per call (`- 2026-09-17 · from your chat with the user · the user prefers short replies`), never a whole-file write, so two of its turns cannot clobber each other: `append` adds a fact (an exact duplicate is refused), `replace` rewrites one unique passage, `supersede` strikes the old entry through with a date and adds the new fact so the file shows what changed, `remove` deletes a passage.

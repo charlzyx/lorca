@@ -14,6 +14,7 @@ final class InspectorViewController: NSViewController {
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
     private let runtime = SectionView(title: L("Runs with"))
     private let memory = SectionView(title: L("Memory"))
+    private let playbooks = SectionView(title: L("Playbooks"))
     private let routines = SectionView(title: L("Routines"))
     private let plugins = SectionView(title: L("Plugins"))
     private let routing = SectionView(title: L("Where turns run"))
@@ -89,6 +90,7 @@ final class InspectorViewController: NSViewController {
         column.addArrangedSubview(profile)
         column.addArrangedSubview(runtime)
         column.addArrangedSubview(memory)
+        column.addArrangedSubview(playbooks)
         column.addArrangedSubview(routines)
         column.addArrangedSubview(plugins)
         column.addArrangedSubview(routing)
@@ -126,6 +128,7 @@ final class InspectorViewController: NSViewController {
             profile.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             runtime.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             memory.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
+            playbooks.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routines.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             plugins.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routing.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
@@ -216,6 +219,14 @@ final class InspectorViewController: NSViewController {
 
         let members = store.bots(in: chat)
         showParticipants(members, in: chat)
+        if changed(playbooks, to: [chat.id, chat.isGroup]) {
+            let row = ActionRow(key: L("Skills"), value: chat.isGroup ? L("Project and bots") : L("This bot"), tint: .secondaryLabelColor, actionTitle: L("Manage…"))
+            row.onAction = { [weak self] in
+                guard let self, let current = self.store.chat(chat.id) else { return }
+                self.presentAsSheet(PlaybooksViewController(chat: current))
+            }
+            playbooks.setRows([row])
+        }
 
         // A DM never takes another bot; a group does until it is full or every bot is in it.
         let canAdd = chat.canAddBot && members.count < store.bots.count

@@ -144,6 +144,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
     ];
     tools.extend(memory_tools(app, &store, &chat));
+    tools.extend(crate::playbook_tools::tools(app, &bot.id, &chat.meta.id));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
     // Commands run in terminals of their own, kept on this Runner past the turn when they
     // wait for input.
@@ -1531,6 +1532,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
     prompt.push_str(&routines_prompt(app, bot));
     prompt.push_str(&plugins_prompt(app, bot, plugins));
     prompt.push_str(&memory_prompt(store));
+    prompt.push_str(&crate::playbook_tools::prompt(app, &bot.id, &chat.meta.id));
 
     prompt.push_str(
         "\nWrite like a teammate in a chat app: short and direct, usually one to three sentences, and one line when one \

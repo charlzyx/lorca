@@ -19,6 +19,9 @@ pub mod marketplace;
 pub mod memory;
 pub mod model;
 pub mod pairing;
+pub mod playbooks;
+#[cfg(feature = "runner")]
+pub mod playbook_tools;
 pub mod plugins;
 #[cfg(feature = "provider-auth")]
 pub mod provider_auth;

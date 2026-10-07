@@ -827,6 +827,10 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
+    let playbooks_ahead = crate::playbooks::apply_synced(app, roster.playbooks.as_ref()).unwrap_or_else(|error| {
+        tracing::warn!(%error, "applying playbook revisions");
+        false
+    });
     let removed: Vec<String>;
     let normalized_descriptions = roster.bots.iter_mut().fold(false, |changed, bot| bot.normalize_description() || changed);
     let this_device = app.this_device_id();
@@ -864,7 +868,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     }
     #[cfg(feature = "runner")]
     app.shell_sessions.close_orphans(app);
-    app.roster_changed(normalized_descriptions || kept_checks);
+    app.roster_changed(normalized_descriptions || kept_checks || playbooks_ahead);
 }
 
 fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
