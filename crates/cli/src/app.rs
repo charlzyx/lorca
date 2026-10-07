@@ -146,6 +146,8 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Serializes scoped context revisions, optimistic checks, and remote replay locally.
+    pub(crate) project_context_lock: Mutex<()>,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
@@ -264,6 +266,7 @@ impl App {
         let http = lorca_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            project_context_lock: Mutex::new(()),
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
@@ -692,6 +695,9 @@ impl App {
                 tracing::error!(%error, %chat_id, "dropping a chat's queued blobs to upload it again");
                 continue;
             }
+            if let Err(error) = crate::project_context::push_history(self, &chat_id) {
+                tracing::warn!(%error, %chat_id, "queueing shared project context again");
+            }
             let messages = match self.store.all(&chat_id) {
                 Ok(messages) => messages,
                 Err(error) => {
@@ -1104,6 +1110,7 @@ impl App {
     /// Deletes a bot, its direct chat and routines, and its memberships in group chats. A
     /// group whose last bot was deleted goes with it; the other groups keep their transcript.
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
+        let _project_context = self.project_context_lock.lock().unwrap();
         let removed_chat_ids = {
             let mut state = self.state.lock().unwrap();
             let deleted_bot = state.bots.iter().find(|bot| bot.id == id).cloned().ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
@@ -1262,6 +1269,7 @@ impl App {
     }
 
     pub fn delete_chat(&self, chat_id: &str) {
+        let _project_context = self.project_context_lock.lock().unwrap();
         self.cancel_chat(chat_id);
         {
             let mut state = self.state.lock().unwrap();

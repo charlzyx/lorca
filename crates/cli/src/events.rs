@@ -20,6 +20,8 @@ pub enum Event {
     MessageRemoved { chat_id: String, message_id: String },
     #[serde(rename = "chat.removed")]
     ChatRemoved { chat_id: String },
+    #[serde(rename = "projects.changed")]
+    ProjectContextChanged { chat_id: String, entry_id: String },
     /// `routine_id` is set when the turn is a run of a routine.
     #[serde(rename = "job.started")]
     JobStarted { chat_id: String, bot_id: String, job_id: String, #[serde(skip_serializing_if = "Option::is_none")] routine_id: Option<String> },

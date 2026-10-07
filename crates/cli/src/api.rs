@@ -63,6 +63,9 @@ const UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        "projects.get" | "projects.save" | "projects.refresh" | "projects.asset" | "projects.asset_path" => {
+            crate::project_context::dispatch(app, method, params).await
+        }
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             "has_identity": app.has_identity(),

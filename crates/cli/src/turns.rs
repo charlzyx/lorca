@@ -145,6 +145,9 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
     ];
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
+    if crate::project_context::project_for_turn(app, &chat.meta.id, &bot.id).is_some() {
+        tools.push(Arc::new(crate::project_context::ProjectContextTool { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }));
+    }
     // Commands run in terminals of their own, kept on this Runner past the turn when they
     // wait for input.
     let sessions = Arc::new(crate::shell::TurnSessions::new(app, &chat.meta.id, &bot.id));
@@ -1531,6 +1534,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
     prompt.push_str(&routines_prompt(app, bot));
     prompt.push_str(&plugins_prompt(app, bot, plugins));
     prompt.push_str(&memory_prompt(store));
+    prompt.push_str(&crate::project_context::prompt(app, &chat.meta.id, &bot.id));
 
     prompt.push_str(
         "\nWrite like a teammate in a chat app: short and direct, usually one to three sentences, and one line when one \

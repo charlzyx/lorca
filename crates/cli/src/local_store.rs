@@ -127,6 +127,15 @@ impl LocalStore {
                  json    TEXT NOT NULL,
                  PRIMARY KEY (chat_id, bot_id, key)
              );
+             CREATE TABLE IF NOT EXISTS project_entries (
+                 chat_id TEXT NOT NULL,
+                 id TEXT NOT NULL,
+                 ciphertext BLOB NOT NULL,
+                 PRIMARY KEY (chat_id, id)
+             );
+             CREATE TABLE IF NOT EXISTS project_sync (
+                 machine_pubkey TEXT PRIMARY KEY NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS device_turns (
                  id   TEXT PRIMARY KEY NOT NULL,
                  json TEXT NOT NULL
@@ -208,6 +217,7 @@ impl LocalStore {
             tx.execute("DELETE FROM messages WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM chat_history WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM codemode_store WHERE chat_id = ?1", [chat_id])?;
+            tx.execute("DELETE FROM project_entries WHERE chat_id = ?1", [chat_id])?;
             tx.execute(
                 "DELETE FROM outbox WHERE group_name = ?1",
                 [crate::model::relay_name(chat_id)],
@@ -857,6 +867,16 @@ impl LocalStore {
                 tx.execute("DELETE FROM codemode_store WHERE chat_id = ?1", [&chat_id])?;
             }
         }
+        let project_chats: Vec<String> = {
+            let mut statement = tx.prepare("SELECT DISTINCT chat_id FROM project_entries")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for chat_id in project_chats {
+            if !valid.contains(chat_id.as_str()) {
+                tx.execute("DELETE FROM project_entries WHERE chat_id = ?1", [&chat_id])?;
+            }
+        }
         let queued_groups: Vec<String> = {
             let mut statement =
                 tx.prepare("SELECT DISTINCT group_name FROM outbox WHERE group_name IS NOT NULL")?;
@@ -907,6 +927,42 @@ impl LocalStore {
     /// and attachments.
     pub fn drop_outbox_group(&self, group: &str) -> anyhow::Result<()> {
         self.connection.lock().unwrap().execute("DELETE FROM outbox WHERE group_name = ?1", [group])?;
+        Ok(())
+    }
+
+    /// Project payloads are already encrypted. A local revision and its upload commit together.
+    /// Existing ids are immutable, including across replay and remote echoes.
+    pub fn insert_project_entry(&self, chat_id: &str, id: &str, ciphertext: &[u8], upload: Option<&OutboxItem>) -> anyhow::Result<bool> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO project_entries (chat_id, id, ciphertext) VALUES (?1, ?2, ?3)",
+            params![chat_id, id, ciphertext],
+        )? > 0;
+        if inserted {
+            if let Some(upload) = upload {
+                queue_outbox_tx(&tx, upload)?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn project_entries(&self, chat_id: &str) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM project_entries WHERE chat_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map([chat_id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A Device upgrading from a build that did not poll project blobs needs one full pull.
+    pub fn project_context_ready(&self, machine_pubkey: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM project_sync WHERE machine_pubkey = ?1)", [machine_pubkey], |row| row.get(0))?)
+    }
+
+    pub fn mark_project_context_ready(&self, machine_pubkey: &str) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute("INSERT OR IGNORE INTO project_sync (machine_pubkey) VALUES (?1)", [machine_pubkey])?;
         Ok(())
     }
 
@@ -1027,6 +1083,8 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "project_entries",
+            "project_sync",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }

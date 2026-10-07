@@ -14,7 +14,7 @@ const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,chat,project_context,machine,credentials,job,job_cancel,job_result,request,response";
 
 pub async fn run(app: Arc<App>) {
     let mut failures: u32 = 0;
@@ -222,7 +222,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
 }
 
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,project_context,machine,credentials,job,job_cancel,job_result,request,response";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -255,6 +255,15 @@ enum FirstSync {
 }
 
 async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<FirstSync, RelayError> {
+    // Context revisions can predate the latest roster. Install group membership first so
+    // an old brief remains available even when the transcript has thousands of messages.
+    let mut roster_since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, roster_since, "roster,machine").await?;
+        let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+        for blob in &blobs { apply_blob(app, machine_file, blob); }
+        roster_since = last;
+    }
     // The relay keeps the latest roster alone, so the chats have their names and bots before
     // their messages land.
     let (mut since, mut head) = (0, None);
@@ -297,7 +306,27 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
         }
     }
     app.state.lock().unwrap().last_seq = head.unwrap_or(0);
+    if let Ok(machine) = machine_file.machine() {
+        app.store.mark_project_context_ready(&machine.pubkey()).map_err(|error| RelayError { status: None, message: error.to_string() })?;
+    }
     Ok(FirstSync::Done)
+}
+
+/// The global cursor may have passed context while an older build did not poll its kind.
+/// Backfill once per Device, after the current roster has landed, then keep following the log.
+async fn backfill_project_context(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
+    let machine = machine_file.machine().map_err(local)?.pubkey();
+    if app.store.project_context_ready(&machine).map_err(local)? { return Ok(()); }
+    let mut since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "project_context").await?;
+        let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+        for blob in &blobs { apply_blob_contents(app, machine_file, blob); }
+        since = last;
+    }
+    app.store.mark_project_context_ready(&machine).map_err(local)?;
+    Ok(())
 }
 
 /// One chat at a time reads backwards, so two askers do not both take the same page.
@@ -351,6 +380,7 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
         let since = app.state.lock().unwrap().last_seq;
         let (blobs, _head) = app.relay.list_blobs(url, token, since, POLL_KINDS).await?;
         if blobs.is_empty() {
+            backfill_project_context(app, url, token, machine_file).await?;
             // Caught up, the replay of a relay that cannot page a chat included.
             mark_account_pulled(app, machine_file);
             app.state.lock().unwrap().caught_up = true;
@@ -742,6 +772,14 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(op) => apply_chat_op(app, op),
             Err(error) => tracing::warn!(%error, "chat blob"),
         },
+        "project_context" => match crate::crypto::decrypt_json::<crate::project_context::ProjectBlob>(&dek, "project_context", &ciphertext) {
+            Ok(project) => {
+                if let Err(error) = crate::project_context::apply_remote(app, &project.chat_id, &project.entry) {
+                    tracing::warn!(%error, chat_id = %project.chat_id, "applying shared project context");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "project context blob"),
+        },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
             Ok(MachineBlob { device, turns }) => {
                 if app.this_device_id().as_deref() == Some(device.id.as_str()) {
@@ -827,6 +865,7 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
 }
 
 fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
+    let _project_context = app.project_context_lock.lock().unwrap();
     let removed: Vec<String>;
     let normalized_descriptions = roster.bots.iter_mut().fold(false, |changed, bot| bot.normalize_description() || changed);
     let this_device = app.this_device_id();
@@ -931,6 +970,49 @@ mod tests {
         let home = std::env::temp_dir().join(format!("lorca-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    #[tokio::test]
+    async fn an_upgraded_device_backfills_context_behind_its_global_cursor_once() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let source = scratch_app();
+        crate::identity::create(&source.0, Some("Runner".into())).unwrap();
+        let group = ChatMeta { id: "project-upgrade".into(), kind: "group".into(), title: None, bot_ids: vec![source.0.state.lock().unwrap().bots[0].id.clone()], owner_bot_id: None, description: None, is_pinned: false, created_at: 1.0 };
+        source.0.state.lock().unwrap().chats.push(Chat { meta: group, unread_count: 0, usage: None, compactions: vec![] });
+        let saved = crate::project_context::save(&source.0, "project-upgrade", serde_json::from_value(serde_json::json!({"kind":"brief","title":"Older brief","text":"Context predates the old global cursor"})).unwrap()).unwrap();
+        let uploaded = source.0.store.outbox().unwrap().into_iter().find(|item| item.kind == "project_context").unwrap();
+        let upgrade = scratch_app();
+        let machine_file = source.0.machine_file().unwrap();
+        *upgrade.0.machine.lock().unwrap() = Some(machine_file.clone());
+        *upgrade.0.state.lock().unwrap() = source.0.state.lock().unwrap().clone();
+        upgrade.0.state.lock().unwrap().last_seq = 999;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let count = calls.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]);
+                let backfill = request.contains("kinds=project_context");
+                if backfill { count.fetch_add(1, Ordering::Relaxed); }
+                let blobs = if backfill && request.contains("since=0&") {
+                    serde_json::json!([{"id":uploaded.id,"kind":"project_context","seq":1,"ciphertext":crate::keys::b64(&uploaded.ciphertext),"created_at":1}])
+                } else { serde_json::json!([]) };
+                let body = serde_json::json!({"blobs":blobs,"head":999}).to_string();
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        pull_blobs(&upgrade.0, &url, "token", &machine_file).await.unwrap();
+        assert_eq!(crate::project_context::get(&upgrade.0, "project-upgrade", None, false, None, 1).unwrap()["entries"][0]["id"], saved.id);
+        assert_eq!(upgrade.0.state.lock().unwrap().last_seq, 999);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        pull_blobs(&upgrade.0, &url, "token", &machine_file).await.unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 2, "a reconnect keeps normal incremental sync");
+        server.abort();
     }
 
     #[tokio::test]

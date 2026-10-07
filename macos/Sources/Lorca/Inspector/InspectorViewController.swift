@@ -9,6 +9,7 @@ final class InspectorViewController: NSViewController {
     private let group = SectionView(title: L("Group"))
     private let groupNameRow = EditableRow(key: L("Name"), placeholder: "")
     private let groupDescriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
+    private let projectContextRow = SummaryActionRow(key: L("Project context"), value: L("Brief, decisions, and references"), actionTitle: L("Edit…"))
     private let profile = SectionView(title: L("Profile"))
     private let nameRow = EditableRow(key: L("Name"), placeholder: L("Name"))
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
@@ -81,7 +82,11 @@ final class InspectorViewController: NSViewController {
         profile.setRows([nameRow, descriptionRow])
         groupNameRow.field.alignment = .right
         groupDescriptionRow.onAction = { [weak self] in self?.editGroupDescription() }
-        group.setRows([groupNameRow, groupDescriptionRow])
+        projectContextRow.onAction = { [weak self] in
+            guard let self, case let .chat(chatID) = self.selection, self.store.chat(chatID)?.isGroup == true else { return }
+            self.presentAsSheet(ProjectContextViewController(chatID: chatID))
+        }
+        group.setRows([groupNameRow, groupDescriptionRow, projectContextRow])
 
         column.addArrangedSubview(participants)
         column.addArrangedSubview(addButton)
