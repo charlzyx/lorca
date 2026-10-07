@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 final class TemplateExportViewController: SheetViewController {
     private let store = AppStore.shared
     private let bot: Bot
+    private let reply: TemplateReply
     private let choices = Build.stack([], spacing: 6)
     private let previewText = TemplatePreviewText(height: 235)
     private let status = Build.label("", font: Theme.Font.caption, color: .secondaryLabelColor, lines: 0)
@@ -14,8 +15,9 @@ final class TemplateExportViewController: SheetViewController {
     private var busy = false
     private var generation = 0
 
-    init(bot: Bot) {
+    init(bot: Bot, reply: TemplateReply? = nil) {
         self.bot = bot
+        self.reply = reply ?? { method, params in try await AppStore.shared.templateReply(method, params) }
         super.init(title: L("Export Bot Template"),
             subtitle: L("Choose reusable content from %@. Saving creates a private file; share it only with people you choose.", bot.name), width: 640)
     }
@@ -39,7 +41,7 @@ final class TemplateExportViewController: SheetViewController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let json = try await self.store.templateReply("templates.contents", ["bot_id": self.bot.id])
+                let json = try await self.reply("templates.contents", ["bot_id": self.bot.id])
                 self.showContents(TemplateContents(json: json))
             } catch { self.showError(error) }
         }
@@ -102,7 +104,7 @@ final class TemplateExportViewController: SheetViewController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let json = try await self.store.templateReply("templates.export.preview", ["bot_id": self.bot.id, "selection": selected])
+                let json = try await self.reply("templates.export.preview", ["bot_id": self.bot.id, "selection": selected])
                 guard current == self.generation else {
                     self.busy = false
                     self.confirmButton.isEnabled = self.hasSelection
@@ -134,7 +136,7 @@ final class TemplateExportViewController: SheetViewController {
             Task { [weak self] in
                 guard let self else { return }
                 do {
-                    _ = try await self.store.templateReply("templates.export", ["bot_id": self.bot.id, "selection": selected,
+                    _ = try await self.reply("templates.export", ["bot_id": self.bot.id, "selection": selected,
                         "path": url.path, "expected_digest": preview.digest, "reviewed": true,
                         "overwrite": FileManager.default.fileExists(atPath: url.path)])
                     self.dismiss(nil)

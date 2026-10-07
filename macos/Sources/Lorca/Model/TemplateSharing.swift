@@ -1,5 +1,8 @@
 import Foundation
 
+/// The production sheets use the local CLI; native fixtures can supply deterministic replies.
+typealias TemplateReply = @MainActor (String, [String: Any]) async throws -> [String: Any]
+
 /// The CLI owns validation and file access. The app displays its allowlisted preview and
 /// sends selection identifiers and recipient connection choices back to that same CLI.
 struct TemplateContents {

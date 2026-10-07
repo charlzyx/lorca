@@ -5,6 +5,7 @@ final class TemplateImportViewController: SheetViewController {
     private let store = AppStore.shared
     private let url: URL
     private let onCreate: (Chat.ID) -> Void
+    private let reply: TemplateReply
     private let nameField = NSTextField()
     private let runnerPopup = NSPopUpButton()
     private let providerPopup = NSPopUpButton()
@@ -20,9 +21,10 @@ final class TemplateImportViewController: SheetViewController {
     private var loadedName = false
     private var importing = false
 
-    init(url: URL, onCreate: @escaping (Chat.ID) -> Void) {
+    init(url: URL, reply: TemplateReply? = nil, onCreate: @escaping (Chat.ID) -> Void) {
         self.url = url
         self.onCreate = onCreate
+        self.reply = reply ?? { method, params in try await AppStore.shared.templateReply(method, params) }
         super.init(title: L("Import Bot Template"),
             subtitle: L("Review %@ and choose your own Runner and connections. Import creates an independent bot with its routines paused.", url.lastPathComponent), width: 640)
     }
@@ -96,7 +98,7 @@ final class TemplateImportViewController: SheetViewController {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let reply = try await self.store.templateReply("templates.import.preview", request)
+                let reply = try await self.reply("templates.import.preview", request)
                 guard self.generation == current else { return }
                 let preview = TemplatePreview(json: reply)
                 self.preview = preview
