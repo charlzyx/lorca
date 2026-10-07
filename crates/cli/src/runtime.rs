@@ -579,9 +579,10 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) 
     tokio::spawn(async move {
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
-        let outcome = run_job_started(&app, job.clone(), cancel).await;
+        let outcome = run_job_started(&app, job.clone(), cancel.clone()).await;
         if let Some(id) = &job.routine_id {
             crate::routines::finished(&app, id, outcome);
+            if !cancel.is_cancelled() { crate::feedback::routine_outcome(&app, &job, outcome == TurnOutcome::Skipped || job.check.as_ref().is_some_and(|check|check.error.is_some())); }
         }
         if let Some(id) = remote_blob_id {
             crate::sync::delete_remote_blob(&app, &id).await;

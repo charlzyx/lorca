@@ -13,6 +13,7 @@ final class InspectorViewController: NSViewController {
     private let nameRow = EditableRow(key: L("Name"), placeholder: L("Name"))
     private let descriptionRow = SummaryActionRow(key: L("Description"), value: "", actionTitle: L("Edit…"))
     private let runtime = SectionView(title: L("Runs with"))
+    private let feedback = SectionView(title: L("Workflow feedback"))
     private let memory = SectionView(title: L("Memory"))
     private let routines = SectionView(title: L("Routines"))
     private let plugins = SectionView(title: L("Plugins"))
@@ -54,6 +55,7 @@ final class InspectorViewController: NSViewController {
     private var isOnScreen = false
     private var isBehind = false
 
+    var onOpenFeedbackOrigin: ((Chat.ID, Message.ID) -> Void)?
     var onOpenDevice: ((Device.ID) -> Void)?
     var onRemoveBot: ((Bot.ID) -> Void)?
     var onAddBot: (() -> Void)?
@@ -88,6 +90,7 @@ final class InspectorViewController: NSViewController {
         column.addArrangedSubview(group)
         column.addArrangedSubview(profile)
         column.addArrangedSubview(runtime)
+        column.addArrangedSubview(feedback)
         column.addArrangedSubview(memory)
         column.addArrangedSubview(routines)
         column.addArrangedSubview(plugins)
@@ -125,6 +128,7 @@ final class InspectorViewController: NSViewController {
             group.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             profile.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             runtime.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
+            feedback.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             memory.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             routines.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
             plugins.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -32),
@@ -138,7 +142,7 @@ final class InspectorViewController: NSViewController {
         super.viewDidLoad()
         store.observe(self) { [weak self] event in
             switch event {
-            case .chatChanged, .chatsChanged, .snapshotReplaced, .rosterChanged:
+            case .chatChanged, .chatsChanged, .snapshotReplaced, .rosterChanged, .workflowFeedbackChanged:
                 self?.reload()
             case let .respondingChanged(chatID):
                 // A turn ended (or started): what the bot remembers may have moved.
@@ -228,12 +232,13 @@ final class InspectorViewController: NSViewController {
 
         // A direct chat is one bot, so its profile, provider, and model are edited right here.
         let single = chat.isDM && members.count == 1
-        for section in [profile, runtime, memory, routines, plugins] where section.isHidden == single {
+        for section in [profile, runtime, feedback, memory, routines, plugins] where section.isHidden == single {
             section.isHidden = !single
         }
         if single, let bot = members.first {
             showProfile(of: bot)
             showRuntime(of: bot, in: chat)
+            showFeedback(of: bot)
             showMemory(of: bot)
             showRoutines(of: bot)
             showPlugins(of: bot)
@@ -484,6 +489,18 @@ final class InspectorViewController: NSViewController {
     /// What the bot remembers, as its Runner reports it: the index against its load budget with
     /// an editor, and the folder of topic files and daily logs. A bot on another Runner is
     /// read and edited through the relay; only the folder cannot be opened from here.
+    private func showFeedback(of bot: Bot) {
+        guard changed(feedback, to: [bot.id, store.workflowProposalCounts[bot.id] ?? 0]) else { return }
+        let row = ActionRow(key: L("Improvements"), value: (store.workflowProposalCounts[bot.id] ?? 0) > 0 ? L("%d waiting for review", store.workflowProposalCounts[bot.id] ?? 0) : L("Evidence and revisions"), tint: .secondaryLabelColor, actionTitle: L("Review…"))
+        row.onAction = { [weak self] in
+            guard let self, case let .chat(chatID) = self.selection else { return }
+            let sheet = WorkflowFeedbackViewController(bot: bot, chatID: chatID)
+            sheet.onOpenOrigin = self.onOpenFeedbackOrigin
+            self.presentAsSheet(sheet)
+        }
+        feedback.setRows([row])
+    }
+
     private func memoryRows(for bot: Bot) -> [NSView] {
         guard let memory = memoryByBot[bot.id] else {
             if let error = memoryErrors[bot.id] {

@@ -11,6 +11,7 @@ pub mod credentials;
 pub mod crypto;
 pub mod events;
 pub mod files;
+pub mod feedback;
 pub mod identity;
 pub mod keys;
 #[cfg(feature = "runner")]

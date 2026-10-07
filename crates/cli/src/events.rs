@@ -12,6 +12,9 @@ pub enum Event {
     Snapshot(Value),
     #[serde(rename = "roster.changed")]
     RosterChanged { devices: Vec<Value>, bots: Vec<Bot>, chats: Vec<ChatSummary>, routines: Vec<Value>, auto_review: AutoReview, providers: Vec<ProviderStatus>, models: Vec<Value> },
+    /// Metadata only; the app fetches encrypted Runner-owned evidence when opened.
+    #[serde(rename = "feedback.changed")]
+    FeedbackChanged { bot_id: String, pending_count: usize },
     #[serde(rename = "message.added")]
     MessageAdded { chat_id: String, message: Message },
     #[serde(rename = "message.updated")]

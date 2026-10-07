@@ -620,6 +620,14 @@ final class ChatViewController: NSViewController {
 
     /// Brings a quoted message into view and pulses its bubble. One on a page not loaded yet
     /// stays where it is.
+    func revealFeedbackOrigin(_ messageID: Message.ID) {
+        guard let id = chatID else { return }
+        Task { [weak self] in
+            guard let self, (try? await self.store.loadWorkflowOrigin(messageID, in: id)) == true, self.chatID == id else { return }
+            self.reveal(messageID)
+        }
+    }
+
     private func reveal(_ messageID: Message.ID) {
         guard let row = rows.firstIndex(where: { $0.messageID == messageID }) else {
             NSSound.beep()
@@ -897,6 +905,10 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     metrics: metrics
                 )
                 messageCell.onReply = message.canBeQuoted ? { [weak self] in self?.startReply(to: message) } : nil
+                let feedbackBot = message.author.botID ?? chat.botIDs.first
+                messageCell.onWorkflowFeedback = feedbackBot.map { botID in { [weak self] in
+                    self?.presentAsSheet(RecordWorkflowFeedbackViewController(botID: botID, chatID: chat.id, message: message))
+                } }
                 messageCell.onQuoteClick = message.replyTo.map { quote in { [weak self] in self?.reveal(quote.messageID) } }
                 messageCell.onSendNow = { [weak self] in self?.store.sendNow(message.id, in: chat.id) }
 

@@ -61,6 +61,7 @@ pub fn create(app: &Arc<App>, bot_id: &str, name: &str, schedule_text: &str, pro
         bot_id: bot_id.to_string(),
         name,
         prompt: prompt.to_string(),
+        feedback_authorization_prompt: None,
         schedule: schedule.canonical(),
         is_enabled: enabled,
         enabled_at: now,
@@ -125,16 +126,22 @@ fn clean_check(code: &str) -> Result<Option<String>, String> {
 /// A routine's check is its Runner's to change, and a build that does not know checks writes
 /// the roster without them. When `incoming` leaves out the check that a routine of a bot on
 /// `this_device` has in `current`, the check stays. True when one did, so the roster goes up
-/// again with it.
+/// again with it. The same merge preserves a feedback revision's original task authority.
 pub fn keep_checks(current: &[Routine], incoming: &mut [Routine], bots: &[Bot], this_device: &str) -> bool {
     let mut kept = false;
-    for routine in incoming.iter_mut().filter(|routine| routine.check.is_none()) {
+    for routine in incoming.iter_mut() {
         if !bots.iter().any(|bot| bot.id == routine.bot_id && bot.runner_id == this_device) {
             continue;
         }
-        if let Some(check) = current.iter().find(|held| held.id == routine.id).and_then(|held| held.check.clone()) {
-            routine.check = Some(check);
-            kept = true;
+        if let Some(held) = current.iter().find(|held| held.id == routine.id) {
+            if routine.check.is_none() && held.check.is_some() {
+                routine.check = held.check.clone();
+                kept = true;
+            }
+            if routine.feedback_authorization_prompt.is_none() && held.feedback_authorization_prompt.is_some() {
+                routine.feedback_authorization_prompt = held.feedback_authorization_prompt.clone();
+                kept = true;
+            }
         }
     }
     kept
@@ -235,6 +242,7 @@ pub fn finished(app: &Arc<App>, id: &str, outcome: TurnOutcome) {
 pub async fn run(app: Arc<App>) {
     loop {
         tokio::time::sleep(TICK).await;
+        crate::feedback::tick(&app);
         tick(&app);
     }
 }
@@ -716,6 +724,7 @@ mod tests {
             bot_id: bot_id.into(),
             name: id.into(),
             prompt: "x".into(),
+            feedback_authorization_prompt: None,
             schedule: "every 1h".into(),
             is_enabled: true,
             enabled_at: 0.0,

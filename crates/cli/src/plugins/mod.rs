@@ -568,13 +568,14 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
     }
     let dir = app.config.plugins_dir().join(&manifest.id);
     let skills = dir.join("skills");
+    let mut store = app.plugins.lock().unwrap();
+    let previous = store.get(&manifest.id).map(|p|p.manifest.skills.clone()).unwrap_or_default();
     std::fs::create_dir_all(&skills).map_err(|e| e.to_string())?;
     for skill in &manifest.skills {
         let path = skills.join(format!("{}.md", slug(&skill.name)));
-        std::fs::write(&path, skill.content.as_bytes()).map_err(|e| e.to_string())?;
+        write_skill_preserving_edits(&path, skill, &previous)?;
     }
     let status = {
-        let mut store = app.plugins.lock().unwrap();
         match store.installed.iter_mut().find(|p| p.manifest.id == manifest.id) {
             Some(existing) => {
                 existing.manifest = manifest.clone();
@@ -586,6 +587,7 @@ pub fn install(app: &Arc<App>, manifest: Manifest, source: &str) -> Result<Plugi
         store.save(&app.config).map_err(|e| e.to_string())?;
         store.status(&manifest.id).ok_or("installed but missing")?
     };
+    drop(store);
     #[cfg(feature = "runner")]
     {
         app.mcp.forget(&manifest.id);
@@ -798,6 +800,12 @@ pub fn refresh_installed(app: &Arc<App>, manifests: &[Manifest]) -> Vec<String> 
         for plugin in store.installed.iter_mut().filter(|p| p.source == "marketplace") {
             let Some(fresh) = manifests.iter().find(|m| m.id == plugin.manifest.id) else { continue };
             if *fresh != plugin.manifest {
+                let skills=app.config.plugins_dir().join(&fresh.id).join("skills");
+                for skill in &fresh.skills {
+                    if let Err(error)=write_skill_preserving_edits(&skills.join(format!("{}.md",slug(&skill.name))),skill,&plugin.manifest.skills) {
+                        tracing::warn!(%error,plugin=%fresh.id,"refreshing a skill");
+                    }
+                }
                 plugin.manifest = fresh.clone();
                 updated.push(fresh.id.clone());
             }
@@ -815,17 +823,18 @@ pub fn refresh_installed(app: &Arc<App>, manifests: &[Manifest]) -> Vec<String> 
     for id in &updated {
         #[cfg(feature = "runner")]
         app.mcp.forget(id);
-        let skills = app.config.plugins_dir().join(id).join("skills");
-        if let Some(manifest) = manifests.iter().find(|m| &m.id == id) {
-            let _ = std::fs::create_dir_all(&skills);
-            for skill in &manifest.skills {
-                let _ = std::fs::write(skills.join(format!("{}.md", slug(&skill.name))), skill.content.as_bytes());
-            }
-        }
         tracing::info!(plugin = %id, "refreshed the plugin's manifest from the marketplace");
     }
     announce(app);
     updated
+}
+
+/// Marketplace refreshes preserve user-reviewed skill text; an untouched note follows its manifest.
+fn write_skill_preserving_edits(path:&std::path::Path,skill:&SkillSpec,previous:&[SkillSpec])->Result<(),String> {
+    if let Ok(current)=std::fs::read_to_string(path) {
+        if previous.iter().find(|s|s.name==skill.name).is_none_or(|prior|prior.content!=current) { return Ok(()); }
+    }
+    config::write_private(path,skill.content.as_bytes()).map_err(|e|e.to_string())
 }
 
 // MARK: - Where a verb runs

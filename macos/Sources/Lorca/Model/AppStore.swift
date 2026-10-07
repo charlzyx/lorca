@@ -16,6 +16,7 @@ enum StoreEvent {
     case turnFinished(Chat.ID, Bot.ID, Date)
     /// A command in the chat has run long enough to count as a running task.
     case runningTasksChanged(Chat.ID)
+    case workflowFeedbackChanged(Bot.ID)
     case selectionChanged
     case connectionChanged
     case identityChanged
@@ -66,6 +67,7 @@ final class AppStore {
     private(set) var devices: [Device] = []
     private(set) var bots: [Bot] = []
     private(set) var chats: [Chat] = []
+    private(set) var workflowProposalCounts: [Bot.ID: Int] = [:]
     /// Every bot's routines, from the roster.
     private(set) var routines: [Routine] = []
     /// Auto-review, shared through the roster.
@@ -294,6 +296,13 @@ final class AppStore {
         switch name {
         case "snapshot":
             if let snapshot = decode(Wire.Snapshot.self) { apply(snapshot: snapshot) }
+
+        case "feedback.changed":
+            if let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let body = envelope["data"] as? [String: Any], let botID = body["bot_id"] as? String {
+                workflowProposalCounts[botID] = body["pending_count"] as? Int ?? 0
+                emit(.workflowFeedbackChanged(botID))
+            }
 
         case "roster.changed":
             guard let roster = decode(Wire.RosterChanged.self) else { return }
@@ -1079,6 +1088,21 @@ final class AppStore {
         perform("routines.delete", ["id": id])
     }
 
+    /// Workflow feedback and revisions stay on the assigned Runner; this app uses only its CLI.
+    func workflowFeedback(botID: Bot.ID, method: String = "feedback.list", params: [String: Any] = [:]) async throws -> [String: Any] {
+        if isMock {
+            if method == "feedback.list" { return ["feedback": [], "proposals": [], "revisions": [], "targets": [], "settings": [:]] }
+            throw CLIClient.RequestError(message: L("Feedback requires a connected Runner."))
+        }
+        var body = params
+        body["bot_id"] = botID
+        let data = try await client.request(method, body)
+        guard let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CLIClient.RequestError(message: L("Could not read workflow feedback."))
+        }
+        return result
+    }
+
     /// A bot's memory, read from its Runner. Answers with `here == false` when the bot runs on
     /// another Device, whose disk this computer cannot read.
     func botMemory(_ id: Bot.ID) async throws -> BotMemory {
@@ -1194,6 +1218,24 @@ final class AppStore {
             chats[index].hasMore = page.hasMore
             emit(.olderMessagesLoaded(id))
         }
+    }
+
+    /// Loads older pages for a feedback source, preserving the same page merge as the transcript.
+    func loadWorkflowOrigin(_ messageID: Message.ID, in id: Chat.ID) async throws -> Bool {
+        for _ in 0..<100 {
+            guard let chat = chat(id) else { return false }
+            if chat.messages.contains(where: { $0.id == messageID }) { return true }
+            guard !isMock, chat.hasMore, let first = chat.messages.first else { return false }
+            let page = try await client.request("chats.messages", ["chat_id": id, "before": first.id], as: Wire.MessagePage.self)
+            guard let index = chats.firstIndex(where: { $0.id == id }) else { return false }
+            if chats[index].messages.first?.id != first.id { continue }
+            let known = Set(chats[index].messages.map(\.id))
+            chats[index].messages.insert(contentsOf: page.messages.map { $0.toModel() }.filter { !known.contains($0.id) }, at: 0)
+            chats[index].hasMore = page.hasMore
+            emit(.olderMessagesLoaded(id))
+            if page.messages.isEmpty { return false }
+        }
+        return false
     }
 
     /// Full-text chat and message matches from the local SQLite index.
