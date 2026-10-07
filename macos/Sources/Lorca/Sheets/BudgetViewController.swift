@@ -150,7 +150,7 @@ final class BudgetViewController: SheetViewController {
                 KeyValueRow(key: L("Tokens / runtime"), value: "\(Format.tokens(usage.tokens)) · \(Int(usage.runtimeSecs)) s"),
                 KeyValueRow(key: L("Retries / connector calls"), value: "\(usage.retries) / \(usage.connectorCalls)"),
             ])
-            note.stringValue = budget.reason ?? L("Failed requests without reported usage use conservative estimates. Unknown prices need a token or runtime allowance; they are never treated as free.")
+            note.stringValue = budget.reason ?? L("Requests without reported usage use token and cost estimates. Unknown prices need a token or runtime allowance; they are never treated as free.")
             resume.isEnabled = canEdit && budget.state != "running" && target.kind != "chat"
             renew.isEnabled = resume.isEnabled
         } else {

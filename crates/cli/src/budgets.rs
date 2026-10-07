@@ -58,7 +58,7 @@ pub struct BudgetUsage {
     pub api_cost_usd: f64,
     pub subscription_estimate_usd: f64,
     pub unknown_price_calls: u64,
-    /// Failed/incomplete requests use input/received-output estimates; a restart retains
+    /// Requests without usage use input/received-output estimates; a restart retains
     /// outstanding reservations. These are estimates rather than a claim about the bill.
     pub estimated_calls: u64,
     pub model_calls: u64,

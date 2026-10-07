@@ -838,7 +838,7 @@
 "Calls per window" = "每个窗口的调用次数";
 "Concurrent calls" = "并发调用次数";
 "Connector calls" = "连接器调用次数";
-"Failed requests without reported usage use conservative estimates. Unknown prices need a token or runtime allowance; they are never treated as free." = "未报告用量的失败请求采用保守估算。定价未知时需要词元或运行时间限额，不会视为免费。";
+"Requests without reported usage use token and cost estimates. Unknown prices need a token or runtime allowance; they are never treated as free." = "未报告用量的请求采用词元和花费估算。定价未知时需要词元或运行时间限额，不会视为免费。";
 "Interrupted — resume explicitly" = "已中断 — 请主动恢复";
 "Limits are enforced on %@'s Runner. Leave a field empty for unlimited. Runtime includes checks, retries, review, and waiting." = "限额由 %@ 的运行端执行。留空表示无限制。运行时间包括检查、重试、审核和等待。";
 "No limits configured" = "未设置限额";

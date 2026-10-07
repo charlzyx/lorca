@@ -446,6 +446,9 @@ fn pricing(provider: &dyn Provider) -> Pricing {
 
 #[async_trait]
 impl Provider for BudgetProvider {
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        self.inner.default_max_output_tokens()
+    }
     fn provider_id(&self) -> &str {
         self.inner.provider_id()
     }
@@ -466,28 +469,29 @@ impl Provider for BudgetProvider {
     ) -> AssistantEventStream {
         let pricing = pricing(self.inner.as_ref());
         let chat_id = request.options.session_id.clone();
+        let input = lorca_agent::estimate::estimate_text_tokens(&request.system_prompt)
+            + request
+                .messages
+                .iter()
+                .map(|message| {
+                    lorca_agent::estimate::estimate_message_tokens(
+                        &lorca_agent::AgentMessage::from(message.clone()),
+                    ) + 8
+                })
+                .sum::<u64>()
+            + serde_json::to_vec(&request.tools)
+                .unwrap_or_default()
+                .len()
+                .div_ceil(4) as u64;
         let mut permit = None;
         if let Some(context) = &self.context {
             let prepared = (|| {
                 if *self.failed.lock().unwrap() {
                     context.retry()?;
                 }
-                let input = lorca_agent::estimate::estimate_text_tokens(&request.system_prompt)
-                    + request
-                        .messages
-                        .iter()
-                        .map(|message| {
-                            lorca_agent::estimate::estimate_message_tokens(
-                                &lorca_agent::AgentMessage::from(message.clone()),
-                            ) + 8
-                        })
-                        .sum::<u64>()
-                    + serde_json::to_vec(&request.tools)
-                        .unwrap_or_default()
-                        .len()
-                        .div_ceil(4) as u64;
                 let requested_output = request
                     .max_tokens
+                    .or_else(|| self.inner.default_max_output_tokens())
                     .or_else(|| self.model_info().map(|i| i.max_output))
                     .unwrap_or(8192)
                     .max(1);
@@ -507,7 +511,9 @@ impl Provider for BudgetProvider {
                     });
                 let (id, output, charge) =
                     context.reserve(input, requested_output, rates, pricing)?;
-                request.max_tokens = Some(output);
+                if request.max_tokens.is_some() || output < requested_output {
+                    request.max_tokens = Some(output);
+                }
                 let _ = charge;
                 Ok::<_, String>(Arc::new(ModelPermit {
                     context: context.clone(),
@@ -538,18 +544,20 @@ impl Provider for BudgetProvider {
         let stream = self.inner.stream(request, cancel).await;
         let app = self.app.clone();
         let failed = self.failed.clone();
+        let info = self.model_info();
         Box::pin(futures::stream::unfold(
-            (stream, permit, false),
-            move |(mut stream, permit, mut done)| {
+            (stream, permit, false, 0u64),
+            move |(mut stream, permit, mut done, mut output_chars)| {
                 let app = app.clone();
                 let failed = failed.clone();
                 let chat_id = chat_id.clone();
                 async move {
-                    let event = stream.next().await?;
-                    match &event {
+                    let mut event = stream.next().await?;
+                    match &mut event {
                         AssistantEvent::TextDelta { delta, .. }
                         | AssistantEvent::ThinkingDelta { delta, .. }
                         | AssistantEvent::ToolCallDelta { delta, .. } => {
+                            output_chars = output_chars.saturating_add(delta.len() as u64);
                             if let Some(permit) = &permit {
                                 permit.output_chars.fetch_add(
                                     delta.len() as u64,
@@ -558,8 +566,25 @@ impl Provider for BudgetProvider {
                             }
                         }
                         AssistantEvent::Done { usage, .. } if !done => {
+                            let reported = lorca_agent::estimate::context_tokens(usage) > 0;
+                            if !reported {
+                                *usage = match &permit {
+                                    Some(permit) => permit.usage_estimate(),
+                                    None => {
+                                        let mut estimated = lorca_agent::Usage::default();
+                                        estimated.input = input;
+                                        estimated.output = output_chars.div_ceil(4);
+                                        if pricing != Pricing::Unknown {
+                                            if let Some(info) = info {
+                                                estimated.cost = info.cost_of(&estimated);
+                                            }
+                                        }
+                                        estimated
+                                    }
+                                };
+                            }
                             if let Some(permit) = &permit {
-                                permit.finish(Some(usage));
+                                permit.finish(reported.then_some(usage));
                             }
                             if let Some(chat_id) = &chat_id {
                                 app.record_pricing(chat_id, pricing, usage.cost.total);
@@ -576,7 +601,7 @@ impl Provider for BudgetProvider {
                         }
                         _ => {}
                     }
-                    Some((event, (stream, permit, done)))
+                    Some((event, (stream, permit, done, output_chars)))
                 }
             },
         ))
@@ -595,22 +620,27 @@ struct ModelPermit {
 }
 
 impl ModelPermit {
+    fn usage_estimate(&self) -> lorca_agent::Usage {
+        let mut estimated = lorca_agent::Usage::default();
+        estimated.input = self.input;
+        estimated.output = self
+            .output_chars
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .div_ceil(4);
+        estimated.cost.total = self
+            .rates
+            .map(|(input, output)| {
+                (input * estimated.input as f64 + output * estimated.output as f64) / 1_000_000.0
+            })
+            .unwrap_or(0.0);
+        estimated
+    }
+
     fn finish(&self, usage: Option<&lorca_agent::Usage>) {
         if let Some(id) = self.id.lock().unwrap().take() {
-            let mut estimated = lorca_agent::Usage::default();
-            estimated.input = self.input;
-            estimated.output = self
-                .output_chars
-                .swap(0, std::sync::atomic::Ordering::Relaxed)
-                .div_ceil(4)
-                .min(self.output);
-            estimated.cost.total = self
-                .rates
-                .map(|(input, output)| {
-                    (input * estimated.input as f64 + output * estimated.output as f64)
-                        / 1_000_000.0
-                })
-                .unwrap_or(0.0);
+            let estimated = self.usage_estimate();
+            self.output_chars
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             if let Err(error) =
                 self.context
                     .settle_usage(&id, Some(usage.unwrap_or(&estimated)), usage.is_none())
@@ -1042,6 +1072,108 @@ mod tests {
                 chat.unknown_price_calls
             ),
             (0.01, 0.01, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn unlimited_allowances_preserve_the_adapters_implicit_output_default() {
+        let (scratch, job) = app();
+        let app = &scratch.0;
+        let context = for_job(app, &job).unwrap();
+        let cap = Arc::new(std::sync::atomic::AtomicU64::new(999));
+        context
+            .scope(async {
+                let provider = wrap_provider(
+                    app,
+                    Arc::new(Answer {
+                        id: "deepseek",
+                        usage: lorca_agent::Usage::default(),
+                        cap: cap.clone(),
+                    }),
+                );
+                let request = ModelRequest {
+                    system_prompt: String::new(),
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    cache_points: Vec::new(),
+                    max_tokens: None,
+                    options: lorca_agent::RequestOptions::default(),
+                };
+                provider
+                    .stream(request, CancellationToken::new())
+                    .await
+                    .collect::<Vec<_>>()
+                    .await;
+            })
+            .await;
+        assert_eq!(
+            cap.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a budget wrapper never substitutes the model maximum for the adapter's default"
+        );
+    }
+
+    struct Unreported;
+    #[async_trait]
+    impl Provider for Unreported {
+        fn provider_id(&self) -> &str {
+            "custom:unreported"
+        }
+        fn model_id(&self) -> &str {
+            "local"
+        }
+        async fn stream(&self, _: ModelRequest, _: CancellationToken) -> AssistantEventStream {
+            Box::pin(futures::stream::iter(vec![
+                AssistantEvent::TextDelta {
+                    index: 0,
+                    delta: "x".repeat(1600),
+                },
+                AssistantEvent::Done {
+                    stop_reason: lorca_agent::StopReason::Stop,
+                    usage: lorca_agent::Usage::default(),
+                },
+            ]))
+        }
+    }
+
+    #[tokio::test]
+    async fn providers_without_usage_still_consume_tokens_and_observed_output_is_not_clipped() {
+        let (scratch, job) = app();
+        let app = &scratch.0;
+        configure(app, &job, json!({"max_tokens":100}));
+        let context = for_job(app, &job).unwrap();
+        let events = context
+            .scope(async {
+                let provider = wrap_provider(app, Arc::new(Unreported));
+                let request = ModelRequest {
+                    system_prompt: String::new(),
+                    messages: Vec::new(),
+                    tools: Vec::new(),
+                    cache_points: Vec::new(),
+                    max_tokens: None,
+                    options: lorca_agent::RequestOptions::default().with_session_id(&job.chat_id),
+                };
+                provider
+                    .stream(request, CancellationToken::new())
+                    .await
+                    .collect::<Vec<_>>()
+                    .await
+            })
+            .await;
+        let held = view(app, "job", &job.id);
+        assert!(held.usage.tokens >= 400);
+        assert_eq!(held.usage.estimated_calls, 1);
+        assert_eq!(held.state, "budget_exhausted");
+        assert!(events.iter().any(
+            |event| matches!(event, AssistantEvent::Done { usage, .. } if usage.output == 400)
+        ));
+        assert_eq!(
+            app.chat(&job.chat_id)
+                .unwrap()
+                .usage
+                .unwrap()
+                .unknown_price_calls,
+            1
         );
     }
 }

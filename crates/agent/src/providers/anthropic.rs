@@ -622,6 +622,10 @@ fn server_tool_summary(name: &str, detail: &str, result: &Value) -> String {
 
 #[async_trait]
 impl Provider for AnthropicProvider {
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        let cap = self.thinking_fields(self.max_tokens).2;
+        Some(self.info.map(|info| info.max_output).filter(|limit| *limit > 0).map(|limit| cap.min(limit)).unwrap_or(cap))
+    }
     fn provider_id(&self) -> &str {
         &self.provider_id
     }
