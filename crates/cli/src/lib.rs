@@ -18,6 +18,7 @@ pub mod local_review;
 pub mod marketplace;
 pub mod memory;
 pub mod model;
+pub mod outputs;
 pub mod pairing;
 pub mod plugins;
 #[cfg(feature = "provider-auth")]

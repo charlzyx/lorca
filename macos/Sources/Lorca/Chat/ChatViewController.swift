@@ -883,7 +883,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     AttachmentsView.Item(
                         attachment: attachment,
                         url: store.localURL(for: attachment, in: chatID, messageID: message.id),
-                        frame: frame)
+                        frame: frame,
+                        error: store.attachmentError(for: attachment),
+                        onRetry: { [weak self] in self?.store.retryAttachment(attachment, in: chatID, messageID: message.id) })
                 }
                 messageCell.configure(
                     message: message,

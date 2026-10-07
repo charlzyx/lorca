@@ -311,11 +311,35 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }
+        "outputs.list" => {
+            let chat_id = string(&params, "chat_id")?;
+            let task_id = opt_string(&params, "task_id");
+            let messages = crate::outputs::list(app, &chat_id, task_id.as_deref())?;
+            Ok(json!({ "outputs": messages.into_iter().map(|message| message.for_app()).collect::<Vec<_>>(), "has_more": app.history_is_partial(&chat_id) }))
+        }
+        #[cfg(feature = "runner")]
+        "outputs.publish" => {
+            let chat_id = string(&params, "chat_id")?;
+            let bot_id = string(&params, "bot_id")?;
+            let bot = app.bot(&bot_id).ok_or("Unknown producing bot")?;
+            let workdir = bot.working_directory(&app.config.home);
+            let mut payload = params;
+            payload.as_object_mut().ok_or("Output parameters must be an object")?.remove("chat_id");
+            payload.as_object_mut().unwrap().remove("bot_id");
+            let request = serde_json::from_value(payload).map_err(|error| format!("Invalid output: {error}"))?;
+            let app = app.clone();
+            let message = tokio::task::spawn_blocking(move || crate::outputs::publish(&app, &chat_id, &bot_id, &workdir, request)).await
+                .map_err(|error| error.to_string())??;
+            Ok(json!({ "message": message.for_app(), "task_evidence": message.output.as_ref().map(|output| output.task_evidence(&message.id)) }))
+        }
         "files.path" => {
             // Where the attachment's bytes are on this machine, fetched from the relay first
             // when another Device sent it.
             let attachment: Attachment = serde_json::from_value(params["attachment"].clone()).map_err(|e| e.to_string())?;
-            let path = crate::files::ensure_local(app, &attachment).await.map_err(|e| e.to_string())?;
+            let mut path = crate::files::ensure_local(app, &attachment).await.map_err(|e| e.to_string())?;
+            if params["named"].as_bool() == Some(true) {
+                path = crate::files::named_local_path(app, &attachment).map_err(|e| e.to_string())?;
+            }
             Ok(json!({ "path": path }))
         }
         "chats.stop" => {

@@ -161,6 +161,8 @@ pub struct App {
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
     message_order: Mutex<()>,
+    /// Serializes output version checks and publication on the producing Runner.
+    pub(crate) output_publication: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -276,6 +278,7 @@ impl App {
             outbox_notify: Notify::new(),
             sync_wakes: AtomicU64::new(0),
             message_order: Mutex::new(()),
+            output_publication: Mutex::new(()),
             relay_connected: AtomicBool::new(false),
             relay_update_required: AtomicBool::new(false),
             relay_problem: Mutex::new(None),

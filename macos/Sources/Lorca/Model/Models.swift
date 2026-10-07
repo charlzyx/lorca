@@ -900,6 +900,52 @@ struct Attachment: Hashable, Identifiable {
     }
 }
 
+/// One immutable published output version. The message id identifies the version and `id`
+/// identifies its series. Evidence reports what the producing bot verified.
+struct TaskOutput: Hashable, Decodable {
+    var id: String
+    var name: String
+    var mime: String
+    var botId: String
+    var chatId: String
+    var taskId: String?
+    var version: Int
+    var previousMessageId: String?
+    var url: String?
+    var evidence: Evidence?
+
+    struct Evidence: Hashable, Decodable {
+        var kind: String
+        var summary: String
+        var status: String
+        var command: String?
+        var exitCode: Int?
+
+        var title: String {
+            switch kind {
+            case "test_result": L("Test result")
+            case "before_screenshot": L("Before screenshot")
+            case "after_screenshot": L("After screenshot")
+            default: L("Verification")
+            }
+        }
+
+        var statusText: String {
+            switch status {
+            case "passed": L("Passed")
+            case "failed": L("Failed")
+            default: L("Unverified")
+            }
+        }
+    }
+
+    var documentURL: URL? {
+        guard let url, let parsed = URL(string: url), parsed.scheme == "https", parsed.host != nil,
+            parsed.user == nil, parsed.password == nil else { return nil }
+        return parsed
+    }
+}
+
 struct Message: Identifiable, Hashable {
     enum Author: Hashable {
         case you
@@ -940,6 +986,7 @@ struct Message: Identifiable, Hashable {
     var replyTo: ReplyQuote?
     /// A message of the user's the bot's turn holds for its next step; Send now has it read now.
     var queued = false
+    var output: TaskOutput?
 
     init(
         id: String = "msg-\(UUID().uuidString.lowercased())",
@@ -948,7 +995,8 @@ struct Message: Identifiable, Hashable {
         state: State = .complete,
         createdAt: Date = Date(),
         attachments: [Attachment] = [],
-        replyTo: ReplyQuote? = nil
+        replyTo: ReplyQuote? = nil,
+        output: TaskOutput? = nil
     ) {
         self.id = id
         self.author = author
@@ -957,6 +1005,7 @@ struct Message: Identifiable, Hashable {
         self.createdAt = createdAt
         self.attachments = attachments
         self.replyTo = replyTo
+        self.output = output
     }
 
     /// A finished text message, the user's or a bot's, which a reply can answer.

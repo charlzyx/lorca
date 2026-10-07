@@ -89,6 +89,9 @@ final class AttachmentTile: NSView {
     private let name = Build.label("", font: .systemFont(ofSize: 12.5, weight: .medium))
     private let detail = Build.label("", font: Theme.Font.caption)
     private var url: URL?
+    private var attachmentName = ""
+    private var onRetry: (() -> Void)?
+    private(set) var availabilityText = ""
 
     override var isFlipped: Bool { true }
 
@@ -111,17 +114,21 @@ final class AttachmentTile: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
-    func configure(_ attachment: Attachment, url: URL?, onUserBubble: Bool) {
+    func configure(_ attachment: Attachment, url: URL?, onUserBubble: Bool, error: String? = nil, onRetry: (() -> Void)? = nil) {
         self.url = url
-        toolTip = url == nil ? L("%@ · fetching…", attachment.name) : attachment.name
+        self.attachmentName = attachment.name
+        self.onRetry = onRetry
+        availabilityText = error != nil ? L("File unavailable · Retry") : (url == nil ? L("Fetching…") : Attachment.sizeText(attachment.size))
+        toolTip = error.map { L("%@ · unavailable: %@", attachment.name, $0) } ?? (url == nil ? L("%@ · fetching…", attachment.name) : attachment.name)
         let foreground: NSColor = onUserBubble ? Theme.userBubbleText : .labelColor
         let fill = onUserBubble ? NSColor.white.withAlphaComponent(0.16) : NSColor.labelColor.withAlphaComponent(0.06)
-        if attachment.isImage {
+        let thumbnail = attachment.isImage && error == nil
+            ? url.flatMap { Thumbnails.image(at: $0, maxPixels: Int(AttachmentLayout.imageMax * 2)) } : nil
+        if let thumbnail {
             card.isHidden = true
             image.isHidden = false
-            image.image = url.flatMap { Thumbnails.image(at: $0, maxPixels: Int(AttachmentLayout.imageMax * 2)) }
-            // A quiet box until the bytes are here.
-            layer?.backgroundColor = image.image == nil ? fill.cgColor : nil
+            image.image = thumbnail
+            layer?.backgroundColor = nil
         } else {
             card.isHidden = false
             image.isHidden = true
@@ -131,10 +138,11 @@ final class AttachmentTile: NSView {
             icon.image = Glyph.symbol("doc.fill", pointSize: 18, color: foreground)
             name.stringValue = attachment.name
             name.textColor = foreground
-            detail.stringValue = Attachment.sizeText(attachment.size)
+            detail.stringValue = availabilityText
             detail.textColor = foreground.withAlphaComponent(0.7)
         }
-        setAccessibilityLabel(attachment.name)
+        setAccessibilityLabel("\(attachment.name) · \(availabilityText)")
+        setAccessibilityRole(.button)
     }
 
     override func layout() {
@@ -142,13 +150,36 @@ final class AttachmentTile: NSView {
         image.frame = bounds
         card.frame = bounds
         icon.frame = NSRect(x: 10, y: (bounds.height - 22) / 2, width: 22, height: 22)
-        name.frame = NSRect(x: 40, y: 7, width: max(0, bounds.width - 48), height: 17)
-        detail.frame = NSRect(x: 40, y: 25, width: max(0, bounds.width - 48), height: 14)
+        name.frame = NSRect(x: 40, y: bounds.height - 24, width: max(0, bounds.width - 48), height: 17)
+        detail.frame = NSRect(x: 40, y: bounds.height - 39, width: max(0, bounds.width - 48), height: 14)
     }
 
     @objc private func open() {
-        if let url { NSWorkspace.shared.open(url) }
+        if let url { OutputFileActions.preview(url) } else { onRetry?() }
     }
+
+    override func accessibilityPerformPress() -> Bool {
+        open()
+        return url != nil || onRetry != nil
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = NSMenu()
+        let actions: [(String, Selector)] = url == nil
+            ? [(L("Retry"), #selector(retry))]
+            : [(L("Preview"), #selector(open)), (L("Open"), #selector(openFile)), (L("Save As…"), #selector(saveFile))]
+        for (title, action) in actions {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = url != nil || onRetry != nil
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func retry() { onRetry?() }
+    @objc private func openFile() { if let url { NSWorkspace.shared.open(url) } }
+    @objc private func saveFile() { if let url { OutputFileActions.save(url, name: attachmentName, window: window) } }
 }
 
 /// The attachments block inside a bubble, framed by `AttachmentLayout`.
@@ -157,6 +188,8 @@ final class AttachmentsView: NSView {
         var attachment: Attachment
         var url: URL?
         var frame: NSRect
+        var error: String? = nil
+        var onRetry: (() -> Void)? = nil
     }
 
     private var items: [Item] = []
@@ -183,7 +216,7 @@ final class AttachmentsView: NSView {
             tiles.removeLast().removeFromSuperview()
         }
         for (index, item) in items.enumerated() {
-            tiles[index].configure(item.attachment, url: item.url, onUserBubble: onUserBubble)
+            tiles[index].configure(item.attachment, url: item.url, onUserBubble: onUserBubble, error: item.error, onRetry: item.onRetry)
         }
         needsLayout = true
     }

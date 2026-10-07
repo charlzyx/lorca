@@ -115,6 +115,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         .rev()
         .filter_map(|m| match (&m.author, &m.body) {
             (Author::You, Body::Text { attachments, .. }) => Some(attachments.clone()),
+            (_, Body::Text { attachments, .. }) if m.output.is_some() => Some(attachments.clone()),
             _ => None,
         })
         .flatten()
@@ -139,6 +140,7 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(CreateBot { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
         Arc::new(EditBot { app: app.clone(), bot: bot.clone() }),
         Arc::new(Routines { app: app.clone(), bot: bot.clone() }),
+        Arc::new(crate::outputs::PublishOutputTool { app: app.clone(), chat_id: chat.meta.id.clone(), bot_id: bot.id.clone(), workdir: workdir.clone() }),
         Arc::new(SearchPlugins { app: app.clone() }),
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
@@ -1432,11 +1434,11 @@ fn script_summary(plugins: &[String], failed: bool) -> String {
     }
 }
 
-/// What codemode scripts call besides plugin tools: the bot's own file and memory tools. `bash`
+/// What codemode scripts call besides plugin tools: the bot's own file, memory and output tools. `bash`
 /// is the scripts' own (`shell::script_bash`); the tools that hand work to teammates, change
 /// bots or routines, or install and sign in to plugins stay calls of their own, as `bash_input`
 /// and `bash_output` do.
-const SCRIPTABLE_TOOLS: [&str; 9] = ["read", "write", "edit", "grep", "find", "ls", "memory_update", "memory_log", "recall"];
+const SCRIPTABLE_TOOLS: [&str; 10] = ["read", "write", "edit", "grep", "find", "ls", "memory_update", "memory_log", "recall", "publish_output"];
 
 /// What a script's `bash` does differently from the bot's own.
 const SCRIPT_GUIDANCE: &str = "In a script, `bash` runs one command at a time, on pipes with nothing on stdin: a command that asks \
@@ -1531,6 +1533,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
     prompt.push_str(&routines_prompt(app, bot));
     prompt.push_str(&plugins_prompt(app, bot, plugins));
     prompt.push_str(&memory_prompt(store));
+    prompt.push_str("\nPublish deliverables with publish_output so the user can retrieve them on paired Devices. Attach test results and, for visual changes, before/after screenshots as evidence. Report failures and what remains unverified; publishing evidence does not complete a task. Creating or uploading to an external service uses its reviewed tools.\n");
 
     prompt.push_str(
         "\nWrite like a teammate in a chat app: short and direct, usually one to three sentences, and one line when one \
@@ -1811,6 +1814,14 @@ fn transcript_bounded(app: &App, chat: &Chat, bot: &Bot, workdir: &std::path::Pa
         }
         let timestamp = (message.promoted_at.unwrap_or(message.created_at) * 1000.0) as u64;
         match (&message.author, &message.body) {
+            (Author::Bot { bot_id }, Body::Text { text, attachments, .. }) if message.output.is_some() => {
+                let output = message.output.as_ref().unwrap();
+                let mut content = vec![ContentPart::text(format!("[Published output {} v{} by {}; message_id: {}]\n{text}", output.id, output.version, name_of(app, bot_id), message.id))];
+                for attachment in attachments {
+                    content.extend(crate::files::content_parts(app, attachment, workdir, pixels));
+                }
+                out.push(AgentMessage::User(UserMessage { content, timestamp }));
+            }
             (Author::You, Body::Text { text, attachments, mentions, reply_to }) if attachments.is_empty() => {
                 out.push(user(&user_words(app, bot, text, mentions, reply_to.as_ref()), timestamp))
             }
@@ -3102,6 +3113,31 @@ mod tests {
         assert!(blocked.contains("Only memory_update and memory_log run during housekeeping"), "{blocked}");
         assert!(!scratch.1.join("work").join("build").exists());
         assert!(store.load_index().text.contains("The user ships on Fridays."));
+    }
+
+    #[test]
+    fn published_output_files_remain_inspectable_in_later_turn_context() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, None).unwrap();
+        let bot = app.state.lock().unwrap().bots[0].clone();
+        let chat = app.state.lock().unwrap().chats[0].clone();
+        let workdir = bot.working_directory(&app.config.home);
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::write(workdir.join("tests.log"), "all tests passed").unwrap();
+        let output = crate::outputs::publish(app, &chat.meta.id, &bot.id, &workdir, crate::outputs::PublishOutput {
+            name: "Tests.log".into(), path: Some("tests.log".into()), ..Default::default()
+        }).unwrap();
+        let transcript = transcript_for(app, &chat, &bot, &workdir);
+        let words = transcript.iter().filter_map(|message| match message {
+            AgentMessage::User(message) => Some(message.content.iter().filter_map(ContentPart::as_text).collect::<Vec<_>>().join("\n")),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(words.contains(&output.id), "the immutable version reference is in context");
+        assert!(words.contains("[Attached: Tests.log"), "the file is named where the next turn can inspect it");
+        let Body::Text { attachments, .. } = &output.body else { panic!() };
+        let materialized = crate::files::materialize(app, &attachments[0], &workdir).unwrap();
+        assert_eq!(std::fs::read_to_string(materialized).unwrap(), "all tests passed");
     }
 
     #[test]

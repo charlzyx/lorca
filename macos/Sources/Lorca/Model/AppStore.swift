@@ -1395,23 +1395,41 @@ final class AppStore {
     /// sent from another Device is fetched through the CLI, and the message reloads when it lands.
     private var attachmentURLs: [Attachment.ID: URL] = [:]
     private var fetchingAttachments: Set<Attachment.ID> = []
+    private var attachmentErrors: [Attachment.ID: String] = [:]
+
+    func attachmentError(for attachment: Attachment) -> String? { attachmentErrors[attachment.id] }
+
+    func retryAttachment(_ attachment: Attachment, in chatID: Chat.ID, messageID: Message.ID) {
+        guard !fetchingAttachments.contains(attachment.id) else { return }
+        attachmentErrors[attachment.id] = nil
+        attachmentURLs[attachment.id] = nil
+        _ = localURL(for: attachment, in: chatID, messageID: messageID)
+        emit(.messageChanged(chatID, messageID))
+    }
+
+    func outputMessages(in chatID: Chat.ID) async throws -> (messages: [Message], hasMore: Bool) {
+        if isMock { return (chat(chatID)?.messages.filter { $0.output != nil } ?? [], false) }
+        let reply = try await client.request("outputs.list", ["chat_id": chatID], as: Wire.OutputList.self)
+        return (reply.outputs.map { $0.toModel() }, reply.hasMore)
+    }
 
     func localURL(for attachment: Attachment, in chatID: Chat.ID, messageID: Message.ID) -> URL? {
-        if let url = attachmentURLs[attachment.id] { return url }
-        guard !isMock, !fetchingAttachments.contains(attachment.id) else { return nil }
+        if let url = attachmentURLs[attachment.id], FileManager.default.fileExists(atPath: url.path) { return url }
+        guard !isMock, !fetchingAttachments.contains(attachment.id), attachmentErrors[attachment.id] == nil else { return nil }
         fetchingAttachments.insert(attachment.id)
         Task { [weak self] in
             let params: [String: Any] = [
-                "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size]
+                "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size], "named": true
             ]
             guard let self else { return }
+            defer { fetchingAttachments.remove(attachment.id) }
             do {
                 let reply = try await client.request("files.path", params, as: Wire.FilePath.self)
                 attachmentURLs[attachment.id] = URL(fileURLWithPath: reply.path)
                 emit(.messageChanged(chatID, messageID))
             } catch {
-                // Left in the fetching set: the relay does not have it, and every scroll would
-                // ask again. A relaunch retries.
+                attachmentErrors[attachment.id] = error.localizedDescription
+                emit(.messageChanged(chatID, messageID))
                 NSLog("fetching \(attachment.name) failed: \(error.localizedDescription)")
             }
         }

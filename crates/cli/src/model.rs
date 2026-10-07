@@ -467,6 +467,9 @@ pub struct Message {
     /// step's reply and tools are done, or at once when the user asks (`chats.send_now`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// A published deliverable or verification artifact; each version is a separate message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::outputs::Output>,
 }
 
 /// How much of a tool call's detail the apps get: enough for the "Messaged ◉ X" marker.
@@ -513,6 +516,7 @@ impl Message {
             created_at: crate::config::now_secs(),
             promoted_at: None,
             queued: false,
+            output: None,
         }
     }
 
