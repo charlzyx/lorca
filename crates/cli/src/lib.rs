@@ -10,6 +10,7 @@ pub mod config;
 pub mod credentials;
 pub mod crypto;
 pub mod events;
+pub mod event_triggers;
 pub mod files;
 pub mod identity;
 pub mod keys;

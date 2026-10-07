@@ -15,6 +15,8 @@ Team tools (the CLI):
 
 Plugin tools (`<plugin>__<tool>`, such as `github__create_issue`) come from the MCP servers of the plugins installed on the bot's Runner. A bot calls them from codemode scripts; the model never gets them as tools of its own, so the tool list is the same for the whole turn, and from one turn to the next.
 
+[Event-triggered work](event-triggers.md#durable-ordering-and-execution) uses these same tools and unattended review. Auto-review reads the owner's configured subscription task and the turn's steps. Service payloads are a separate untrusted data cue and supply no authorization or permission grants. An event action that needs a user's answer is refused as it is in a routine turn.
+
 Coding tools (`lorca_agent::tools`, ports of pi’s built-ins, same schemas and truncation rules: 2000 lines / 50KB, whichever first):
 
 - `read { path, offset?, limit? }`, `write { path, content }`, `edit { path, edits: [{ oldText, newText }] }`

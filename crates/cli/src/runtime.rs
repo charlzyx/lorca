@@ -580,8 +580,19 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) 
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
         let outcome = run_job_started(&app, job.clone(), cancel).await;
-        if let Some(id) = &job.routine_id {
-            crate::routines::finished(&app, id, outcome);
+        #[cfg(feature = "runner")]
+        let record_outcome = if job.kind == "event" {
+            crate::event_triggers::finished(&app, &job, outcome).unwrap_or_else(|error| {
+                tracing::error!(%error, "recording the event turn outcome");
+                false
+            })
+        } else { true };
+        #[cfg(not(feature = "runner"))]
+        let record_outcome = true;
+        if record_outcome {
+            if let Some(id) = &job.routine_id {
+                crate::routines::finished(&app, id, outcome);
+            }
         }
         if let Some(id) = remote_blob_id {
             crate::sync::delete_remote_blob(&app, &id).await;

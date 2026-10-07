@@ -4,6 +4,8 @@
 
 Commands:
 
+`lorca events list/add/edit/pause/resume/reconnect/route/remove/retry/discard/forward` configures Runner event subscriptions and inspects health or encrypted gateway delivery. [Event triggers](event-triggers.md) describes its configuration and gateway commands. Subscription and inbox state in `lorca.sqlite3` is account-key encrypted; service plaintext reaches only the gateway and assigned Runner.
+
 - `lorca serve` — the app connects here; `lorca` alone lists the commands and starts nothing, so a bot's `lorca` never starts a second service
 - `lorca identity new` / `identity restore <phrase>` / `identity show`
 - `lorca pair` — show a pairing string and wait; `lorca pair <string>` joins

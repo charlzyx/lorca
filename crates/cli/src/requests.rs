@@ -97,6 +97,14 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        verb if verb.starts_with("events.") => {
+            if verb == "events.ingest" {
+                let event = serde_json::from_value(body["envelope"].clone()).map_err(|e| e.to_string())?;
+                crate::event_triggers::receive(app, event).map_err(|e| e.to_string())
+            } else {
+                crate::event_triggers::serve(app, verb, body).map_err(|e| e.to_string())
+            }
+        }
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),
         "memory.write" => {
             let text = body["text"].as_str().ok_or("missing text")?;

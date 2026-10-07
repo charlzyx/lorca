@@ -1916,6 +1916,7 @@ dependencies = [
  "flate2",
  "futures",
  "hkdf",
+ "hmac 0.12.1",
  "if-addrs",
  "image",
  "libc",
