@@ -210,10 +210,11 @@ async fn an_unattended_plugin_proposal_executes_the_edited_version_on_its_exact_
         first_seen.lock().unwrap().is_empty(),
         "a same-name tool on another server never runs"
     );
-    assert_eq!(
-        *second_seen.lock().unwrap(),
-        vec![json!({ "name": "send", "arguments": { "body": "edited draft" } })]
-    );
+    let calls = second_seen.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["name"], "send");
+    assert_eq!(calls[0]["arguments"], json!({ "body": "edited draft" }));
+    drop(calls);
     assert_eq!(
         queue::get(&app, &item.id).unwrap().state,
         ReviewState::Succeeded
