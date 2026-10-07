@@ -198,7 +198,8 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 
 	// One line beside the controls unless the text needs more room: a newline, a wrap, or files.
 	expanded := len(s.attachments) > 0 || s.reply != nil || strings.Contains(s.draft, "\n")
-	outer := ui.Column(c).Absolute().Left(0).Right(0).Bottom(0).Padding(8, 20, 14, 20).PassThrough()
+	// Keyed, so its state and size stay its own as the button to the latest comes and goes before it.
+	outer := ui.Column(c).Key("composer").Absolute().Left(0).Right(0).Bottom(0).Padding(8, 20, 14, 20).PassThrough()
 	var field *ui.Element
 	outer.Children(func() {
 		field = ui.Grid(c).ColumnTracks(ui.Fixed(28), ui.Fr(1), ui.FitContent()).GapX(8).MinHeight(46).Padding(8).
