@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/egoist/lorca/desktop/l10n"
@@ -322,4 +323,26 @@ func TestOnboardingChinese(t *testing.T) {
 	o.show(onboardingDone)
 	onboardingSettle(tt)
 	onboardingRender(t, tt, "zh-done")
+}
+
+// A drag runs across the phrase's words, and Copy takes them without their numbers.
+func TestOnboardingPhraseSelects(t *testing.T) {
+	o, tt := onboardingDemo(t)
+	tt.Key(0, ui.KeyEnter)
+	onboardingSettle(tt)
+	if o.step != onboardingCreate {
+		t.Fatalf("step %d", o.step)
+	}
+	first, ok := tt.Find(o.phrase[0])
+	last, ok2 := tt.Find(o.phrase[5])
+	if !ok || !ok2 {
+		t.Fatalf("no words: %q", tt.Texts())
+	}
+	tt.Press(first.X+1, first.Y+first.H/2)
+	tt.Move(last.X+last.W/2, last.Y+last.H/2)
+	tt.Release(last.X+last.W-1, last.Y+last.H/2)
+	tt.Key(ui.Cmd, ui.KeyC)
+	if got, want := tt.Clipboard(), strings.Join(o.phrase[:6], "\n"); got != want {
+		t.Errorf("copied %q, want %q", got, want)
+	}
 }

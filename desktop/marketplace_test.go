@@ -1,8 +1,10 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/egoist/lorca/desktop/model"
 	"github.com/egoist/mygo/ui"
 )
 
@@ -194,5 +196,41 @@ func TestMarketplaceEscape(t *testing.T) {
 	m.presentMarketplace("")
 	if len(m.sheets) != 1 {
 		t.Errorf("sheets %d, want 1", len(m.sheets))
+	}
+}
+
+// A drag from a bot's first routine prompt to the note below copies the prompts, without the
+// names, schedules, or note.
+func TestMarketplaceBotPartSelects(t *testing.T) {
+	_, tt := marketplaceTester(t, true)
+	marketClick(t, tt, issueTriager)
+	marketClick(t, tt, L("Routines"))
+	var template model.BotTemplate
+	store.Marketplace(func(index model.Marketplace, err error) {
+		for _, bot := range index.Bots {
+			if bot.Summary == issueTriager {
+				template = bot
+			}
+		}
+	})
+	runPosts()
+	if len(template.Routines) == 0 {
+		t.Fatal("Issue Triager has no routines")
+	}
+	first, ok := tt.Find(template.Routines[0].Prompt)
+	note, ok2 := tt.Find(L("They start paused. %@ asks whether to turn them on.", template.Name))
+	if !ok || !ok2 {
+		t.Fatalf("no routine or note: %q", tt.Texts())
+	}
+	tt.Press(first.X+1, first.Y+first.H/2)
+	tt.Move(note.X+note.W/2, note.Y+note.H/2)
+	tt.Release(note.X+note.W-1, note.Y+note.H/2)
+	tt.Key(ui.Cmd, ui.KeyC)
+	var prompts []string
+	for _, routine := range template.Routines {
+		prompts = append(prompts, routine.Prompt)
+	}
+	if got, want := tt.Clipboard(), strings.Join(prompts, "\n"); got != want {
+		t.Errorf("copied %q, want %q", got, want)
 	}
 }

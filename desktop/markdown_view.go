@@ -13,7 +13,8 @@ import (
 // Message Markdown on screen, after the macOS app's MarkdownRenderer: every block a blank line's
 // worth from the next (a code box sits closer), list items two points apart, a bar for quotes, a
 // grid for a table (inside a list or quote its rows as lines, cells three spaces apart), and a
-// rule as a line of box-drawing characters. Each paragraph can be selected and copied.
+// rule as a line of box-drawing characters. A message is one selection: a drag runs across its
+// paragraphs, lists, and code, and Copy joins them a line apart.
 
 const (
 	paragraphGap = 24
@@ -52,7 +53,7 @@ func markdownView(c *ui.Context, text string, o markdownOptions) *ui.Element {
 		o.Size = textMessage
 	}
 	blocks := model.MarkdownBlocks(text)
-	body := ui.Column(c).MinWidth(0).FontSize(o.Size).LineHeight(1.38)
+	body := ui.Column(c).Selectable().MinWidth(0).FontSize(o.Size).LineHeight(1.38)
 	body.Children(func() { markdownBlocks(c, blocks, o, false) })
 	return body
 }
@@ -74,10 +75,10 @@ func markdownBlocks(c *ui.Context, blocks []model.Block, o markdownOptions, nest
 	}
 }
 
-// spansView builds a paragraph of spans, its links clickable, the whole of it selectable.
+// spansView builds a paragraph of spans, its links clickable.
 func spansView(c *ui.Context, spans []model.Span, o markdownOptions, bold bool) *ui.Element {
 	p := colors(c)
-	para := ui.RichText(c).Selectable().MinWidth(0)
+	para := ui.RichText(c).MinWidth(0)
 	para.Children(func() {
 		for _, span := range spans {
 			t := ui.Text(c, span.Text)
@@ -151,7 +152,7 @@ func markdownBlock(c *ui.Context, block model.Block, o markdownOptions, nested b
 			if text == "" {
 				text = " "
 			}
-			ui.Text(c, text).Font(monoFont).FontSize(12).LineHeight(1.42).Selectable()
+			ui.Text(c, text).Font(monoFont).FontSize(12).LineHeight(1.42)
 		})
 		return code
 	case model.BlockList:
@@ -159,7 +160,8 @@ func markdownBlock(c *ui.Context, block model.Block, o markdownOptions, nested b
 		list.Children(func() {
 			for i, item := range block.Items {
 				ui.Row(c).AlignItems(ui.Start).MinWidth(0).Children(func() {
-					ui.Text(c, taskMarker(block.Ordered, block.Start+i, item.Checked)).MinWidth(18).Padding(0, 4, 0, 0).NoWrap()
+					// The marker stays out of the selection, so a copied list is its items' text.
+					ui.Text(c, taskMarker(block.Ordered, block.Start+i, item.Checked)).MinWidth(18).Padding(0, 4, 0, 0).NoWrap().Unselectable()
 					ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Children(func() {
 						markdownBlocks(c, item.Blocks, o, true)
 					})

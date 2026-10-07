@@ -527,12 +527,13 @@ func (o *onboardingWindow) createStep(c *ui.Context) *onboardingButton {
 		next:     next,
 	}, func() {
 		ui.Column(c).AlignItems(ui.Start).Gap(16).Children(func() {
-			ui.Grid(c).ColumnTracks(ui.Fixed(128), ui.Fixed(128), ui.Fixed(128), ui.Fixed(128)).Gap(8).Children(func() {
+			// The words are one selection, which a drag runs across instead of moving the window;
+			// their numbers stay out of it.
+			ui.Grid(c).Selectable().ColumnTracks(ui.Fixed(128), ui.Fixed(128), ui.Fixed(128), ui.Fixed(128)).Gap(8).Children(func() {
 				for i, word := range o.phrase {
 					ui.Row(c).Height(34).Gap(2).Padding(0, 0, 0, 9).Radius(7).Background(p.Code).Children(func() {
-						ui.Text(c, strconv.Itoa(i+1)).Width(16).FontSize(10).TextColor(p.Label3).FontFeatures("tnum").SingleLine()
-						// The words select instead of dragging the window.
-						ui.Text(c, word).Font(monoFont).FontSize(13).FontWeight(500).SingleLine().Selectable()
+						ui.Text(c, strconv.Itoa(i+1)).Width(16).FontSize(10).TextColor(p.Label3).FontFeatures("tnum").SingleLine().Unselectable()
+						ui.Text(c, word).Font(monoFont).FontSize(13).FontWeight(500).SingleLine()
 					})
 				}
 			})

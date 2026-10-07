@@ -518,6 +518,10 @@ func (mk *marketplace) botPage(c *ui.Context, page *marketPage) {
 			if selected == marketPlugins {
 				panel.Gap(4)
 			}
+			if selected != marketPlugins {
+				// The part's words are one selection: a drag runs across its facts or prompts.
+				panel.Selectable()
+			}
 			panel.Children(func() { mk.botPanel(c, template, selected) })
 		})
 	})
@@ -528,20 +532,20 @@ func (mk *marketplace) botPanel(c *ui.Context, template *model.BotTemplate, part
 	p := colors(c)
 	switch part {
 	case marketInstructions:
-		marketParagraph(c, template.Description, p.Label).Selectable()
+		marketParagraph(c, template.Description, p.Label)
 	case marketMemories:
 		for _, fact := range template.Memory {
-			marketParagraph(c, fact, p.Label).Selectable()
+			marketParagraph(c, fact, p.Label)
 		}
 	case marketRoutines:
 		for _, routine := range template.Routines {
 			ui.Column(c).Gap(3).Children(func() {
-				ui.Text(c, routine.Name).FontSize(13).FontWeight(600)
-				ui.Text(c, model.Schedule(routine.ScheduleText)).FontSize(12).TextColor(p.Label2)
-				marketParagraph(c, routine.Prompt, p.Label2).Selectable()
+				ui.Text(c, routine.Name).FontSize(13).FontWeight(600).Unselectable()
+				ui.Text(c, model.Schedule(routine.ScheduleText)).FontSize(12).TextColor(p.Label2).Unselectable()
+				marketParagraph(c, routine.Prompt, p.Label2)
 			})
 		}
-		marketParagraph(c, L("They start paused. %@ asks whether to turn them on.", template.Name), p.Label3)
+		marketParagraph(c, L("They start paused. %@ asks whether to turn them on.", template.Name), p.Label3).Unselectable()
 	case marketPlugins:
 		for _, id := range template.Plugins {
 			plugin := mk.plugin(id)
