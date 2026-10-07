@@ -95,6 +95,11 @@ pub struct PluginStatus {
     /// a plugin from the marketplace or its own manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Marketplace service and user label of a named connection. `id` selects the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
 }
 
 impl Device {
@@ -701,6 +706,9 @@ pub struct CheckReport {
 /// `kind = roster`: bots, chat metadata, and routines. Latest wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RosterBlob {
+    /// Encrypted workflow records; omitted by builds that do not know workflow packs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<Vec<crate::workflows::Envelope>>,
     pub bots: Vec<Bot>,
     pub chats: Vec<ChatMeta>,
     #[serde(default)]

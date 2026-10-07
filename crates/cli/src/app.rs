@@ -58,6 +58,7 @@ pub struct State {
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
     pub routines: Vec<Routine>,
+    pub workflows: Vec<crate::workflows::Envelope>,
     pub auto_review: AutoReview,
     pub last_seq: i64,
     /// Chats deleted here whose blobs the relay still has to drop.
@@ -217,6 +218,8 @@ pub struct App {
     pub plugins: Mutex<crate::plugins::Store>,
     /// The marketplace index in use, and the checks for a newer one.
     pub marketplace: crate::marketplace::Updates,
+    /// Serializes guided setup resource creation and installation on this Device.
+    pub workflow_editing: tokio::sync::Mutex<()>,
     /// Checks for a newer model catalog.
     pub catalog: crate::catalog::Updates,
     /// Checks for a newer release of the CLI itself, which a build from `release-cli.yml`
@@ -303,6 +306,7 @@ impl App {
             shell_sessions: crate::shell::Sessions::default(),
             plugins: Mutex::new(plugins),
             marketplace,
+            workflow_editing: tokio::sync::Mutex::new(()),
             catalog: crate::catalog::Updates::default(),
             #[cfg(feature = "cli")]
             updates: crate::update::Updater::default(),
@@ -646,6 +650,7 @@ impl App {
         let roster = {
             let state = self.state.lock().unwrap();
             RosterBlob {
+                workflows: Some(state.workflows.clone()),
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 routines: state.routines.clone(),

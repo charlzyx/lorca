@@ -40,11 +40,16 @@ pub struct Index {
     pub updated: String,
     pub plugins: Vec<Manifest>,
     pub bots: Vec<BotTemplate>,
+    pub packs: Vec<crate::workflows::Pack>,
 }
 
 impl Index {
     pub fn plugin(&self, id: &str) -> Option<&Manifest> {
         self.plugins.iter().find(|p| p.id == id)
+    }
+
+    pub fn pack(&self, id: &str) -> Option<&crate::workflows::Pack> {
+        self.packs.iter().find(|p| p.id == id)
     }
 
     pub fn bot(&self, id: &str) -> Option<&BotTemplate> {
@@ -289,6 +294,8 @@ struct RawIndex {
     plugins: Vec<Value>,
     #[serde(default)]
     bots: Vec<Value>,
+    #[serde(default)]
+    packs: Vec<Value>,
 }
 
 /// Reads an index by rules every later version keeps, so an index written for a newer Lorca
@@ -317,6 +324,13 @@ fn parse(text: &str) -> Result<Index, String> {
             Ok(template) if index.bot(&template.id).is_some() => tracing::warn!(id = %template.id, "skipping a marketplace bot listed twice"),
             Ok(template) => index.bots.push(template),
             Err(error) => tracing::warn!(%error, "skipping a marketplace bot"),
+        }
+    }
+    for entry in &raw.packs {
+        match crate::workflows::Pack::parse(entry, &index) {
+            Ok(pack) if index.pack(&pack.id).is_some() => tracing::warn!(id = %pack.id, "skipping a workflow pack listed twice"),
+            Ok(pack) => index.packs.push(pack),
+            Err(error) => tracing::warn!(%error, "skipping a workflow pack"),
         }
     }
     if index.plugins.is_empty() {
@@ -411,6 +425,25 @@ mod tests {
         assert!(search_plugins(&index.plugins, "nothing-like-this").is_empty());
         assert!(search_bots(&index.bots, "pull requests").iter().any(|b| b.id == "pr-reviewer"));
         assert_eq!(search_bots(&index.bots, "").len(), index.bots.len());
+    }
+
+    #[test]
+    fn packs_are_additive_and_bad_entries_do_not_hide_the_catalog() {
+        #[derive(Deserialize)]
+        struct OlderIndex { version: u64, plugins: Vec<Value>, bots: Vec<Value> }
+        let old: OlderIndex = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        assert_eq!(old.version, 1);
+        assert!(!old.plugins.is_empty() && !old.bots.is_empty());
+        let mut raw: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        let mut unsupported = raw["packs"][0].clone();
+        unsupported["version"] = serde_json::json!(99);
+        raw["packs"].as_array_mut().unwrap().push(unsupported);
+        let parsed = parse(&raw.to_string()).unwrap();
+        assert_eq!(parsed.packs.len(), 3);
+        assert_eq!(parsed.plugins.len(), old.plugins.len());
+        assert_eq!(parsed.bots.len(), old.bots.len());
+        raw.as_object_mut().unwrap().remove("packs");
+        assert!(parse(&raw.to_string()).unwrap().packs.is_empty());
     }
 
     #[test]

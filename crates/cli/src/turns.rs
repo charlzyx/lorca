@@ -143,6 +143,10 @@ pub(crate) async fn run_job(app: &Arc<App>, job: &Job, cancel: CancellationToken
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
     ];
+    if job.kind == "workflow_sample" {
+        // Setup previews cannot create teammates, install integrations, or arm schedules.
+        tools.retain(|tool| matches!(tool.name(), "list_teammates" | "search_plugins"));
+    }
     tools.extend(memory_tools(app, &store, &chat));
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
     // Commands run in terminals of their own, kept on this Runner past the turn when they
@@ -1528,6 +1532,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
          including you (your id is {}), to behave differently, change its profile with edit_bot.\n",
         bot.id
     ));
+    prompt.push_str(&crate::workflows::context_for_turn(app, &bot.id, job));
     prompt.push_str(&routines_prompt(app, bot));
     prompt.push_str(&plugins_prompt(app, bot, plugins));
     prompt.push_str(&memory_prompt(store));

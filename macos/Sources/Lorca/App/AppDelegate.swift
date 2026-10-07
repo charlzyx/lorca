@@ -237,6 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainWindowController?.root.presentNewBot()
     }
 
+    func openWorkflowChat(_ chatID: Chat.ID) {
+        showMainWindow()
+        mainWindowController?.root.select(.chat(chatID))
+    }
+
     @objc func showMarketplace(_ sender: Any?) {
         showMainWindow()
         mainWindowController?.root.presentMarketplace()

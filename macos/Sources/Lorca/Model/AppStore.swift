@@ -735,7 +735,7 @@ final class AppStore {
     func marketplace() async throws -> Marketplace {
         if isMock { return MockData.marketplace() }
         let wire = try await client.request("marketplace", [:], as: Wire.Marketplace.self)
-        return Marketplace(plugins: wire.plugins.map { $0.toModel() }, bots: wire.bots.map { $0.toModel() })
+        return Marketplace(packs: wire.packs ?? [], plugins: wire.plugins.map { $0.toModel() }, bots: wire.bots.map { $0.toModel() })
     }
 
     /// Installs a marketplace plugin on a Runner (here, or sealed to that Runner).

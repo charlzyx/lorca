@@ -19,6 +19,7 @@ final class MarketplaceViewController: NSViewController {
     /// Runner elsewhere reports its plugins through the relay a moment later.
     private var installed: [Device.ID: [MarketplacePlugin.ID: InstalledPlugin]] = [:]
 
+    private let workflowsOnly: Bool
     private let size: NSSize
     private let onOpenChat: (Chat.ID) -> Void
     private var pages: [MarketplacePage] = []
@@ -30,7 +31,8 @@ final class MarketplaceViewController: NSViewController {
     private let noticeLabel = Build.label("", font: .systemFont(ofSize: 12.5), lines: 2)
     private var noticeTask: Task<Void, Never>?
 
-    init(runnerID: Device.ID?, size: NSSize, onOpenChat: @escaping (Chat.ID) -> Void) {
+    init(runnerID: Device.ID?, size: NSSize, workflowsOnly: Bool = false, onOpenChat: @escaping (Chat.ID) -> Void) {
+        self.workflowsOnly = workflowsOnly
         self.size = size
         self.onOpenChat = onOpenChat
         super.init(nibName: nil, bundle: nil)
@@ -101,7 +103,7 @@ final class MarketplaceViewController: NSViewController {
         ])
         view = container
         updateRunnerPopup()
-        show(MarketplaceHomePage(market: self), animated: false)
+        show(workflowsOnly ? MarketplaceWorkflowCatalogPage(market: self) : MarketplaceHomePage(market: self), animated: false)
         load()
     }
 
@@ -227,6 +229,16 @@ final class MarketplaceViewController: NSViewController {
 
     func openPlugin(_ plugin: MarketplacePlugin) {
         show(MarketplacePluginPage(market: self, pluginID: plugin.id))
+    }
+
+    func openWorkflow(_ pack: WorkflowPack) {
+        guard let runnerID else { return }
+        show(MarketplaceWorkflowPage(market: self, pack: pack, runnerID: runnerID))
+    }
+
+    func finishWorkflow(chatID: Chat.ID?) {
+        dismiss(nil)
+        if let chatID { onOpenChat(chatID) }
     }
 
     func openBot(_ template: BotTemplate) {

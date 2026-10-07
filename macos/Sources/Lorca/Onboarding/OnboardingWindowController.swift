@@ -549,7 +549,8 @@ final class OnboardingViewController: NSViewController {
 
         let open = primaryButton(L("Open Lorca"), action: #selector(finish))
 
-        let column = Build.stack([icon, title, subtitle, open], spacing: 14)
+        let workflows = primaryButton(L("Choose a Workflow…"), action: #selector(chooseWorkflow))
+        let column = Build.stack([icon, title, subtitle, workflows, open], spacing: 14)
         column.alignment = .centerX
         column.setCustomSpacing(20, after: icon)
         column.setCustomSpacing(26, after: subtitle)
@@ -882,6 +883,18 @@ final class OnboardingViewController: NSViewController {
                 self.setStatus(error.localizedDescription, color: .systemRed)
             }
         }
+    }
+
+    @objc private func chooseWorkflow() {
+        let controller = MarketplaceViewController(
+            runnerID: firstBot?.runnerID, size: NSSize(width: 760, height: 650), workflowsOnly: true
+        ) { [weak self] chatID in
+            guard let self else { return }
+            Preferences.selection = "chat:\(chatID)"
+            self.finish()
+            (NSApp.delegate as? AppDelegate)?.openWorkflowChat(chatID)
+        }
+        presentAsSheet(controller)
     }
 
     @objc private func finish() {

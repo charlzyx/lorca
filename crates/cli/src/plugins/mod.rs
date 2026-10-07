@@ -507,6 +507,8 @@ impl Store {
             ("ready".to_string(), "Ready".to_string())
         };
         PluginStatus {
+            service_id: None,
+            account_name: None,
             id: manifest.id.clone(),
             name: manifest.name.clone(),
             description: manifest.description.clone(),

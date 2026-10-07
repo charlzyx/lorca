@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated": "2026-10-02T10:13:03Z",
+  "updated": "2026-10-08T00:00:00Z",
   "plugins": [
     {
       "id": "github",
@@ -873,6 +873,158 @@
       "routines": [
         {"name": "Weekly docs check", "schedule": "0 15 * * 5", "prompt": "Compare what shipped this week with the Notion docs and draft the updates for the user to approve."}
       ]
+    },
+    {
+      "id": "meeting-preparer",
+      "name": "Meeting Preparer",
+      "summary": "Prepares an agenda and briefing from the meetings and documents you choose",
+      "description": "Prepare concise meeting briefs for the user. Read the chosen calendar and supporting documents, identify the meeting goal, participants, decisions and open questions, and draft an agenda with links. Work only with the accounts and scope the user selects. Present drafts in chat; change nothing in the calendar or documents unless explicitly requested.",
+      "symbol_name": "person.3.fill",
+      "accent": "teal",
+      "category": "productivity",
+      "author": "Lorca"
+    },
+    {
+      "id": "inbox-triager",
+      "name": "Inbox Triager",
+      "summary": "Sorts the selected inbox into urgent items, follow-ups and drafts",
+      "description": "Triage the selected inbox for the user. Read recent unread messages, summarize what needs attention, suggest next actions and draft short replies in chat with links to the original threads. Keep the user's scope and priority criteria. Do not send, archive, mark read or change messages unless explicitly requested.",
+      "symbol_name": "tray.full.fill",
+      "accent": "blue",
+      "category": "productivity",
+      "author": "Lorca"
+    },
+    {
+      "id": "repository-monitor",
+      "name": "Repository Monitor",
+      "summary": "Reports issues, pull requests and releases that need attention",
+      "description": "Monitor only the repositories the user selects. Read recent issues, pull requests and releases, prioritize what needs their attention, and prepare a concise summary with direct links and suggested next actions. Report observations and drafts in chat; post or change nothing on GitHub unless explicitly requested.",
+      "symbol_name": "eye.fill",
+      "accent": "purple",
+      "category": "code",
+      "author": "Lorca"
+    }
+  ],
+  "packs": [
+    {
+      "id": "meeting-preparation",
+      "name": "Meeting preparation",
+      "outcome": "Arrive at your next meeting with a briefing and agenda.",
+      "description": "Choose a calendar and document account, then review one meeting brief before enabling a weekday routine.",
+      "version": 1,
+      "questions": [
+        {
+          "id": "meeting-scope",
+          "label": "Which meetings should the briefing cover?",
+          "placeholder": "Upcoming meetings today, with external attendees"
+        }
+      ],
+      "connections": [
+        {
+          "service_id": "google-calendar",
+          "name": "Google Calendar"
+        },
+        {
+          "service_id": "google-drive",
+          "name": "Google Drive"
+        }
+      ],
+      "specialists": [
+        {
+          "id": "preparer",
+          "template_id": "meeting-preparer"
+        }
+      ],
+      "routines": [
+        {
+          "id": "daily",
+          "specialist_id": "preparer",
+          "name": "Prepare upcoming meetings",
+          "schedule": "0 8 * * 1-5",
+          "prompt": "Prepare a brief for the next meeting in the selected scope. Read its calendar entry and relevant supporting documents from the selected accounts, then draft the goal, agenda, open questions and source links."
+        }
+      ],
+      "sample_specialist": "preparer",
+      "sample_prompt": "Prepare a brief for the next meeting in the selected scope. Read its calendar entry and relevant supporting documents from the selected accounts, then draft the goal, agenda, open questions and source links."
+    },
+    {
+      "id": "inbox-triage",
+      "name": "Inbox triage",
+      "outcome": "See the messages that need you and a draft of the next action.",
+      "description": "Choose an inbox, define what matters, and review a small triage sample before enabling a weekday routine.",
+      "version": 1,
+      "questions": [
+        {
+          "id": "inbox-scope",
+          "label": "Which messages should triage include?",
+          "placeholder": "Unread messages from the last day"
+        },
+        {
+          "id": "priorities",
+          "label": "What needs your attention first?",
+          "placeholder": "Customer replies, deadlines and blocked teammates"
+        }
+      ],
+      "connections": [
+        {
+          "service_id": "gmail",
+          "name": "Gmail"
+        }
+      ],
+      "specialists": [
+        {
+          "id": "triager",
+          "template_id": "inbox-triager"
+        }
+      ],
+      "routines": [
+        {
+          "id": "daily",
+          "specialist_id": "triager",
+          "name": "Triage the selected inbox",
+          "schedule": "0 9 * * 1-5",
+          "prompt": "Triage up to five recent messages in the selected inbox scope. Put urgent items first, link to each thread, suggest next actions and write reply drafts in this chat."
+        }
+      ],
+      "sample_specialist": "triager",
+      "sample_prompt": "Triage up to five recent messages in the selected inbox scope. Put urgent items first, link to each thread, suggest next actions and write reply drafts in this chat."
+    },
+    {
+      "id": "repository-monitoring",
+      "name": "Repository monitoring",
+      "outcome": "Keep up with the issues, pull requests and releases that need you.",
+      "description": "Select repositories and a GitHub connection, then review a summary before enabling a weekday routine.",
+      "version": 1,
+      "questions": [
+        {
+          "id": "repositories",
+          "label": "Which repositories should be monitored?",
+          "placeholder": "owner/repository, owner/another-repository"
+        }
+      ],
+      "connections": [
+        {
+          "service_id": "github",
+          "name": "GitHub"
+        }
+      ],
+      "specialists": [
+        {
+          "id": "monitor",
+          "template_id": "repository-monitor"
+        }
+      ],
+      "routines": [
+        {
+          "id": "daily",
+          "specialist_id": "monitor",
+          "name": "Monitor selected repositories",
+          "schedule": "0 9 * * 1-5",
+          "prompt": "Read recent issues, pull requests and releases in the selected repositories. Summarize the top items needing attention, with direct links and suggested next actions. Report when there are no changes."
+        }
+      ],
+      "sample_specialist": "monitor",
+      "sample_prompt": "Read recent issues, pull requests and releases in the selected repositories. Summarize the top items needing attention, with direct links and suggested next actions. Report when there are no changes."
     }
   ]
 }

@@ -142,6 +142,7 @@ pub fn keep_checks(current: &[Routine], incoming: &mut [Routine], bots: &[Bot], 
 
 /// Pauses or resumes a routine. A resumed schedule counts from now.
 pub fn set_enabled(app: &Arc<App>, id: &str, enabled: bool) -> Result<Routine, String> {
+    if enabled { crate::workflows::allow_enable(app, id)?; }
     app.update_routine(id, |routine| {
         if enabled && !routine.is_enabled {
             routine.enabled_at = now_secs();

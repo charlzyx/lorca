@@ -16,6 +16,7 @@ pub mod keys;
 #[cfg(feature = "runner")]
 pub mod local_review;
 pub mod marketplace;
+pub mod workflows;
 pub mod memory;
 pub mod model;
 pub mod pairing;

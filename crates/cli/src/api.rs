@@ -202,6 +202,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "relay_url": app.relay_url() }))
         }
 
+        method if method.starts_with("workflows.") => crate::workflows::handle(app, method, &params).await,
+
         "bots.create" => {
             // A bot from the marketplace starts from its template's profile, with the routines
             // and the first turn `marketplace::welcome` gives it.
@@ -573,7 +575,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     out
                 })
                 .collect();
-            Ok(json!({ "plugins": plugins, "bots": bots }))
+            let packs: Vec<_> = index.packs.iter().filter(|p| {
+                query.split_whitespace().all(|word| format!("{} {} {}", p.name, p.outcome, p.description).to_lowercase().contains(&word.to_lowercase()))
+            }).collect();
+            Ok(json!({ "plugins": plugins, "bots": bots, "packs": packs }))
         }
         // Asks lorca.app for a newer marketplace index now, even within the hour of the last check.
         "marketplace.reload" => {

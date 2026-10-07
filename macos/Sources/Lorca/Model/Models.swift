@@ -559,6 +559,7 @@ struct BotTemplate: Identifiable, Hashable {
 
 /// What the marketplace offers, in the index's order.
 struct Marketplace {
+    var packs: [WorkflowPack] = []
     var plugins: [MarketplacePlugin] = []
     var bots: [BotTemplate] = []
 }
