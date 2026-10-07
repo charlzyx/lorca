@@ -161,6 +161,8 @@ pub struct App {
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
     message_order: Mutex<()>,
+    /// Serializes task validation with its atomic SQLite CAS and request receipt.
+    pub(crate) task_order: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -276,6 +278,7 @@ impl App {
             outbox_notify: Notify::new(),
             sync_wakes: AtomicU64::new(0),
             message_order: Mutex::new(()),
+            task_order: Mutex::new(()),
             relay_connected: AtomicBool::new(false),
             relay_update_required: AtomicBool::new(false),
             relay_problem: Mutex::new(None),
@@ -449,6 +452,7 @@ impl App {
                     | Event::ChatRemoved { .. }
                     | Event::RosterChanged { .. }
                     | Event::ChatUsageChanged { .. }
+                    | Event::TaskChanged { .. }
             )
         {
             // The snapshot at the end of the page carries all of this at once.
@@ -669,6 +673,7 @@ impl App {
     /// its place ahead of older messages. A chat goes up under the message order lock, so no new
     /// message lands between its old ones.
     pub fn push_history(&self) {
+        if let Err(error) = crate::tasks::push_all(self) { tracing::warn!(%error, "requeueing durable tasks"); }
         let (avatars, chats): (Vec<Attachment>, Vec<(String, u32)>) = {
             let state = self.state.lock().unwrap();
             (
@@ -1789,6 +1794,7 @@ impl App {
             "bots": state.bots,
             "chats": state.chats.iter().map(|chat| self.chat_for_app(chat)).collect::<Vec<_>>(),
             "routines": self.routines_out(&state),
+            "tasks": crate::tasks::list(self).unwrap_or_default(),
             "auto_review": state.auto_review,
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),

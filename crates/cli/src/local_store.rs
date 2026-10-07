@@ -12,7 +12,7 @@ use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
 pub struct LocalStore {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
 }
 
 pub struct Upsert {
@@ -141,6 +141,7 @@ impl LocalStore {
              );
              PRAGMA user_version = 1;",
         )?;
+        crate::tasks::storage::initialize(&connection)?;
         crate::config::set_private(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -1027,6 +1028,9 @@ impl LocalStore {
             "outbox",
             "sent_jobs",
             "device_turns",
+            "durable_tasks",
+            "task_receipts",
+            "task_runs",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -1036,7 +1040,7 @@ impl LocalStore {
     }
 }
 
-fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
+pub(crate) fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
     let waiting: Option<i64> = match item.slot.as_ref() {
         Some(slot) => tx
             .query_row(

@@ -1,5 +1,7 @@
 # macOS app
 
+The chat inspector's Tasks section lists [durable work](tasks.md) beside the DM or group. Its native sheet edits ownership, goal, criteria, dependencies, next action, state/reason, result, links, and supporting evidence through the local CLI. It uses the revision opened, retains edits on errors, offers Reload on stale records, and explicitly starts a saved task. Message evidence selects a loaded chat message; link evidence uses HTTPS.
+
 SPM `Lorca.app`, AppKit.
 
 The app starts the bundled `lorca` (Contents/Resources/bin/lorca; `LORCA_CLI` overrides, PATH is the fallback) as `lorca serve --port <port>`, logs it under `~/Library/Logs/Lorca/` or `~/Library/Logs/Lorca Dev/`, and restarts it if it exits. Lorca uses port `4862`; Lorca Dev uses `4863`. If something already listens on that build's port, that instance is used.
