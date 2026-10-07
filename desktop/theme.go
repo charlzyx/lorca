@@ -23,6 +23,8 @@ type palette struct {
 	BotBubble, BotBubbleBorder, Code, CodeHover, Chip, Card, CardBorder ui.Color
 
 	ComposerField, ComposerBorder, ComposerControl, ComposerPrimary, ComposerPrimaryContent ui.Color
+	// GlassButton fills a round glass button over its frosted backdrop, as AppKit's glass bezel.
+	GlassButton ui.Color
 
 	Hover, Pressed, ButtonBG                      ui.Color
 	Selection, SelectionText, SelectionInactive   ui.Color
@@ -70,6 +72,7 @@ var lightPalette = palette{
 	ComposerControl:        ui.RGBA(0, 0, 0, 0.07),
 	ComposerPrimary:        ui.Hex("#000000"),
 	ComposerPrimaryContent: ui.Hex("#ffffff"),
+	GlassButton:            ui.RGBA(250, 250, 250, 0.9),
 
 	Hover:             ui.RGBA(0, 0, 0, 0.06),
 	Pressed:           ui.RGBA(0, 0, 0, 0.12),
@@ -129,6 +132,7 @@ var darkPalette = palette{
 	ComposerControl:        ui.RGBA(255, 255, 255, 0.12),
 	ComposerPrimary:        ui.Hex("#ffffff"),
 	ComposerPrimaryContent: ui.Hex("#000000"),
+	GlassButton:            ui.RGBA(64, 64, 68, 0.9),
 
 	Hover:             ui.RGBA(255, 255, 255, 0.07),
 	Pressed:           ui.RGBA(255, 255, 255, 0.14),

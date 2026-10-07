@@ -168,14 +168,11 @@ func (m *mainWindow) chatView(c *ui.Context, chatID string) {
 			chatEmptyState(c, m, chat, members, s, bottom)
 		}
 		if !s.list.AtEnd() && len(rows) > 0 {
-			// A glass disc, like the composer it floats above.
+			// A glass disc, as AppKit's glass bezel draws the Mac's.
 			jump := ui.ButtonBase(c).Key("jump").Absolute().Right(horizontalInset).Bottom(bottom+14).Size(28, 28).Radius(14).Center().
-				Material(glass.Glass{Interactive: true}).TextColor(p.Label2).
+				Material(glassButton{p.GlassButton}).Border(1, p.ComposerBorder).Shadow(0, 1, 1.5, -0.5, ui.RGBA(0, 0, 0, 0.08)).TextColor(p.Label).
 				Label(L("Scroll to latest")).Tooltip(L("Scroll to latest (%@)", shortcutText("CmdOrCtrl+J")))
-			if jump.Hovered() {
-				jump.TextColor(p.Label)
-			}
-			jump.Children(func() { symbol(c, "arrow.down", 13, 2.6) })
+			jump.Children(func() { symbol(c, "arrow.down", 15, 2.1) })
 			if jump.Clicked() {
 				s.list.ScrollToEnd()
 			}
@@ -185,6 +182,15 @@ func (m *mainWindow) chatView(c *ui.Context, chatID string) {
 			s.composerHeight = h
 		}
 	})
+}
+
+// glassButton is AppKit's glass bezel on a round button: what is behind it frosted under a
+// light fill, with no rim of its own; the button draws its even hairline ring and faint shadow.
+type glassButton struct{ fill ui.Color }
+
+func (g glassButton) PaintMaterial(p *ui.Painter, box ui.Rect, radii [4]float32) {
+	glass.Blur{Radius: 4}.PaintMaterial(p, box, radii)
+	p.Fill(box, g.fill, radii[0])
 }
 
 // chatPlaceholder is what the empty composer says: whom the message goes to.
