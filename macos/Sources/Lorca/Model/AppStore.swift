@@ -658,6 +658,25 @@ final class AppStore {
         return dm(with: botID)
     }
 
+    /// The Runner returns its new independent bot. Keep that bot and DM visible while a remote
+    /// Runner's encrypted roster reaches this Device; subsequent roster events reconcile them.
+    func importTemplate(_ params: [String: Any]) async throws -> Chat.ID {
+        let reply = try await templateReply("templates.import", params)
+        guard let object = reply["bot"] as? [String: Any], let chatID = reply["chat_id"] as? String else {
+            throw CLIClient.RequestError(message: L("Couldn't read the imported bot."))
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let bot = try Wire.decoder.decode(Wire.Bot.self, from: data).toModel()
+        if !bots.contains(where: { $0.id == bot.id }) { bots.append(bot) }
+        if !chats.contains(where: { $0.id == chatID }) {
+            chats.insert(Chat(id: chatID, kind: .dm, customTitle: nil, botIDs: [bot.id], messages: [],
+                unreadCount: 0, isPinned: false, createdAt: bot.createdAt), at: 0)
+        }
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+        return chatID
+    }
+
     /// The provider a bot made without asking runs with: the first one the account connected.
     var preferredProvider: ProviderCredential.Kind {
         providerKinds.first { credential(for: $0)?.isConnected == true } ?? .deepseek

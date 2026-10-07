@@ -237,6 +237,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         mainWindowController?.root.presentNewBot()
     }
 
+    @objc func importBotTemplate(_ sender: Any?) {
+        showMainWindow()
+        mainWindowController?.root.presentTemplateImport()
+    }
+
     @objc func showMarketplace(_ sender: Any?) {
         showMainWindow()
         mainWindowController?.root.presentMarketplace()
@@ -344,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         // These open the main window, which stays away while onboarding is up.
         let opensMainWindow = [
-            #selector(newBot(_:)), #selector(newGroupChat(_:)), #selector(showMarketplace(_:)), #selector(pairDevice(_:)),
+            #selector(newBot(_:)), #selector(newGroupChat(_:)), #selector(importBotTemplate(_:)), #selector(showMarketplace(_:)), #selector(pairDevice(_:)),
             #selector(find(_:)), #selector(toggleCommandPalette(_:)),
         ]
         if let action = menuItem.action, opensMainWindow.contains(action) {

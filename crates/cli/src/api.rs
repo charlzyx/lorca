@@ -63,6 +63,7 @@ const UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        method if method.starts_with("templates.") => crate::templates::dispatch(app, method, &params).await,
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             "has_identity": app.has_identity(),
@@ -511,15 +512,23 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // Routines live in the roster; any Device edits them, the bot's Runner runs them. A
-        // routine's check is the bot's to write, on its Runner, with the routines tool.
+        // routine's check is saved on its assigned Runner, including a private template import.
         "routines.create" => {
+            let bot_id = string(&params, "bot_id")?;
+            let check = params["check"].as_str().filter(|s| !s.trim().is_empty());
+            if check.is_some() {
+                let bot = app.bot(&bot_id).ok_or("Unknown bot")?;
+                if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) {
+                    return Err("Save routine checks on the bot's assigned Runner.".into());
+                }
+            }
             let routine = routines::create(
                 app,
-                &string(&params, "bot_id")?,
+                &bot_id,
                 &string(&params, "name")?,
                 &string(&params, "schedule")?,
                 params["prompt"].as_str().unwrap_or(""),
-                None,
+                check,
                 params["enabled"].as_bool().unwrap_or(true),
             )?;
             Ok(json!({ "routine": app.routine_out(&routine) }))

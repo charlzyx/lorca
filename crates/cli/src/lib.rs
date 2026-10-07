@@ -38,6 +38,7 @@ pub mod service;
 #[cfg(feature = "runner")]
 pub mod shell;
 pub mod sync;
+pub mod templates;
 pub mod local_store;
 #[cfg(feature = "runner")]
 pub mod turns;

@@ -97,6 +97,12 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        "templates.memories" => Ok(json!(crate::templates::local_memories(app, body["bot_id"].as_str().ok_or("missing bot_id")?)?)),
+        "templates.export.preview" => {
+            let selection = serde_json::from_value(body["selection"].clone()).map_err(|e| format!("Invalid export selection: {e}"))?;
+            Ok(json!(crate::templates::export_preview(app, body["bot_id"].as_str().ok_or("missing bot_id")?, &selection).await?))
+        }
+        "templates.import" => crate::templates::import_text(app, body["text"].as_str().ok_or("missing text")?, body).await,
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),
         "memory.write" => {
             let text = body["text"].as_str().ok_or("missing text")?;

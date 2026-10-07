@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 final class RootSplitViewController: NSSplitViewController {
     private let store = AppStore.shared
@@ -488,6 +489,19 @@ final class RootSplitViewController: NSSplitViewController {
             self.open(self.store.dm(with: botID))
         }
         presentAsSheet(sheet)
+    }
+
+    func presentTemplateImport() {
+        guard let window = view.window else { return }
+        let panel = NSOpenPanel()
+        panel.title = L("Import Bot Template")
+        panel.allowedContentTypes = [UTType(filenameExtension: "lorca-template") ?? .json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.beginSheetModal(for: window) { [weak self] result in
+            guard result == .OK, let self, let url = panel.url else { return }
+            self.presentAsSheet(TemplateImportViewController(url: url) { [weak self] chatID in self?.open(chatID) })
+        }
     }
 
     func open(_ chatID: Chat.ID) {
