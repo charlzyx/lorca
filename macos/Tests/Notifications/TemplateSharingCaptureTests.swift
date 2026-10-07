@@ -92,6 +92,7 @@ final class TemplateSharingCaptureTests: XCTestCase {
         let controller = TemplateImportViewController(url: URL(fileURLWithPath: "/fixture/reviewer-with-skill.lorca-template"), reply: { [unowned self] method, _ in
             XCTAssertEqual(method, "templates.import.preview")
             var content = template
+            content["requirements"] = []
             content["skills"] = [["name": "review-checklist", "description": "Review a proposed change", "instructions": "Read the diff, identify risks, and report tests."]]
             return ["template": content, "digest": "fixture-blocked-digest", "can_import": false, "requirements": [], "warnings": warnings,
                 "issues": ["Reusable skills need playbook support in this CLI. Update Lorca before exporting or importing skills."]]
