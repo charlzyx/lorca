@@ -249,7 +249,8 @@ final class AppStore {
         }
     }
 
-    private func apply(snapshot: Wire.Snapshot) {
+    /// The CLI snapshot mapper is also used by native fixtures with synthetic account data.
+    func apply(snapshot: Wire.Snapshot) {
         hasIdentity = snapshot.hasIdentity
         isIdentityDevice = snapshot.isIdentityDevice
         identityID = snapshot.identityId
