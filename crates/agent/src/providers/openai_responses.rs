@@ -14,7 +14,7 @@ use crate::provider::{
     channel_stream, AssistantEvent, AssistantEventStream, ModelRequest, Provider,
 };
 use crate::request::bearer_auth;
-use crate::retry::{send_with_retry, RequestFailure, DEFAULT_MAX_RETRY_DELAY_MS};
+use crate::retry::{send_with_retry_options, RequestFailure, DEFAULT_MAX_RETRY_DELAY_MS};
 use crate::transform::{transform_messages, TransformOptions};
 use crate::types::ThinkingLevel;
 
@@ -159,10 +159,9 @@ impl Provider for OpenAiResponsesProvider {
                 options.apply_to(request).json(&body)
             };
             let response =
-                match send_with_retry(build, max_retries, max_retry_delay_ms, &cancel).await {
+                match send_with_retry_options(build, max_retries, max_retry_delay_ms, &cancel, &options).await {
                     Ok(response) => {
-                        options.report(&response);
-                        response
+                            response
                     }
                     Err(failure) => {
                         let aborted = matches!(failure, RequestFailure::Aborted);

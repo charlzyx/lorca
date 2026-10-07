@@ -1,0 +1,56 @@
+# Budgets and connector limits
+
+The assigned Runner enforces allowances in `crates/cli/src/budgets.rs` and its `runtime` module. A budget carries optional `max_usd`, `max_tokens`, `max_runtime_secs`, `max_retries`, and `max_connector_calls`. An omitted limit is unlimited; zero prevents work in that category. A retry limit of zero still admits the initial request. Runtime includes checks, model calls, review, connection waits, backoff, and questions to the user. A configured runtime allowance is at most one year; an omitted runtime allowance is unlimited.
+
+## Scopes and accounting
+
+An ad-hoc task uses its existing Job id (`kind: job`). A canonical task uses `Job.task_id` (`kind: task`), and a routine uses its routine id (`kind: routine`). A Job charges every scope it carries. `kind: chat` holds the default allowance copied into each new ad-hoc Job or new canonical task scope in that chat. A subsequent run of the same canonical task retains its consumption and limits; routines use their routine allowance. Changing the chat default affects new scopes. Budget records contain accounting and recovery data alongside those identities. Task ownership, dependencies, and completion evidence belong to the task mechanism.
+
+`turns::run_job` admits a `BudgetContext`, then runs all work inside it. `routines::run_now` and scheduled admission refuse an exhausted routine; `routines::run_check` adds the routine scope to any parent Job/task context, so its check-model calls and connector calls count alongside the turn it starts. The existing `check_now`, `started`, and `finished` boundaries retain their roles. An event Job runs unattended and carries its routine scope when it targets a routine.
+
+The context follows inference, `models.ask`, Auto-review, compaction, and the memory flush. Same-Runner `message_bot` handoffs retain the canonical task id and charge the same task scope without claiming or finishing its owning run. `providers::provider_for` wraps each adapter; `ModelsAsk::new` and `mcp::turn_catalog` capture the context for calls made through a codemode bridge. A consumer running an independent check establishes `BudgetContext::scope` while constructing those hosts/catalogs and runs it with `BudgetContext::run`.
+
+Before a model request starts, the Runner atomically reserves estimated input and bounded output against every applicable scope. Parallel side-model calls share those reservations. Input uses the agent's text/image estimates and tool-schema size; the output cap shrinks to the remaining token or monetary allowance. Monetary admission uses the highest published input/cache-write and output tier, so a cached request can settle for less. Provider-reported usage replaces the reservation once the response completes. The provider may report more than the estimate; that consumption is recorded and further work stops. An allowance bounds admission using the information the provider makes available, rather than promising an exact invoice amount before inference.
+
+Every adapter HTTP attempt runs the request admission hook, including its internal retries. The outer agent-loop retry also charges the retry allowance. A failed request without reported usage charges an estimate of its input and received output, with `estimated_calls` marking it. A Runner restart conservatively charges any outstanding reservation, marks the active work `interrupted`, and requires explicit recovery. Neither a restart nor a new retry silently replenishes consumption.
+
+Runtime deadlines cancel the same token the provider and tools use. The turn's compaction hook uses that token too. Tool boundaries check exhaustion before review and again after review, so a review that uses the remaining allowance cannot authorize another effect. MCP admission counts calls once they have obtained shared connector capacity and before sending the request. Exhaustion stops further model/tool work and produces an actionable reason. Exhaustion/interruption propagates to every scope the context charges, so canonical task lifecycle readers see a lower run/routine cap even after partial output.
+
+## Pricing
+
+Accounting keeps three distinct categories:
+
+- API spending uses published API rates, including zero rates for a catalogued free model.
+- ChatGPT, Grok, and OpenCode Go use subscription API-equivalent estimates. These estimates count toward a configured spending allowance and describe the equivalent API work.
+- A custom provider or uncatalogued model has unknown pricing. Its calls and tokens count, and its unknown-price call count is visible. A monetary-only allowance refuses unpriced work; adding a token or runtime allowance provides a measurable bound for it.
+
+Chat usage exposes `api_cost_usd`, `subscription_estimate_usd`, `unknown_price_calls`, `priced_calls`, and the distinct `pricing_kinds`, retaining subscription labels even for a zero estimate. The AppKit inspector labels API spending, API-equivalent estimates, and unknown pricing separately. Legacy usage without those categories reads Pricing unknown. Unknown prices never read as free.
+
+## Storage, protocol, and recovery
+
+The Runner stores budget configuration, usage, reservations, recovery receipts, and a held Job in the `runner_limits` SQLite table as XChaCha20-Poly1305 ciphertext under the account DEK. Each purpose is bound as associated data. A corrupt accounting record refuses admission. Connector configuration, call-window timestamps, and cooldowns use a separate authenticated purpose in that table. Forgetting the identity clears the table and both caches.
+
+Budget snapshots travel only inside the encrypted Runner `machine` blob; the advertisement includes the newest 100 finished ad-hoc Jobs alongside configured and held scopes. Paired Devices retain their budget projection as account ciphertext and expose it through the local CLI. `bootstrap.budgets` and `budgets.changed { budgets }` carry state, limits, usage, the Runner, and the recovery reason; the held Job remains on its Runner.
+
+The local API uses the existing sealed Runner request path for another Runner:
+
+| Method | Parameters and result |
+| --- | --- |
+| `budgets.list` | `runner_id?`, `chat_id?`; returns `{ budgets }` |
+| `budgets.get` | `kind`, `id`, `runner_id?`; returns the recorded snapshot |
+| `budgets.set` | `kind`, `id`, `limits`, `runner_id?`, `bot_id` for Job/task scopes, `chat_id?`; creates or changes an allowance while keeping usage |
+| `budgets.resume` | `kind`, `id`, `request_id`, `runner_id?`, `renew?`, `run?`; explicitly recovers held work |
+
+Increasing limits preserves consumption and the exhaustion latch until Resume. `renew: true` grants the configured allowance again; the chat's spending history remains. Recovery requires a unique request id; a repeated successful request returns its receipt and neither renews nor starts work again. A live call/runtime must settle before recovery. `run: true` continues a held Job from the persisted transcript, with the same budget identity, or runs a routine whose budget was configured before its first run. Completed or uncertain connector calls are never replayed from recovery storage. Event and canonical task recovery uses `run: false`, then `events.retry` or `tasks.run` respectively, so their inbox/ownership admission is re-armed. `run: true` refuses those saved Jobs instead of bypassing their owning mechanism.
+
+AppKit's DM inspector opens Budget limits for the chat's new-task allowance and recent Job/task scopes. The routine sheet opens its routine allowance. The sheet reads the allowance from its assigned Runner before enabling edits, shows the exhaustion/interruption reason and usage, offers Save and resume after increasing the limit, and asks explicitly before Renew allowance and resume. Other Devices use these controls through their local CLI, which sends the change to the assigned Runner. Task lifecycle consumers project the canonical task budget's recovery reason into their task state at their run boundary.
+
+## Shared connector admission
+
+`crates/cli/src/connector_limits.rs` guards actual MCP tool and resource calls. All bots and all servers of one installed account share its account bucket. Named account ids have the stable `<service-id>-<32 UUID hex>` form, so their account buckets remain separate while their service bucket is shared. Legacy single-account plugins use their manifest id as their service id. Account labels and codemode display names never choose a quota or a fallback account.
+
+Both buckets default to 60 calls per 60 seconds and four concurrent calls. `connector_limits.get` and `connector_limits.set` take `runner_id?`, `plugin_id`, `scope` (`account`, the default, or `service`), and for Set `limits { max_calls, window_secs, max_concurrency }`. The rate window is one second through 24 hours. Zero call/concurrency capacity pauses calls with an actionable error. Configuration uses the existing installed account; it creates no connection record.
+
+Admission atomically checks both buckets. A waiting call observes cancellation; a completed, failed, or cancelled call releases concurrency through its permit. Window timestamps persist, so restarting the Runner does not reset the shared rate. Service guidance extends the account's cooldown without shortening one already in force.
+
+The MCP HTTP client observes `retry-after-ms`, numeric or HTTP-date `Retry-After`, and exhausted `x-ratelimit-remaining` with `x-ratelimit-reset`. A 429 without guidance gives the account a one-second cooldown. Structured MCP errors/results may give `retry_after_ms`, `retryAfterMs`, `retry_after`, or `retryAfter`. This guidance delays subsequent calls. An effectful POST is sent once: HTTP retries and transparent expired-session POST replay are disabled for the guarded transport. A call that failed reports its outcome so the caller can decide what to do next. OAuth remains in the Runner's existing authorization manager and credentials remain in the account's encrypted `credentials` blob.

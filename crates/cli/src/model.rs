@@ -615,6 +615,16 @@ pub struct ChatUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub api_cost_usd: f64,
+    #[serde(default)]
+    pub subscription_estimate_usd: f64,
+    #[serde(default)]
+    pub unknown_price_calls: u64,
+    #[serde(default)]
+    pub priced_calls: u64,
+    #[serde(default)]
+    pub pricing_kinds: Vec<crate::budgets::Pricing>,
     pub turns: u64,
     /// The model of the last turn.
     pub model: String,
@@ -766,6 +776,8 @@ pub struct MachineBlob {
     /// The turns in flight on this Device, so every other Device shows the bots at work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<LiveTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budgets: Vec<crate::budgets::BudgetSnapshot>,
 }
 
 /// `kind = job`, sealed to the Runner's box key: run one bot turn in one chat.
@@ -774,6 +786,9 @@ pub struct Job {
     pub id: String,
     pub chat_id: String,
     pub bot_id: String,
+    /// A canonical durable task (#72); the budget module owns only its Runner accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
     /// `turn` for a user message in a DM, `room_turn` for one member's turn in a group,
     /// `message` for a teammate's message_bot, `routine` for a run of a routine, `command` for
     /// a command the bot left running that ended.

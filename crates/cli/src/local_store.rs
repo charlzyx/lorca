@@ -41,6 +41,10 @@ impl LocalStore {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
              PRAGMA journal_size_limit = 16777216;
+             CREATE TABLE IF NOT EXISTS runner_limits (
+                 purpose TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS metadata (
                  id                       INTEGER PRIMARY KEY CHECK (id = 1),
                  auto_review_json         TEXT NOT NULL,
@@ -1013,6 +1017,7 @@ impl LocalStore {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "runner_limits",
             "metadata",
             "devices",
             "bots",
@@ -1032,6 +1037,22 @@ impl LocalStore {
         }
         tx.commit()?;
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Runner accounting/configuration is authenticated account ciphertext, including its
+    /// resumable Job payloads. The purpose is bound as AEAD associated data by the caller.
+    pub fn runner_limits(&self, purpose: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.connection.lock().unwrap().query_row(
+            "SELECT ciphertext FROM runner_limits WHERE purpose = ?1", [purpose], |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn set_runner_limits(&self, purpose: &str, ciphertext: &[u8]) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO runner_limits (purpose, ciphertext) VALUES (?1, ?2) ON CONFLICT(purpose) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![purpose, ciphertext],
+        )?;
         Ok(())
     }
 }

@@ -636,6 +636,12 @@ final class ActionRow: NSView {
         value.stringValue = text
     }
 
+    /// Updates a live state without rebuilding the row or its buttons.
+    func setValue(_ text: String, tint: NSColor) {
+        value.textColor = tint
+        setValue(text)
+    }
+
     /// The action copied something: its title reads Copied for a moment.
     func showCopied() {
         button.showCopied()

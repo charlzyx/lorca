@@ -38,7 +38,10 @@ enum Wire {
         var models: [Model]?
         var runningChatIds: [String]
         var runningTurns: [RunningTurn]?
+        var budgets: [BudgetState]?
     }
+
+    struct BudgetsChanged: Decodable { var budgets: [BudgetState] }
 
     /// A model the CLI's catalog offers, in the catalog's order.
     struct Model: Decodable {
@@ -391,6 +394,11 @@ enum Wire {
         var costUsd: Double
         var turns: Int
         var model: String
+        var apiCostUsd: Double?
+        var subscriptionEstimateUsd: Double?
+        var unknownPriceCalls: Int?
+        var pricedCalls: Int?
+        var pricingKinds: [String]?
     }
 
     struct BotMemory: Decodable {
@@ -748,6 +756,8 @@ extension Wire.ChatUsage {
     func toModel() -> ChatUsage {
         ChatUsage(
             contextTokens: contextTokens, contextWindow: contextWindow, inputTokens: inputTokens, outputTokens: outputTokens,
-            cacheReadTokens: cacheReadTokens, costUSD: costUsd, turns: turns, model: model)
+            cacheReadTokens: cacheReadTokens, costUSD: costUsd, turns: turns, model: model,
+            apiCostUSD: apiCostUsd ?? 0, subscriptionEstimateUSD: subscriptionEstimateUsd ?? 0,
+            unknownPriceCalls: unknownPriceCalls ?? 0, pricedCalls: pricedCalls ?? 0, pricingKinds: pricingKinds ?? [])
     }
 }

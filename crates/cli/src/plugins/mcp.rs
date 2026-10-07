@@ -100,6 +100,7 @@ impl Default for Pool {
 impl Pool {
     pub fn new() -> Self {
         let http = mcp_http::Client::builder()
+            .retry(mcp_http::retry::never())
             .tls_backend_preconfigured(lorca_tls::client_config(&["h2", "http/1.1"]))
             .timeout(std::time::Duration::from_secs(600))
             .build()
@@ -261,6 +262,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
             // `${VAR}` in an mcp.json server's URL is the environment's.
             let url = &fill(url, values);
             let mut config = StreamableHttpClientTransportConfig::with_uri(url.as_str());
+            config.reinit_on_expired_session = false;
             let mut custom = HashMap::new();
             // A header naming an optional key the user left unset is left out: Context7 without its
             // key works on the free limits, and with the placeholder refuses every call.
@@ -277,8 +279,11 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                 _ => None,
             };
             let tokens = app.plugins.lock().unwrap().sign_in_secret(&plugin.manifest.id, "oauth", name);
-            let http = app.mcp.http.clone();
-            let plain = |config: StreamableHttpClientTransportConfig| move || StreamableHttpClientTransport::with_client(http.clone(), config.clone());
+            let http = crate::connector_limits::LimitedHttpClient::new(app, app.mcp.http.clone(), &plugin.manifest.id);
+            let plain = |config: StreamableHttpClientTransportConfig| {
+                let http = http.clone();
+                move || StreamableHttpClientTransport::with_client(http.clone(), config.clone())
+            };
             match (pasted, auth_spec, tokens) {
                 (Some(token), _, _) => serve_retrying(&client, plain(config.auth_header(token))).await.map_err(|e| describe_connect_error(&e.to_string(), url))?,
                 (None, Some(oauth @ AuthSpec::Oauth { .. }), Some(stored)) => {
@@ -303,7 +308,7 @@ async fn connect(app: &Arc<App>, plugin: &Installed, name: &str, spec: &ServerSp
                         let restored = if refreshable { restore_manager(app, url, &stored, metadata_url).await } else { Err("no refresh token".into()) };
                         match restored {
                             Ok(manager) => {
-                                let signed_in = AuthClient::new(app.mcp.http.clone(), manager);
+                                let signed_in = AuthClient::new(http.clone(), manager);
                                 auth = Some(signed_in.auth_manager.clone());
                                 let transport = || StreamableHttpClientTransport::with_client(signed_in.clone(), config.clone());
                                 serve_retrying(&client, transport).await.map_err(|e| describe_connect_error(&e.to_string(), url))?
@@ -1464,6 +1469,7 @@ pub fn saved_tool_count(app: &App, plugin: &Installed) -> Option<usize> {
 /// `before_tool_call` boundary ([`review_call`]).
 pub struct PluginTool {
     app: Arc<App>,
+    budget: Option<crate::budgets::BudgetContext>,
     plugin_id: String,
     plugin_name: String,
     server_name: String,
@@ -1548,6 +1554,7 @@ struct CatalogState {
 /// search or a call by name connects it.
 pub struct PluginCatalog {
     app: Arc<App>,
+    budget: Option<crate::budgets::BudgetContext>,
     local: Vec<Arc<dyn Tool>>,
     groups: Vec<PluginGroup>,
     state: Mutex<CatalogState>,
@@ -1556,7 +1563,7 @@ pub struct PluginCatalog {
 impl PluginCatalog {
     fn new(app: Arc<App>, local: Vec<Arc<dyn Tool>>) -> Self {
         let installed = app.plugins.lock().unwrap().installed().to_vec();
-        let mut catalog = PluginCatalog { app, local, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
+        let mut catalog = PluginCatalog { app, budget: crate::budgets::current(), local, groups: Vec::new(), state: Mutex::new(CatalogState::default()) };
         for plugin in &installed {
             let saved = saved_servers(&catalog.app, plugin);
             catalog.groups.push(plugin_group(&catalog.app, plugin, &saved));
@@ -1597,6 +1604,7 @@ impl PluginCatalog {
                 || tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint).unwrap_or(false)
                 || plugin.manifest.tools.readonly.iter().any(|pattern| pattern_matches(pattern, &original_name));
             let executable = Arc::new(PluginTool {
+                budget: self.budget.clone(),
                 app: self.app.clone(),
                 plugin_id: plugin.manifest.id.clone(),
                 plugin_name: plugin.manifest.name.clone(),
@@ -2095,6 +2103,8 @@ impl Tool for PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let mut params = CallToolRequestParams::default();
+        let _permit = crate::connector_limits::ConnectorLimits::acquire(&self.app, &self.plugin_id, &cancel).await.map_err(ToolError)?;
+        if let Some(budget) = &self.budget { budget.connector_call().map_err(ToolError)?; }
         params.name = tool.clone().into();
         params.arguments = args.as_object().cloned();
         // A call the user stops, or one that runs out of time, is called off at the server too
@@ -2123,6 +2133,9 @@ impl Tool for PluginTool {
             Ok(_) => return Err(ToolError(format!("{tool} answered with something other than a result"))),
             Err(rmcp::ServiceError::Timeout { .. }) => return Err(ToolError(format!("{tool} took too long"))),
             Err(error) => {
+                if let rmcp::ServiceError::McpError(error) = &error {
+                    self.app.connector_limits.observe_result(&self.app, &self.plugin_id, &serde_json::to_value(error).unwrap_or_default());
+                }
                 if let Some((scope, challenge)) = insufficient_scope(&error) {
                     needs_more_access(&self.app, &self.plugin_id, &self.server_name, &scope, &challenge);
                     return Err(ToolError(format!("{} needs more access for {tool}. The user signs in to it again to grant it.", self.plugin_name)));
@@ -2135,6 +2148,7 @@ impl Tool for PluginTool {
             }
         };
         let is_error = result.is_error.unwrap_or(false);
+        self.app.connector_limits.observe_result(&self.app, &self.plugin_id, &serde_json::to_value(&result).unwrap_or_default());
         // Off the async threads: making a large image one a model takes takes a moment.
         let (result, mut content) = tokio::task::spawn_blocking(move || {
             let content = model_content(&result);
@@ -2155,6 +2169,13 @@ impl Tool for PluginTool {
 }
 
 impl PluginTool {
+    fn describe_call_error(&self, error: &rmcp::ServiceError) -> String {
+        if let rmcp::ServiceError::McpError(data) = error {
+            self.app.connector_limits.observe_result(&self.app, &self.plugin_id, &serde_json::to_value(data).unwrap_or_default());
+        }
+        error.to_string()
+    }
+
     /// A resource tool's call: a page of the server's resources or templates, or one resource's
     /// contents, shaped as a tool's result, so a script reads `structuredContent` either way.
     async fn resources(&self, args: Value, cancel: CancellationToken) -> Result<ToolResult, ToolError> {
@@ -2164,17 +2185,19 @@ impl PluginTool {
             _ = cancel.cancelled() => return Err(ToolError("Stopped".into())),
         };
         let peer = server.service.peer();
+        let _permit = crate::connector_limits::ConnectorLimits::acquire(&self.app, &self.plugin_id, &cancel).await.map_err(ToolError)?;
+        if let Some(budget) = &self.budget { budget.connector_call().map_err(ToolError)?; }
         let page = args["cursor"].as_str().and_then(|cursor| serde_json::from_value::<rmcp::model::PaginatedRequestParams>(json!({ "cursor": cursor })).ok());
         let asked = async {
             Ok::<Value, String>(match self.kind {
-                ToolKind::ListResources => listed(serde_json::to_value(peer.list_resources(page).await.map_err(|e| e.to_string())?).unwrap_or_default(), "resources"),
+                ToolKind::ListResources => listed(serde_json::to_value(peer.list_resources(page).await.map_err(|e| self.describe_call_error(&e))?).unwrap_or_default(), "resources"),
                 ToolKind::ListResourceTemplates => {
-                    listed(serde_json::to_value(peer.list_resource_templates(page).await.map_err(|e| e.to_string())?).unwrap_or_default(), "resourceTemplates")
+                    listed(serde_json::to_value(peer.list_resource_templates(page).await.map_err(|e| self.describe_call_error(&e))?).unwrap_or_default(), "resourceTemplates")
                 }
                 ToolKind::ReadResource | ToolKind::Call => {
                     let uri = args["uri"].as_str().filter(|uri| !uri.trim().is_empty()).ok_or("read_mcp_resource needs the resource's uri")?;
                     let params = serde_json::from_value::<rmcp::model::ReadResourceRequestParams>(json!({ "uri": uri })).map_err(|e| e.to_string())?;
-                    serde_json::to_value(peer.read_resource(params).await.map_err(|e| e.to_string())?).unwrap_or_default()
+                    serde_json::to_value(peer.read_resource(params).await.map_err(|e| self.describe_call_error(&e))?).unwrap_or_default()
                 }
             })
         };
@@ -2601,6 +2624,7 @@ mod tests {
             search_schema: schema.into(),
             server_instructions: String::new(),
             tool: Arc::new(PluginTool {
+                budget: None,
                 app: app.clone(),
                 plugin_id: plugin_id.into(),
                 plugin_name: plugin_name.into(),

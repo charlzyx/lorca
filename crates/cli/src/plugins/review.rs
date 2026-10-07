@@ -205,6 +205,7 @@ pub async fn review(app: &Arc<App>, bot: &Bot, chat_id: &str, trigger: &Trigger,
         acc.apply(&event);
     }
     let message = acc.finish(cancel.is_cancelled());
+    app.add_side_usage(chat_id, &message.usage);
     if matches!(message.stop_reason, StopReason::Aborted | StopReason::Error) {
         let error = message.error_message.unwrap_or_else(|| "no answer".into());
         tracing::warn!(%error, "auto-review call failed");

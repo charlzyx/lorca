@@ -743,10 +743,11 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Err(error) => tracing::warn!(%error, "chat blob"),
         },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
-            Ok(MachineBlob { device, turns }) => {
+            Ok(MachineBlob { device, turns, budgets }) => {
                 if app.this_device_id().as_deref() == Some(device.id.as_str()) {
                     return;
                 }
+                app.budgets.merge_remote(app, &device.id, budgets);
                 // Shown only while the relay lists the Device online, so a key it no longer
                 // lists shows nothing.
                 app.set_device_turns(&device.id, turns);

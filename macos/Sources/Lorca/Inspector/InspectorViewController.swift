@@ -39,6 +39,7 @@ final class InspectorViewController: NSViewController {
     /// The usage rows under Runs with, which take new values after every turn.
     private var contextRow: ActionRow?
     private var spentRow: KeyValueRow?
+    private var budgetRow: ActionRow?
     private lazy var noRoutinesRow = NoteRow(
         text: L("Routines are recurring tasks this bot runs on a schedule. Ask it in chat to set one up."))
     private lazy var marketplaceRow: ActionRow = {
@@ -343,6 +344,8 @@ final class InspectorViewController: NSViewController {
             contextRow?.setValue(usage.contextSummary)
             spentRow?.setValue(usage.spendSummary)
         }
+        let held = store.budgets(for: chat.id, runnerID: bot.runnerID).first(where: { $0.needsRecovery })
+        budgetRow?.setValue(held?.stateLabel ?? L("Task limits"), tint: held == nil ? .secondaryLabelColor : .systemOrange)
     }
 
     private func showMemory(of bot: Bot) {
@@ -478,7 +481,14 @@ final class InspectorViewController: NSViewController {
         }
 
         // Only the levels this model takes; a model without any has no choice to make.
-        return [providerRow, modelRow] + (levels.isEmpty ? [] : [thinkingRow]) + [status] + usageRows
+        let held = store.budgets(for: chat.id, runnerID: bot.runnerID).first(where: { $0.needsRecovery })
+        let budget = ActionRow(key: L("Budget"), value: held?.stateLabel ?? L("Task limits"), tint: held == nil ? .secondaryLabelColor : .systemOrange, actionTitle: L("Manage…"))
+        budgetRow = budget
+        budget.onAction = { [weak self] in
+            guard let self else { return }
+            self.presentAsSheet(BudgetViewController(bot: bot, chatID: chat.id))
+        }
+        return [providerRow, modelRow] + (levels.isEmpty ? [] : [thinkingRow]) + [status, budget] + usageRows
     }
 
     /// What the bot remembers, as its Runner reports it: the index against its load budget with

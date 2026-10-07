@@ -1088,6 +1088,11 @@ struct ChatUsage: Hashable {
     var costUSD: Double
     var turns: Int
     var model: String
+    var apiCostUSD: Double = 0
+    var subscriptionEstimateUSD: Double = 0
+    var unknownPriceCalls: Int = 0
+    var pricedCalls: Int = 0
+    var pricingKinds: [String] = []
 
     /// "128k of 1M · 13%", or "128k" when the window is unknown.
     var contextSummary: String {
@@ -1098,8 +1103,18 @@ struct ChatUsage: Hashable {
 
     /// "$0.42 · 18 turns"
     var spendSummary: String {
-        let dollars = costUSD < 0.01 && costUSD > 0 ? "<$0.01" : String(format: "$%.2f", costUSD)
-        return turns == 1 ? L("%@ · %d turn", dollars, turns) : L("%@ · %d turns", dollars, turns)
+        guard pricedCalls > 0 else { return L("Pricing unknown · %d turns", turns) }
+        var parts: [String] = []
+        if pricingKinds.contains("api") { parts.append(L("API %@", Self.dollars(apiCostUSD))) }
+        if pricingKinds.contains("subscription_estimate") { parts.append(L("API-equivalent estimate %@", Self.dollars(subscriptionEstimateUSD))) }
+        if unknownPriceCalls > 0 { parts.append(L("Pricing unknown")) }
+        if parts.isEmpty { parts.append(L("API %@", Self.dollars(0))) }
+        parts.append(L("%d turns", turns))
+        return parts.joined(separator: " · ")
+    }
+
+    private static func dollars(_ value: Double) -> String {
+        value > 0 && value < 0.01 ? "<$0.01" : String(format: "$%.2f", value)
     }
 }
 

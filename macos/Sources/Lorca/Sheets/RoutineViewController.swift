@@ -10,6 +10,7 @@ final class RoutineViewController: SheetViewController {
     private let bot: Bot
 
     private let schedule = SectionView(title: L("Schedule"))
+    private let budgetSection = SectionView(title: L("Budget"))
     private let task = SectionView(title: L("Task"))
     private let prompt = NSTextView()
     private let checkSection = SectionView(title: L("Check"))
@@ -61,11 +62,13 @@ final class RoutineViewController: SheetViewController {
         let actions = Build.stack([runButton, pauseButton, editButton, spacer, deleteButton], orientation: .horizontal, spacing: 8)
 
         contentStack.addArrangedSubview(schedule)
+        contentStack.addArrangedSubview(budgetSection)
         contentStack.addArrangedSubview(task)
         contentStack.addArrangedSubview(checkSection)
         contentStack.addArrangedSubview(actions)
         NSLayoutConstraint.activate([
             schedule.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            budgetSection.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             task.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             checkSection.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
             actions.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
@@ -130,6 +133,13 @@ final class RoutineViewController: SheetViewController {
             KeyValueRow(key: L("Last run"), value: routine.lastRunSummary),
         ])
         if prompt.string != routine.prompt { prompt.string = routine.prompt }
+        let budgetState = store.budgets.first { $0.kind == "routine" && $0.id == routineID && $0.runnerId == bot.runnerID }
+        let budget = ActionRow(key: L("Allowance"), value: budgetState?.stateLabel ?? L("Unlimited"), tint: budgetState?.needsRecovery == true ? .systemOrange : .secondaryLabelColor, actionTitle: L("Manage…"))
+        budget.onAction = { [weak self] in
+            guard let self, let chat = self.store.chats.first(where: { !$0.isGroup && $0.botIDs.contains(self.bot.id) }) else { return }
+            self.presentAsSheet(BudgetViewController(bot: self.bot, chatID: chat.id, routineID: self.routineID))
+        }
+        budgetSection.setRows([budget])
         checkSection.isHidden = routine.check == nil
         if check.string != (routine.check ?? "") { check.string = routine.check ?? "" }
         pauseButton.title = routine.isEnabled ? L("Pause") : L("Resume")

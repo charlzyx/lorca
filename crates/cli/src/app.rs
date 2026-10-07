@@ -153,6 +153,9 @@ pub struct App {
     pub credentials: Mutex<Credentials>,
     pub state: Mutex<State>,
     pub store: LocalStore,
+    pub budgets: crate::budgets::BudgetStore,
+    #[cfg(feature = "runner")]
+    pub connector_limits: crate::connector_limits::ConnectorLimits,
     pub events: broadcast::Sender<Event>,
     pub relay: RelayClient,
     pub outbox_notify: Notify,
@@ -271,6 +274,9 @@ impl App {
             credentials: Mutex::new(credentials),
             state: Mutex::new(state),
             store,
+            budgets: crate::budgets::BudgetStore::default(),
+            #[cfg(feature = "runner")]
+            connector_limits: crate::connector_limits::ConnectorLimits::default(),
             events,
             relay: RelayClient::new()?,
             outbox_notify: Notify::new(),
@@ -546,6 +552,9 @@ impl App {
         *self.credentials.lock().unwrap() = Credentials::default();
         *self.state.lock().unwrap() = State::default();
         self.store.clear()?;
+        self.budgets.clear();
+        #[cfg(feature = "runner")]
+        self.connector_limits.clear();
         self.settings.lock().unwrap().relay_url = None;
         self.relay.forget_token();
         *self.relay_problem.lock().unwrap() = None;
@@ -733,8 +742,9 @@ impl App {
     pub fn push_machine_blob_if_changed(&self) {
         let (Some(dek), Some(device)) = (self.dek(), self.local_device()) else { return };
         let turns = self.turns_here();
+        let budgets = self.budgets.local_snapshots(self);
         let fingerprint = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             device.id,
             device.name,
             device.model,
@@ -743,7 +753,8 @@ impl App {
             serde_json::to_string(&device.plugins).unwrap_or_default(),
             device.version,
             serde_json::to_string(&device.update).unwrap_or_default(),
-            serde_json::to_string(&turns).unwrap_or_default()
+            serde_json::to_string(&turns).unwrap_or_default(),
+            serde_json::to_string(&budgets).unwrap_or_default()
         );
         let hash = keys::b64(&<sha2::Sha256 as sha2::Digest>::digest(fingerprint.as_bytes()));
         let changed = {
@@ -760,7 +771,7 @@ impl App {
             return;
         }
         let device_id = device.id.clone();
-        match crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns }) {
+        match crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns, budgets }) {
             Ok(ciphertext) => {
                 self.push_slot_blob("machine", Slot::latest(format!("machine-{}", device_id)), None, ciphertext);
             }
@@ -1539,6 +1550,25 @@ impl App {
         self.upsert_message(message, true);
     }
 
+    #[cfg(feature = "runner")]
+    pub fn record_pricing(&self, chat_id: &str, pricing: crate::budgets::Pricing, usd: f64) {
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let entry = chat.usage.get_or_insert_with(ChatUsage::default);
+            if !entry.pricing_kinds.contains(&pricing) { entry.pricing_kinds.push(pricing); }
+            match pricing {
+                crate::budgets::Pricing::Api => entry.api_cost_usd += usd,
+                crate::budgets::Pricing::SubscriptionEstimate => entry.subscription_estimate_usd += usd,
+                crate::budgets::Pricing::Unknown => entry.unknown_price_calls += 1,
+            }
+            entry.priced_calls += 1;
+            entry.clone()
+        };
+        self.save_state();
+        self.emit(Event::ChatUsageChanged { chat_id: chat_id.into(), usage: updated });
+    }
+
     /// Adds a finished turn's usage to the chat's and tells the app.
     #[cfg(feature = "runner")]
     pub fn record_usage(&self, chat_id: &str, model: &str, usage: &lorca_agent::Usage, context_window: u64) {
@@ -1794,6 +1824,7 @@ impl App {
             "models": models_out(),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
+            "budgets": self.budgets.snapshots(self),
         })
     }
 }

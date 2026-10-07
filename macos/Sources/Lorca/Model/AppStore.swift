@@ -68,6 +68,7 @@ final class AppStore {
     private(set) var chats: [Chat] = []
     /// Every bot's routines, from the roster.
     private(set) var routines: [Routine] = []
+    private(set) var budgets: [BudgetState] = []
     /// Auto-review, shared through the roster.
     private(set) var autoReview = AutoReview()
     /// The account's provider credentials, the same on every Device.
@@ -273,6 +274,7 @@ final class AppStore {
             return chat
         }
         routines = (snapshot.routines ?? []).map { $0.toModel() }
+        budgets = snapshot.budgets ?? []
         autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
@@ -385,6 +387,11 @@ final class AppStore {
             else { return }
             chats[index].usage = payload.usage.toModel()
             emit(.chatChanged(payload.chatId))
+
+        case "budgets.changed":
+            guard let payload = decode(Wire.BudgetsChanged.self) else { return }
+            budgets = payload.budgets
+            emit(.rosterChanged)
 
         case "relay.status":
             guard let status = decode(Wire.RelayStatus.self) else { return }

@@ -63,6 +63,14 @@ const UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
     match method {
+        method if method.starts_with("budgets.") => crate::budgets::dispatch(app, method, &params).await,
+        #[cfg(feature = "runner")]
+        method if method.starts_with("connector_limits.") => crate::connector_limits::dispatch(app, method, &params).await,
+        #[cfg(not(feature = "runner"))]
+        method if method.starts_with("connector_limits.") => {
+            let runner = string(&params, "runner_id")?;
+            requests::ask(app, &runner, method, params).await
+        }
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             "has_identity": app.has_identity(),

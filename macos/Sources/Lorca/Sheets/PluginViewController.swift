@@ -10,6 +10,7 @@ final class PluginViewController: SheetViewController {
     private let bot: Bot?
 
     private let status = SectionView(title: L("Status"))
+    private let callLimits = SectionView(title: L("Call limits"))
     private let signIn = SectionView(title: L("Sign-in"))
     private let variables = SectionView(title: L("Setup", context: "plugin variables"))
     private let skills = SectionView(title: L("Skills"))
@@ -56,7 +57,7 @@ final class PluginViewController: SheetViewController {
         let actions = Build.stack(
             [saveButton, spacer, removeButton], orientation: .horizontal, spacing: 8)
 
-        for section in [status, signIn, variables, skills] {
+        for section in [status, callLimits, signIn, variables, skills] {
             contentStack.addArrangedSubview(section)
             section.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
         }
@@ -67,6 +68,12 @@ final class PluginViewController: SheetViewController {
             actions.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
         ])
         setButtons(confirm: L("Done"), cancel: nil)
+        let limits = ActionRow(key: L("Shared connector limits"), value: L("Account and service"), tint: .secondaryLabelColor, actionTitle: L("Manage…"))
+        limits.onAction = { [weak self] in
+            guard let self else { return }
+            self.presentAsSheet(ConnectorLimitsViewController(pluginID: self.pluginID, runner: self.runner))
+        }
+        callLimits.setRows([limits])
         status.setRows([KeyValueRow(key: L("State"), value: L("Loading…"), tint: .secondaryLabelColor)])
         signIn.isHidden = true
         variables.isHidden = true

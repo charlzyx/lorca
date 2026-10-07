@@ -184,6 +184,7 @@ pub fn describe(schedule_text: &str) -> Result<Value, String> {
 /// Starts a run of the routine now, here or on the bot's Runner through the relay. Refuses
 /// while a run is going on.
 pub fn run_now(app: &Arc<App>, id: &str) -> Result<(), String> {
+    app.budgets.admit(app, "routine", id)?;
     let routine = app.routine(id).ok_or("Unknown routine")?;
     if app.is_routine_running(&routine.id) {
         return Err(format!("{} is running right now.", routine.name));
@@ -197,6 +198,7 @@ pub fn run_now(app: &Arc<App>, id: &str) -> Result<(), String> {
 fn job_for(app: &Arc<App>, routine: &Routine) -> Result<Job, String> {
     let dm = app.dm_with(&routine.bot_id, None).map_err(|e| e.to_string())?;
     Ok(Job {
+        task_id: None,
         id: format!("job-{}", uuid::Uuid::new_v4()),
         chat_id: dm.meta.id,
         bot_id: routine.bot_id.clone(),
@@ -250,6 +252,7 @@ pub fn tick(app: &Arc<App>) {
         .into_iter()
         .filter(|r| due_at(app, r).is_some_and(|t| t <= now))
         .filter(|r| app.bot(&r.bot_id).is_some_and(|b| b.runner_id == this) && !app.is_routine_running(&r.id) && !app.routine_checks.is_running(&r.id))
+        .filter(|r| app.budgets.admit(app, "routine", &r.id).is_ok())
         .collect();
     if due.is_empty() {
         return;
@@ -438,6 +441,18 @@ pub async fn check_now(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
 /// asked anything: a call that could change something ends the check.
 #[cfg(feature = "runner")]
 pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
+    if routine.check.is_none() { return CheckRun { found: None, error: None, result: String::new() }; }
+    let failed = |error: String| CheckRun { found: None, error: Some(error.clone()), result: error };
+    let dm = match app.dm_with(&routine.bot_id, None) { Ok(dm) => dm, Err(error) => return failed(error.to_string()) };
+    let budget = match crate::budgets::for_routine(app, routine, &dm.meta.id) { Ok(budget) => budget, Err(error) => return failed(error) };
+    match budget.run(cancel, run_budgeted_check(app, routine, cancel)).await {
+        Ok(run) => run,
+        Err(error) => failed(error),
+    }
+}
+
+#[cfg(feature = "runner")]
+async fn run_budgeted_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationToken) -> CheckRun {
     let failed = |error: String| CheckRun { found: None, error: Some(error.clone()), result: error };
     let Some(code) = routine.check.as_deref() else { return CheckRun { found: None, error: None, result: String::new() } };
     let Some(bot) = app.bot(&routine.bot_id) else { return failed("The routine's bot is gone.".into()) };
@@ -453,7 +468,7 @@ pub async fn run_check(app: &Arc<App>, routine: &Routine, cancel: &CancellationT
         crate::scripts::ModelsAsk::new(app, &dm.meta.id, &bot.provider).map(|ask| Arc::new(ask) as Arc<dyn HostFunction>).into_iter().collect();
     let options = CodemodeOptions { mcp_types: !crate::plugins::mcp::plugin_briefs(app).is_empty(), timeout: CHECK_TIMEOUT, ..CodemodeOptions::default() };
     let codemode = CodemodeTool::new(catalog.clone(), options).with_store(store).with_functions(functions);
-    let runner = CheckRunner { app: app.clone(), catalog };
+    let runner = CheckRunner { app: app.clone(), catalog, budget: crate::budgets::current() };
     match codemode.run_script(&format!("check-{}", routine.id), code, cancel.clone(), &runner).await {
         Err(error) => failed(error.0),
         Ok(run) => {
@@ -495,12 +510,16 @@ fn clipped(text: &str, max: usize) -> String {
 struct CheckRunner {
     app: Arc<App>,
     catalog: Arc<crate::plugins::mcp::PluginCatalog>,
+    budget: Option<crate::budgets::BudgetContext>,
 }
 
 #[cfg(feature = "runner")]
 #[async_trait::async_trait]
 impl ToolRunner for CheckRunner {
     async fn run(&self, tool: Arc<dyn Tool>, tool_call_id: String, args: Value, cancel: CancellationToken) -> ToolOutcome {
+        if let Some(reason) = self.budget.as_ref().and_then(|budget| budget.check().err()) {
+            return ToolOutcome { result: ToolResult { is_error: true, ..ToolResult::text(reason) }, is_error: true, blocked: true };
+        }
         let reads = CHECK_FILE_TOOLS.contains(&tool.name()) || crate::plugins::mcp::is_read_only(&self.app, &self.catalog, tool.name(), &cancel).await;
         if !reads {
             let refusal = format!("{} can change things, and a check only looks: leave it to the run the check starts.", tool.name());

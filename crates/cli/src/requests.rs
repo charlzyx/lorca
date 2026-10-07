@@ -97,6 +97,9 @@ pub fn serve(app: Arc<App>, request: Request, blob_id: String) {
 async fn answer(app: &Arc<App>, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        verb if verb.starts_with("budgets.") => crate::budgets::serve(app, verb, body),
+        #[cfg(feature = "runner")]
+        verb if verb.starts_with("connector_limits.") => crate::connector_limits::serve(app, verb, body),
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),
         "memory.write" => {
             let text = body["text"].as_str().ok_or("missing text")?;
