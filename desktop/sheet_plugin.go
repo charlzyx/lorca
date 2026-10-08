@@ -237,7 +237,7 @@ func (s *pluginSheet) view(c *ui.Context, sh *sheet) {
 		if s.detail != nil && len(s.detail.Skills) > 0 {
 			section(c, L("Skills"), sectionCaption, nil, func(k *card) {
 				for _, skill := range s.detail.Skills {
-					keyValueRow(k, skill.Name, skill.Description, false, nil)
+					keyValueRow(c, k, skill.Name, skill.Description, false, nil)
 				}
 			})
 		}
@@ -273,26 +273,26 @@ func (s *pluginSheet) statusSection(c *ui.Context) {
 			if s.loadError != "" {
 				value, tint = s.loadError, p.Red
 			}
-			keyValueRow(k, L("State"), value, false, &tint)
+			keyValueRow(c, k, L("State"), value, false, &tint)
 			return
 		}
 		detail := s.detail
 		tint := p.tone(detail.Status.State.Tone())
-		keyValueRow(k, L("State"), detail.Status.Detail, false, &tint)
+		keyValueRow(c, k, L("State"), detail.Status.Detail, false, &tint)
 		if rules := s.rules(); len(rules) > 0 {
 			prefix := s.pluginID + "/"
 			tools := make([]string, 0, len(rules))
 			for _, rule := range rules {
 				tools = append(tools, strings.TrimPrefix(rule.Tool, prefix))
 			}
-			r := actionRow(k, Lc("Always allowed", "plugin tools"), actionRowOptions{Value: strings.Join(tools, ", "), Tint: &p.Label, Action: L("Reset")})
-			if r.Action.Clicked() {
+			_, r := actionRow(c, k, Lc("Always allowed", "plugin tools"), actionRowOptions{Value: strings.Join(tools, ", "), Tint: &p.Label, Action: L("Reset")})
+			if r.Action {
 				s.resetRules()
 			}
 		}
 		if site := hostOf(detail.Homepage); detail.Homepage != "" && site != "" {
-			r := actionRow(k, L("Site"), actionRowOptions{Value: site, Tint: &p.Label2, Action: L("Open")})
-			if r.Action.Clicked() {
+			_, r := actionRow(c, k, L("Site"), actionRowOptions{Value: site, Tint: &p.Label2, Action: L("Open")})
+			if r.Action {
 				_ = openExternal(detail.Homepage)
 			}
 		}
@@ -334,8 +334,8 @@ func (s *pluginSheet) signInSection(c *ui.Context) {
 				if copied {
 					title = L("Copied")
 				}
-				r := actionRow(k, label, actionRowOptions{Value: server.Code, Tint: &p.Label, Mono: true, Action: title, Copied: copied})
-				if r.Action.Clicked() {
+				_, r := actionRow(c, k, label, actionRowOptions{Value: server.Code, Tint: &p.Label, Mono: true, Action: title, Copied: copied})
+				if r.Action {
 					c.WriteClipboard(server.Code)
 					s.copiedAt[server.Name] = c.Now()
 					_ = openExternal(server.Link)
@@ -346,11 +346,11 @@ func (s *pluginSheet) signInSection(c *ui.Context) {
 			if server.SignedIn {
 				value, tint, action, second = L("Signed in"), p.Green, L("Sign Out"), L("Sign in again")
 			}
-			r := actionRow(k, label, actionRowOptions{Value: value, Tint: &tint, Action: action, Second: second})
+			_, r := actionRow(c, k, label, actionRowOptions{Value: value, Tint: &tint, Action: action, Second: second})
 			if r.Second {
 				s.connect()
 			}
-			if r.Action.Clicked() {
+			if r.Action {
 				if server.SignedIn {
 					s.signOut(server.Name)
 				} else {
@@ -371,7 +371,7 @@ func (s *pluginSheet) setupSection(c *ui.Context) {
 			if variable.Required {
 				key += " *"
 			}
-			r := k.row(ui.Row(c).Key(variable.Name).Gap(10).MinHeight(34).Padding(4, 10, 4, 12).MinWidth(0).Label(variable.Name))
+			r := k.row(ui.Row(c.Key(variable.Name)).Gap(10).MinHeight(34).Padding(4, 10, 4, 12).MinWidth(0).Label(variable.Name))
 			r.Children(func() {
 				ui.Text(c, key).Grow(1).Shrink(1).MinWidth(0).Font(monoFont).FontSize(11).TextColor(p.Label2).SingleLine()
 				placeholder := ""

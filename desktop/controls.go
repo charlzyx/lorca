@@ -38,7 +38,7 @@ type hoverButtonOptions struct {
 }
 
 // hoverButton is a borderless symbol button that fills a rounded rect under the pointer.
-func hoverButton(c *ui.Context, o hoverButtonOptions) *ui.Element {
+func hoverButton(c *ui.Context, o hoverButtonOptions) ui.Element {
 	p := colors(c)
 	b := ui.ButtonBase(c).Height(28).MinWidth(28).Radius(6).Gap(5).Justify(ui.Center).TextColor(p.Label2)
 	if o.Title != "" {
@@ -97,7 +97,7 @@ type pushOptions struct {
 
 // pushButton is a push button as macOS 26 draws one: a flat rounded fill without a border or
 // shadow, 24 tall, in the accent color for the default button.
-func pushButton(c *ui.Context, title string, o pushOptions) *ui.Element {
+func pushButton(c *ui.Context, title string, o pushOptions) ui.Element {
 	p := colors(c)
 	b := ui.ButtonBase(c).Height(24).Padding(0, 12).Radius(6).Gap(5).Justify(ui.Center).FontSize(13).TextColor(p.Label).Label(title)
 	switch {
@@ -144,7 +144,7 @@ func pushButton(c *ui.Context, title string, o pushOptions) *ui.Element {
 }
 
 // linkButton is a text button in the accent color, as the rows' Edit… and Change are.
-func linkButton(c *ui.Context, title string, disabled bool) *ui.Element {
+func linkButton(c *ui.Context, title string, disabled bool) ui.Element {
 	p := colors(c)
 	b := ui.ButtonBase(c).Gap(4).FontSize(12).FontWeight(500).TextColor(p.Accent).Label(title).Cursor(ui.CursorPointer)
 	if disabled {
@@ -155,7 +155,7 @@ func linkButton(c *ui.Context, title string, disabled bool) *ui.Element {
 }
 
 // toggleSwitch is a switch: a track in the accent color while on, and a white knob that slides.
-func toggleSwitch(c *ui.Context, on *bool, small bool) *ui.Element {
+func toggleSwitch(c *ui.Context, on *bool, small bool) ui.Element {
 	p := colors(c)
 	w, h, knob := float32(32), float32(19), float32(15)
 	if small {
@@ -321,7 +321,7 @@ type fieldOptions struct {
 
 // fieldChrome draws a field's border and fill, and its focus as a single ring two wide: the border
 // in the accent color and a DIP more outside it.
-func fieldChrome(c *ui.Context, e *ui.Element, focused, plain bool) {
+func fieldChrome(c *ui.Context, e ui.Element, focused, plain bool) {
 	p := colors(c)
 	e.FocusRing(false)
 	if plain {
@@ -336,7 +336,7 @@ func fieldChrome(c *ui.Context, e *ui.Element, focused, plain bool) {
 }
 
 // textField is a one-line field; its Submitted is Return.
-func textField(c *ui.Context, value *string, o fieldOptions) *ui.Element {
+func textField(c *ui.Context, value *string, o fieldOptions) ui.Element {
 	p := colors(c)
 	e := ui.TextInputBase(c, value).MinHeight(26).Padding(4, 8).FontSize(13).TextColor(p.Label)
 	if o.Mono {
@@ -368,7 +368,7 @@ func textField(c *ui.Context, value *string, o fieldOptions) *ui.Element {
 }
 
 // textArea is a field of several lines, `lines` high, which scrolls past them.
-func textArea(c *ui.Context, value *string, lines int, o fieldOptions) *ui.Element {
+func textArea(c *ui.Context, value *string, lines int, o fieldOptions) ui.Element {
 	p := colors(c)
 	e := ui.TextAreaBase(c, value).Padding(6, 8).FontSize(13).LineHeight(1.4).TextColor(p.Label)
 	size := float32(13)
@@ -400,12 +400,12 @@ func textArea(c *ui.Context, value *string, lines int, o fieldOptions) *ui.Eleme
 
 // searchField is a capsule search field with a magnifier and a clear button; Escape clears it
 // while it has text. Its Changed and Submitted are the input's.
-func searchField(c *ui.Context, value *string, placeholder string) *ui.Element {
+func searchField(c *ui.Context, value *string, placeholder string) ui.Element {
 	p := colors(c)
 	if placeholder == "" {
 		placeholder = L("Search")
 	}
-	var input *ui.Element
+	var input ui.Element
 	box := ui.Row(c).Height(30).Gap(6).Padding(0, 8, 0, 10).Radius(15).Background(p.SearchBG).TextColor(p.Label2).Cursor(ui.CursorText)
 	box.Children(func() {
 		symbol(c, "magnifyingglass", 13, 2)
@@ -431,7 +431,7 @@ func searchField(c *ui.Context, value *string, placeholder string) *ui.Element {
 }
 
 // spinner is the system's spinner, `size` across.
-func spinner(c *ui.Context, size float32) *ui.Element {
+func spinner(c *ui.Context, size float32) ui.Element {
 	return ui.Spinner(c).Size(size, size)
 }
 
@@ -444,7 +444,7 @@ type copyOptions struct {
 
 // copyButton copies `text` and says so for a moment: its symbol turns into a green check, its
 // title into Copied. It reports the click.
-func copyButton(c *ui.Context, text string, o copyOptions) *ui.Element {
+func copyButton(c *ui.Context, text string, o copyOptions) ui.Element {
 	p := colors(c)
 	b := ui.ButtonBase(c).Height(24).MinWidth(24).Gap(5).Justify(ui.Center).Radius(5)
 	copiedAt := ui.Local(b, "copied", func() time.Time { return time.Time{} })
@@ -494,7 +494,7 @@ func copyButton(c *ui.Context, text string, o copyOptions) *ui.Element {
 }
 
 // segmented is a segmented control: one choice of a few, each a segment as wide as its label.
-func segmented(c *ui.Context, selected *int, label string, labels ...string) *ui.Element {
+func segmented(c *ui.Context, selected *int, label string, selectValue func(int), labels ...string) ui.Element {
 	p := colors(c)
 	parts := ui.SegmentedBase(c, selected, len(labels))
 	parts.Track.Padding(2).Radius(7).Background(p.Chip).Label(label)
@@ -502,6 +502,9 @@ func segmented(c *ui.Context, selected *int, label string, labels ...string) *ui
 		for i, text := range labels {
 			// Each segment is as wide as its words.
 			seg := parts.Segment(i).Height(22).Padding(0, 10).Radius(5).FontSize(12).TextColor(p.Label).Justify(ui.Center).Shrink(0)
+			if selectValue != nil {
+				seg.OnClick(func() { selectValue(*selected) })
+			}
 			if i == *selected {
 				seg.Background(p.Popover).Shadow(0, 1, 2, 0, ui.RGBA(0, 0, 0, 0.12))
 			}
@@ -512,6 +515,6 @@ func segmented(c *ui.Context, selected *int, label string, labels ...string) *ui
 }
 
 // caption is a small line of secondary text.
-func caption(c *ui.Context, text string) *ui.Element {
+func caption(c *ui.Context, text string) ui.Element {
 	return ui.Text(c, text).FontSize(textCaption).TextColor(colors(c).Label2)
 }

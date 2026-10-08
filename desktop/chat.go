@@ -169,7 +169,7 @@ func (m *mainWindow) chatView(c *ui.Context, chatID string) {
 		}
 		if !s.list.AtEnd() && len(rows) > 0 {
 			// A glass disc, as AppKit's glass bezel draws the Mac's.
-			jump := ui.ButtonBase(c).Key("jump").Absolute().Right(horizontalInset).Bottom(bottom+14).Size(28, 28).Radius(14).Center().
+			jump := ui.ButtonBase(c.Key("jump")).Absolute().Right(horizontalInset).Bottom(bottom+14).Size(28, 28).Radius(14).Center().
 				Material(glassButton{p.GlassButton}).Border(1, p.ComposerBorder).Shadow(0, 1, 1.5, -0.5, ui.RGBA(0, 0, 0, 0.08)).TextColor(p.Label).
 				Label(L("Scroll to latest")).Tooltip(L("Scroll to latest (%@)", shortcutText("CmdOrCtrl+J")))
 			jump.Children(func() { symbol(c, "arrow.down", 15, 2.1) })
@@ -449,7 +449,7 @@ func imageSize(attachment model.Attachment) (float32, float32) {
 // attachmentTiles are thumbnails and file cards inside a bubble, above the text: images side by
 // side, wrapping at the bubble's edge, and each file card on a row of its own. A click opens the
 // file.
-func attachmentTiles(c *ui.Context, chatID string, message *model.Message, onUser bool) *ui.Element {
+func attachmentTiles(c *ui.Context, chatID string, message *model.Message, onUser bool) ui.Element {
 	p := colors(c)
 	var rows [][]model.Attachment
 	for _, attachment := range message.Attachments {
@@ -471,17 +471,17 @@ func attachmentTiles(c *ui.Context, chatID string, message *model.Message, onUse
 					if path == "" {
 						tooltip = L("%@ · fetching…", attachment.Name)
 					}
-					var tile *ui.Element
+					var tile ui.Element
 					if attachment.IsImage() {
 						w, h := imageSize(attachment)
-						tile = ui.ButtonBase(c).Size(w, h).Radius(8).Clip().Background(p.Code)
+						tile = ui.ButtonBase(c.Key(attachment.ID)).Size(w, h).Radius(8).Clip().Background(p.Code)
 						tile.Children(func() {
 							if bitmap := loadBitmap(path); bitmap != nil {
 								ui.Image(c, bitmap).Size(w, h).Fit(ui.Cover)
 							}
 						})
 					} else {
-						tile = ui.ButtonBase(c).Width(230).MaxWidthPercent(100).Height(46).Padding(0, 10).Gap(8).Radius(9).Background(p.Code)
+						tile = ui.ButtonBase(c.Key(attachment.ID)).Width(230).MaxWidthPercent(100).Height(46).Padding(0, 10).Gap(8).Radius(9).Background(p.Code)
 						if onUser {
 							tile.Background(ui.RGBA(255, 255, 255, 0.18))
 						}
@@ -493,7 +493,7 @@ func attachmentTiles(c *ui.Context, chatID string, message *model.Message, onUse
 							})
 						})
 					}
-					tile.Key(attachment.ID).Label(attachment.Name).Tooltip(tooltip)
+					tile.Label(attachment.Name).Tooltip(tooltip)
 					if tile.Clicked() && path != "" {
 						openFile(path)
 					}
@@ -657,7 +657,7 @@ func workingCell(c *ui.Context, bots []*model.Bot, activity string, showsName bo
 
 // shimmerText is words dimmed to 40%, with a bright band 30% of their width sweeping from the
 // leading edge to the trailing one in 1.5 s, resting a quarter second between sweeps.
-func shimmerText(c *ui.Context, text string, size float32, color ui.Color) *ui.Element {
+func shimmerText(c *ui.Context, text string, size float32, color ui.Color) ui.Element {
 	t := ui.Text(c, text).FontSize(size).FixedLineHeight(16).TextColor(color.Alpha(0.4)).SingleLine().Shrink(1).MinWidth(0)
 	t.DrawOver(func(painter *ui.Painter, r ui.Rect) {
 		painter.AnimationFrame()
@@ -849,7 +849,7 @@ func chatEmptyState(c *ui.Context, m *mainWindow, chat *model.Chat, bots []*mode
 			ui.Text(c, subtitle).MaxWidth(400).FontSize(12.5).LineHeight(1.4).TextColor(p.Label2).TextAlign(ui.Center).MaxLines(2)
 			ui.Column(c).Gap(8).AlignItems(ui.Center).Margin(6, 0, 0, 0).Children(func() {
 				for _, prompt := range emptyPrompts(bots) {
-					chip := ui.ButtonBase(c).Padding(6, 12).Radius(999).Border(1, p.Separator).Background(p.Chip).TextColor(p.Label2).FontSize(12).Cursor(ui.CursorPointer).Key(prompt)
+					chip := ui.ButtonBase(c.Key(prompt)).Padding(6, 12).Radius(999).Border(1, p.Separator).Background(p.Chip).TextColor(p.Label2).FontSize(12).Cursor(ui.CursorPointer)
 					if chip.Hovered() {
 						chip.BorderColor(p.Accent.Alpha(0.4)).Background(p.Accent.Alpha(0.12)).TextColor(p.Accent)
 					}

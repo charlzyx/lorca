@@ -10,36 +10,35 @@ import (
 
 // autoReview is the switch and the rules, shared by every Device through the roster. Add and Edit
 // use a sheet; a card's Always allow adds a rule here.
-func (s settingsPane) autoReview() {
-	c := s.c
+func (s settingsPane) autoReview(c *ui.Context) {
 	p := colors(c)
 	review := store.AutoReview
-	s.frame(string(model.PaneAutoReview), func() {
-		s.section(L("Auto-review"), nil, func(k *card) {
+	s.frame(c, string(model.PaneAutoReview), func() {
+		s.section(c, L("Auto-review"), nil, func(k *card) {
 			label := autoReviewSwitchEntry().row
-			s.mark(accessoryRow(k, label, "", func() {
+			s.mark(c, accessoryRow(c, k, label, "", func() {
 				on := review.IsEnabled
-				if settingsSwitch(c, &on, label, false) {
+				settingsSwitch(c, &on, label, false, func(on bool) {
 					next := store.AutoReview
 					next.IsEnabled = on
 					store.SetAutoReview(next)
-				}
+				})
 			}), label)
-			noteRow(k, L("Lorca checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically."), nil)
+			noteRow(c, k, L("Lorca checks each action before it runs and asks you first when needed. Add rules to customize what bots can do automatically."), nil)
 		})
 		addRule := func() {
 			if hoverButton(c, hoverButtonOptions{Symbol: "plus", Size: 13, Tooltip: L("Add rule")}).Clicked() {
 				s.w.presentRuleEditor(nil)
 			}
 		}
-		s.section(autoReviewRulesEntry().row, addRule, func(k *card) {
+		s.section(c, autoReviewRulesEntry().row, addRule, func(k *card) {
 			if len(review.Rules) == 0 {
-				noteRow(k, L("No rules yet. Always allow on a card adds one, or write one below."), nil)
+				noteRow(c, k, L("No rules yet. Always allow on a card adds one, or write one below."), nil)
 				return
 			}
 			removed := ""
 			for _, rule := range review.Rules {
-				ui.Column(c).Key(firstNonEmpty(rule.ID, rule.Text)).Children(func() {
+				ui.Column(c.Key(firstNonEmpty(rule.ID, rule.Text))).Children(func() {
 					row := k.row(ui.Column(c).Gap(5).Padding(10, 8, 8, 12).Label(rule.Text))
 					row.Children(func() {
 						ui.Text(c, rule.Text).MaxWidth(900).Padding(0, 4, 0, 0).FontSize(12).LineHeight(1.4).Selectable()
@@ -54,7 +53,7 @@ func (s settingsPane) autoReview() {
 							}
 						})
 					})
-					s.mark(row, rule.Text)
+					s.mark(c, row, rule.Text)
 				})
 			}
 			if removed != "" {
@@ -63,7 +62,7 @@ func (s settingsPane) autoReview() {
 				store.SetAutoReview(next)
 			}
 		})
-		s.footnote(L("Read-only commands and commands inside Lorca's own folders run at once. Auto-review checks effectful plugin actions and every other shell command before they run: a small, fast model on the bot's provider applies your rules and latest request, so safe work normally runs automatically and risky work asks. Off, every such action asks. Write one short, natural-language rule for each action; \"Ask first\" takes priority if rules conflict. Built-in safety checks always apply."))
+		s.footnote(c, L("Read-only commands and commands inside Lorca's own folders run at once. Auto-review checks effectful plugin actions and every other shell command before they run: a small, fast model on the bot's provider applies your rules and latest request, so safe work normally runs automatically and risky work asks. Off, every such action asks. Write one short, natural-language rule for each action; \"Ask first\" takes priority if rules conflict. Built-in safety checks always apply."))
 	})
 }
 
@@ -92,7 +91,7 @@ func (w *appWindow) presentRuleEditor(rule *model.AutoReviewRule) {
 				textArea(c, &text, 0, fieldOptions{ReadOnly: exact, AutoFocus: !exact, Label: L("Rule")}).Height(90).FontSize(12)
 			})
 			section(c, L("Behavior"), sectionCaption, nil, func(k *card) {
-				accessoryRow(k, L("Auto-review"), "", func() {
+				accessoryRow(c, k, L("Auto-review"), "", func() {
 					picked, changed, _ := popUpButton(c, popUp{
 						Options: []popUpOption{{Value: "allow", Label: model.BehaviorTitle("allow")}, {Value: "ask", Label: model.BehaviorTitle("ask")}},
 						Value:   behavior,

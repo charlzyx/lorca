@@ -391,7 +391,7 @@ func (o *onboardingWindow) view(c *ui.Context) {
 	// button answers Return, unless what has the keyboard takes it: a button, or a pop-up button.
 	var defaultButton *onboardingButton
 	ui.Column(c).Fill().Background(background).Padding(max(28, c.TitleBar().Height), 44, 36, 44).DragWindow().Children(func() {
-		page := ui.Column(c).Key(int(o.step)).Grow(1).MinHeight(0).
+		page := ui.Column(c.Key(int(o.step))).Grow(1).MinHeight(0).
 			Transition(ui.ElementTransition{Enter: &ui.Motion{}, Duration: 220 * time.Millisecond})
 		page.Children(func() {
 			switch o.step {
@@ -570,7 +570,7 @@ func (o *onboardingWindow) joinStep(c *ui.Context, s onboardingJoinStep) *onboar
 		busy:     busy,
 	}, func() {
 		ui.Column(c).Gap(10).Width(560).MaxWidthPercent(100).Children(func() {
-			ui.Box(c).Key("field").Children(func() {
+			ui.Box(c.Key("field")).Children(func() {
 				if textField(c, &o.joinText, fieldOptions{Placeholder: s.placeholder, Mono: true, Disabled: busy, AutoFocus: true, Label: s.title}).Submitted() && !busy {
 					s.submit()
 				}
@@ -631,14 +631,14 @@ func (o *onboardingWindow) botStep(c *ui.Context) *onboardingButton {
 					avatar(c, content, 40, false)
 				})
 				o.formRow(c, L("Name"), false, func() {
-					ui.Box(c).Key("name").Grow(1).Children(func() {
+					ui.Box(c.Key("name")).Grow(1).Children(func() {
 						if textField(c, &o.botName, fieldOptions{Placeholder: L("Name"), Label: L("Name")}).Submitted() && !next.disabled {
 							next.run()
 						}
 					})
 				})
 				o.formRow(c, L("Description"), true, func() {
-					ui.Box(c).Key("description").Grow(1).Children(func() {
+					ui.Box(c.Key("description")).Grow(1).Children(func() {
 						field := textArea(c, &o.botDescription, 3, fieldOptions{Placeholder: L("What it does and how it should work"), Label: L("Description")})
 						composing := field.Composing()
 						field.HandleInput(func(ev ui.InputEvent) bool {
@@ -718,7 +718,7 @@ func (o *onboardingWindow) providerRows(c *ui.Context, next onboardingButton) {
 			ui.Text(c, L("Any server that speaks OpenAI’s or Anthropic’s API, such as a gateway or a model server on your network. Set up its address, key, and models next.")).
 				FontSize(12).LineHeight(1.4).TextColor(p.Label2)
 		case apiKey:
-			ui.Box(c).Key("key:" + kind).Grow(1).Children(func() {
+			ui.Box(c.Key("key:" + kind)).Grow(1).Children(func() {
 				if textField(c, &o.apiKey, fieldOptions{Placeholder: model.KeyPlaceholder(kind), Secure: true, Mono: true, Label: L("API key")}).Submitted() && !next.disabled {
 					next.run()
 				}

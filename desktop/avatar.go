@@ -71,12 +71,12 @@ func presencePlace(size float32) (dot, x, y float32) {
 
 // avatar is one avatar, `size` across. While `working`, the green dot breathes on a ring of the
 // content's background.
-func avatar(c *ui.Context, content avatarContent, size float32, working bool) *ui.Element {
+func avatar(c *ui.Context, content avatarContent, size float32, working bool) ui.Element {
 	return avatarOn(c, content, size, working, colors(c).Content)
 }
 
 // avatarOn is an avatar whose working dot rings itself in `backdrop`, the color behind the avatar.
-func avatarOn(c *ui.Context, content avatarContent, size float32, working bool, backdrop ui.Color) *ui.Element {
+func avatarOn(c *ui.Context, content avatarContent, size float32, working bool, backdrop ui.Color) ui.Element {
 	p := colors(c)
 	box := ui.Box(c).Size(size, size)
 	box.Children(func() {
@@ -139,7 +139,7 @@ type clusterBox struct{ x, y, size float32 }
 // avatarCluster packs group avatars into a fixed square: a row of overlapping circles would grow
 // with the member count and push the title along, and a constant slot keeps every row's text in
 // line.
-func avatarCluster(c *ui.Context, contents []avatarContent, slot float32, working bool, backdrop ui.Color) *ui.Element {
+func avatarCluster(c *ui.Context, contents []avatarContent, slot float32, working bool, backdrop ui.Color) ui.Element {
 	count := min(len(contents), 4)
 	var boxes []clusterBox
 	size := float32(math.Round(float64(slot) * 0.6))
@@ -175,7 +175,7 @@ func avatarCluster(c *ui.Context, contents []avatarContent, slot float32, workin
 
 // avatarStack is overlapping avatars where there is room to spread out: up to three, later ones
 // on top, each ringed in the backdrop.
-func avatarStack(c *ui.Context, bots []*model.Bot, size, overlap float32, backdrop ui.Color) *ui.Element {
+func avatarStack(c *ui.Context, bots []*model.Bot, size, overlap float32, backdrop ui.Color) ui.Element {
 	shown := bots[:min(3, len(bots))]
 	width := size + float32(max(0, len(shown)-1))*(size-overlap)
 	stack := ui.Box(c).Size(width, size)

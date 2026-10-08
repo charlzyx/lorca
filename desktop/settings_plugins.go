@@ -12,17 +12,16 @@ import (
 
 // plugins is what the picked Runner has installed, with each plugin's state, and the
 // marketplace; then the MCP servers of its mcp.json.
-func (s settingsPane) plugins(m *mainWindow) {
-	c := s.c
+func (s settingsPane) plugins(c *ui.Context, m *mainWindow) {
 	p := colors(c)
 	device := store.Device(m.settingsDeviceID)
 	title := L("Plugins")
 	if device != nil {
 		title = L("Plugins on %@", device.Name)
 	}
-	s.frame(string(model.PanePlugins)+"|"+m.settingsDeviceID, func() {
-		s.section(title, nil, func(k *card) {
-			settingsRunnerRows(k, device, func() {
+	s.frame(c, string(model.PanePlugins)+"|"+m.settingsDeviceID, func() {
+		s.section(c, title, nil, func(k *card) {
+			settingsRunnerRows(c, k, device, func() {
 				// Its mcp.json's servers are listed in their own section.
 				shown := 0
 				for _, plugin := range device.Plugins {
@@ -30,44 +29,44 @@ func (s settingsPane) plugins(m *mainWindow) {
 						continue
 					}
 					shown++
-					ui.Column(c).Key(plugin.ID).Children(func() {
-						row := pluginRow(k, plugin, true, "")
-						s.mark(row.Row, plugin.Name)
+					ui.Column(c.Key(plugin.ID)).Children(func() {
+						rowElement, row := pluginRow(c, k, plugin, true, "")
+						s.mark(c, rowElement, plugin.Name)
 						if row.Clicked {
 							s.w.presentPlugin(plugin.ID, device)
 						}
 					})
 				}
 				if shown == 0 {
-					keyValueRow(k, L("No plugins installed"), "", false, &p.Label2)
+					keyValueRow(c, k, L("No plugins installed"), "", false, &p.Label2)
 				}
-				marketplace := actionRow(k, L("Marketplace"), actionRowOptions{Tint: &p.Label2, Action: L("Add from Plugins…")})
-				s.mark(marketplace.Row, L("Marketplace"))
-				if marketplace.Action.Clicked() {
+				marketplaceElement, marketplace := actionRow(c, k, L("Marketplace"), actionRowOptions{Tint: &p.Label2, Action: L("Add from Plugins…")})
+				s.mark(c, marketplaceElement, L("Marketplace"))
+				if marketplace.Action {
 					m.presentMarketplace(device.ID)
 				}
 			})
 		})
-		s.footnote(L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first."))
+		s.footnote(c, L("Plugins are installed on a Runner, and the bots assigned to it use them. An action that changes something goes through Auto-review first."))
 		if device != nil && device.IsRunner() {
-			s.mcpServers(device)
-			s.footnote(L("Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload.", device.Name))
+			s.mcpServers(c, device)
+			s.footnote(c, L("Servers you add yourself live in mcp.json on %@, in the format Claude Desktop and Cursor use. Edit them here or with the lorca mcp command; after editing the file itself, click Reload.", device.Name))
 		}
 	})
 }
 
 // settingsRunnerRows fills a Runner's section: its rows on a Runner, else the one row a Device
 // that is not one shows, or before the CLI answers.
-func settingsRunnerRows(k *card, device *model.Device, rows func()) {
+func settingsRunnerRows(c *ui.Context, k *card, device *model.Device, rows func()) {
 	switch {
 	case device == nil:
-		keyValueRow(k, L("Waiting for the CLI"), "", false, nil)
+		keyValueRow(c, k, L("Waiting for the CLI"), "", false, nil)
 	case !device.IsRunner():
 		text := model.UnknownDeviceNote()
 		if device.OS != model.OSUnknown {
 			text = L("%@ Devices hold your keys and chats but never run a bot. Pick a Runner: a Device running macOS, Linux, or Windows.", device.OS.DisplayName())
 		}
-		noteRow(k, text, nil)
+		noteRow(c, k, text, nil)
 	default:
 		rows()
 	}
@@ -136,8 +135,7 @@ func mcpKey(device *model.Device) string {
 // mcpServers is a Runner's mcp.json: each server with how it stands and a switch, a row to add
 // one, and the file itself, with Reload for an edit made outside Lorca (and on this computer,
 // Open). The list follows the servers' states in the Runner's roster.
-func (s settingsPane) mcpServers(device *model.Device) {
-	c := s.c
+func (s settingsPane) mcpServers(c *ui.Context, device *model.Device) {
 	p := colors(c)
 	mcp := &s.page.mcp
 	now := c.Now()
@@ -177,39 +175,35 @@ func (s settingsPane) mcpServers(device *model.Device) {
 	}
 
 	runnerID := device.ID
-	var toggled *model.McpServer
-	toggledOn := false
-	s.section(L("MCP Servers on %@", device.Name), nil, func(k *card) {
+	s.section(c, L("MCP Servers on %@", device.Name), nil, func(k *card) {
 		if mcp.file == nil {
 			label, tint := L("Loading…"), &p.Label2
 			if mcp.failure != "" {
 				label, tint = mcp.failure, &p.Red
 			}
-			keyValueRow(k, label, "", false, tint)
+			keyValueRow(c, k, label, "", false, tint)
 			return
 		}
 		file := *mcp.file
 		if file.Error != "" {
-			noteRow(k, L("%@ Lorca keeps the servers it read before.", file.Error), &p.Red)
+			noteRow(c, k, L("%@ Lorca keeps the servers it read before.", file.Error), &p.Red)
 		}
 		for _, server := range file.Servers {
-			ui.Column(c).Key(server.Name).Children(func() {
-				row := settingsMcpRow(k, server)
-				s.mark(row.Row, server.Name)
-				switch {
-				case row.Toggled:
-					toggled, toggledOn = &server, !server.Enabled
-				case row.Clicked:
+			ui.Column(c.Key(server.Name)).Children(func() {
+				rowElement, row := settingsMcpRow(c, k, server,
+					func(on bool) { s.setMcpEnabled(runnerID, server, on) })
+				s.mark(c, rowElement, server.Name)
+				if row.Clicked {
 					s.w.presentMcpServer(device, server.Name)
 				}
 			})
 		}
 		if len(file.Servers) == 0 && file.Error == "" {
-			noteRow(k, L("No MCP servers yet. Add one by the command that starts it or its URL, or paste the JSON from its README."), nil)
+			noteRow(c, k, L("No MCP servers yet. Add one by the command that starts it or its URL, or paste the JSON from its README."), nil)
 		}
-		add := actionRow(k, L("Custom"), actionRowOptions{Tint: &p.Label2, Action: L("Add Server…")})
-		s.mark(add.Row, L("Custom"))
-		if add.Action.Clicked() {
+		addElement, add := actionRow(c, k, L("Custom"), actionRowOptions{Tint: &p.Label2, Action: L("Add Server…")})
+		s.mark(c, addElement, L("Custom"))
+		if add.Action {
 			s.w.presentMcpServer(device, "")
 		}
 		// Open once the file is there, which it is once it holds a server.
@@ -217,8 +211,8 @@ func (s settingsPane) mcpServers(device *model.Device) {
 		if device.IsThisDevice && (len(file.Servers) > 0 || file.Error != "") {
 			second = L("Open")
 		}
-		row := actionRow(k, "mcp.json", actionRowOptions{Value: file.Path, Tint: &p.Label2, Mono: true, Tooltip: file.Path, Action: L("Reload"), Second: second})
-		s.mark(row.Row, "mcp.json")
+		rowElement, row := actionRow(c, k, "mcp.json", actionRowOptions{Value: file.Path, Tint: &p.Label2, Mono: true, Tooltip: file.Path, Action: L("Reload"), Second: second})
+		s.mark(c, rowElement, "mcp.json")
 		if row.Second {
 			path := file.Path
 			go func() {
@@ -227,13 +221,10 @@ func (s settingsPane) mcpServers(device *model.Device) {
 				}
 			}()
 		}
-		if row.Action.Clicked() {
+		if row.Action {
 			s.reloadMcp(runnerID)
 		}
 	})
-	if toggled != nil {
-		s.setMcpEnabled(runnerID, *toggled, toggledOn)
-	}
 }
 
 // reloadMcp has the Runner read its mcp.json again, after an edit made outside Lorca.
@@ -276,15 +267,12 @@ func (s settingsPane) setMcpEnabled(runnerID string, server model.McpServer, on 
 }
 
 type settingsMcpRowResult struct {
-	Row     *ui.Element
 	Clicked bool
-	Toggled bool
 }
 
 // settingsMcpRow is one server: its symbol in the color of how it stands, its name, its state and
 // address, and a switch, unless it cannot run. A click elsewhere opens it.
-func settingsMcpRow(k *card, server model.McpServer) settingsMcpRowResult {
-	c := k.c
+func settingsMcpRow(c *ui.Context, k *card, server model.McpServer, change func(bool)) (ui.Element, settingsMcpRowResult) {
 	p := colors(c)
 	var result settingsMcpRowResult
 	r := k.row(rowBox(c).MinHeight(44).Label(server.Name).Cursor(ui.CursorPointer))
@@ -319,12 +307,12 @@ func settingsMcpRow(k *card, server model.McpServer) settingsMcpRowResult {
 			if on {
 				tooltip = L("Turn %@ off", server.Name)
 			}
-			result.Toggled = toggleSwitch(c, &on, true).Tooltip(tooltip).Label(server.Name).Changed()
+			toggle := toggleSwitch(c, &on, true).Tooltip(tooltip).Label(server.Name).
+				OnClick(func() { change(on) })
+			if toggle.Clicked() {
+				result.Clicked = false
+			}
 		}
 	})
-	if result.Toggled {
-		result.Clicked = false
-	}
-	result.Row = r
-	return result
+	return r, result
 }

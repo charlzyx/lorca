@@ -50,7 +50,7 @@ func openLink(href string) {
 }
 
 // markdownView builds a message body.
-func markdownView(c *ui.Context, text string, o markdownOptions) *ui.Element {
+func markdownView(c *ui.Context, text string, o markdownOptions) ui.Element {
 	if o.Size == 0 {
 		o.Size = textMessage
 	}
@@ -85,7 +85,7 @@ func markdownBlocks(c *ui.Context, blocks []model.Block, o markdownOptions, nest
 }
 
 // spansView builds a paragraph of spans, its links clickable.
-func spansView(c *ui.Context, spans []model.Span, o markdownOptions, bold bool) *ui.Element {
+func spansView(c *ui.Context, spans []model.Span, o markdownOptions, bold bool) ui.Element {
 	p := colors(c)
 	para := ui.RichText(c).MinWidth(0)
 	para.Children(func() {
@@ -143,7 +143,7 @@ func cellsLine(cells [][]model.Span) []model.Span {
 	return line
 }
 
-func markdownBlock(c *ui.Context, block model.Block, o markdownOptions, nested bool) *ui.Element {
+func markdownBlock(c *ui.Context, block model.Block, o markdownOptions, nested bool) ui.Element {
 	p := colors(c)
 	switch block.Kind {
 	case model.BlockParagraph:

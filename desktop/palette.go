@@ -545,14 +545,14 @@ func (s *paletteState) view(c *ui.Context, m *mainWindow) {
 				list.Children(func() {
 					for i, row := range rows {
 						if row.item == nil {
-							ui.Row(c).Key(i).Height(paletteHeaderHeight).AlignItems(ui.End).Padding(0, 8, 4, 8).Children(func() {
+							ui.Row(c.Key(i)).Height(paletteHeaderHeight).AlignItems(ui.End).Padding(0, 8, 4, 8).Children(func() {
 								ui.Text(c, row.header).FontSize(11).FontWeight(600).TextColor(p.Label3)
 							})
 							continue
 						}
 						item := row.item
 						on := i == selected
-						r := ui.Row(c).Key(i).Height(paletteRowHeight).Gap(8).Padding(0, 8).Radius(8).Role(ui.RoleListItem).Label(item.title)
+						r := ui.Row(c.Key(i)).Height(paletteRowHeight).Gap(8).Padding(0, 8).Radius(8).Role(ui.RoleListItem).Label(item.title)
 						secondary := p.Label2
 						mark := p.Accent.Alpha(0.2)
 						if on {

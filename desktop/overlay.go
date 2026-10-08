@@ -78,7 +78,7 @@ func (w *appWindow) sheetsView(c *ui.Context) {
 	for i, s := range w.sheets {
 		front := i == len(w.sheets)-1
 		ui.Overlay(c, func() {
-			scrim := ui.Column(c).Key(s.id).Absolute().Left(0).Top(0).Right(0).Bottom(0).AlignItems(ui.Center).Padding(44, 16, 16, 16)
+			scrim := ui.Column(c.Key(s.id)).Absolute().Left(0).Top(0).Right(0).Bottom(0).AlignItems(ui.Center).Padding(44, 16, 16, 16)
 			if front {
 				scrim.Background(p.Scrim).Modal()
 			}
@@ -116,13 +116,12 @@ type sheetOptions struct {
 type sheetResult struct {
 	Confirmed bool
 	Cancelled bool
-	Panel     *ui.Element
 }
 
 // sheetPanel is a sheet's panel: as round as macOS 26's sheets, white in the light appearance. It
 // is no taller than the window; what it holds between its title and its buttons goes in a
 // sheetBody, which scrolls when the window is too short for it.
-func sheetPanel(c *ui.Context, width float32) *ui.Element {
+func sheetPanel(c *ui.Context, width float32) ui.Element {
 	p := colors(c)
 	if width == 0 {
 		width = 420
@@ -141,7 +140,6 @@ func sheetFrame(c *ui.Context, o sheetOptions, content func()) sheetResult {
 	// The sheet takes the keyboard itself as it comes up, unless a field in it does, so Return
 	// confirms it rather than pressing the first button.
 	panel.Focusable().FocusRing(false).AutoFocus()
-	result.Panel = panel
 	panel.Children(func() {
 		ui.Column(c).Gap(4).Children(func() {
 			ui.Text(c, o.Title).FontSize(15).FontWeight(600)
@@ -197,12 +195,12 @@ func sheetFrame(c *ui.Context, o sheetOptions, content func()) sheetResult {
 
 // sheetBody is the part of a sheet's panel that scrolls when the window is too short for the
 // panel, reaching the panel's edges so its fields' focus rings show whole.
-func sheetBody(c *ui.Context) *ui.Element {
+func sheetBody(c *ui.Context) ui.Element {
 	return ui.Scroll(c).Shrink(1).MinHeight(0).Padding(3, 20)
 }
 
 // submits marks a field whose Return confirms the sheet it is in.
-func submits(e *ui.Element) *ui.Element {
+func submits(e ui.Element) ui.Element {
 	if e.Submitted() {
 		fieldSubmitted = true
 	}
@@ -353,14 +351,14 @@ func (w *appWindow) showNote(title, body string) {
 // MARK: - Popovers
 
 // popoverPanel styles a popover's panel: a rounded card on the popover color, below its anchor.
-func popoverPanel(c *ui.Context, panel *ui.Element) *ui.Element {
+func popoverPanel(c *ui.Context, panel ui.Element) ui.Element {
 	p := colors(c)
 	return panel.Margin(8, 0, 0, 0).Radius(10).Background(p.Popover).Shadow(0, 10, 40, 0, p.Shadow).Border(0.5, p.ShadowEdge)
 }
 
 // textPopover makes a click on `anchor` show the full text behind a one-line marker, rendered like
 // a message body, scrolling past a screenful, sized to its content up to a bubble's width.
-func textPopover(c *ui.Context, anchor *ui.Element, text string) {
+func textPopover(c *ui.Context, anchor ui.Element, text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
@@ -368,7 +366,7 @@ func textPopover(c *ui.Context, anchor *ui.Element, text string) {
 	if anchor.Clicked() {
 		*open = !*open
 	}
-	ui.PopoverBase(c, anchor, open, func(panel *ui.Element) {
+	ui.PopoverBase(c, anchor, open, func(panel ui.Element) {
 		popoverPanel(c, panel)
 		ui.Scroll(c).MaxWidth(468).MinWidth(188).MaxHeight(388).Padding(14).Children(func() {
 			markdownView(c, text, markdownOptions{})

@@ -162,7 +162,7 @@ func (m *mainWindow) shortcutHints(c *ui.Context) bool {
 func (m *mainWindow) chatRow(c *ui.Context, chat *model.Chat, selected, listFocused bool, hint string) {
 	p := colors(c)
 	backdrop := p.Sidebar
-	row := ui.Row(c).Height(54).Padding(0, 8, 0, 4).Radius(8).Gap(10).Key(chat.ID)
+	row := ui.Row(c.Key(chat.ID)).Height(54).Padding(0, 8, 0, 4).Radius(8).Gap(10)
 	working := false
 	for _, id := range chat.BotIDs {
 		if store.IsWorking(id) {
@@ -402,7 +402,7 @@ func (m *mainWindow) settingsSidebar(c *ui.Context) {
 		}
 	}
 
-	var list *ui.Element
+	var list ui.Element
 	ui.Column(c).Padding(2, 10, 6, 10).Children(func() {
 		field := searchField(c, &s.query, "")
 		if s.focusSearch {
@@ -442,9 +442,9 @@ func (m *mainWindow) settingsSidebar(c *ui.Context) {
 	list.Children(func() {
 		for _, row := range rows {
 			on := row.key() == selectedKey
-			var e *ui.Element
+			var e ui.Element
 			if row.entry == nil {
-				e = ui.Row(c).Key(row.key()).Height(32).Padding(0, 8, 0, 4).Radius(7).FontSize(13)
+				e = ui.Row(c.Key(row.key())).Height(32).Padding(0, 8, 0, 4).Radius(7).FontSize(13)
 				e.Children(func() {
 					icon := ui.Row(c).Width(38).Margin(0, 10, 0, 0).Justify(ui.Center).TextColor(p.Label2)
 					if on && focused {
@@ -454,7 +454,7 @@ func (m *mainWindow) settingsSidebar(c *ui.Context) {
 					ui.Text(c, row.pane.Title()).SingleLine()
 				})
 			} else {
-				e = ui.Row(c).Key(row.key()).Height(26).Padding(0, 8, 0, 52).Radius(6).FontSize(12).Tooltip(row.entry.title)
+				e = ui.Row(c.Key(row.key())).Height(26).Padding(0, 8, 0, 52).Radius(6).FontSize(12).Tooltip(row.entry.title)
 				e.Children(func() { ui.Text(c, row.entry.title).SingleLine() })
 			}
 			e.Role(ui.RoleListItem).Label(firstNonEmpty(func() string {

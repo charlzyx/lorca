@@ -8,83 +8,81 @@ import (
 // The Bots and Devices panes, on the Device picked in the header: the bots assigned to a Runner,
 // and the Device itself.
 
-func (s settingsPane) bots(m *mainWindow) {
-	c := s.c
+func (s settingsPane) bots(c *ui.Context, m *mainWindow) {
 	p := colors(c)
 	device := store.Device(m.settingsDeviceID)
 	title := L("Bots")
 	if device != nil {
 		title = L("Bots on %@", device.Name)
 	}
-	s.frame(string(model.PaneBots)+"|"+m.settingsDeviceID, func() {
-		s.section(title, nil, func(k *card) {
-			settingsRunnerRows(k, device, func() {
+	s.frame(c, string(model.PaneBots)+"|"+m.settingsDeviceID, func() {
+		s.section(c, title, nil, func(k *card) {
+			settingsRunnerRows(c, k, device, func() {
 				bots := store.BotsOn(device.ID)
 				for _, bot := range bots {
-					row := botRow(k, bot, botRowOptions{
+					rowElement, row := botRow(c, k, bot, botRowOptions{
 						Detail:           model.ProviderName(bot.Provider, store.Providers),
 						AccessorySymbol:  "bubble.left",
 						AccessoryTooltip: L("Open chat"),
 						Clickable:        true,
 					})
-					s.mark(row.Row, bot.Name)
+					s.mark(c, rowElement, bot.Name)
 					if row.Clicked || row.Accessory {
 						m.open(store.DM(bot.ID))
 					}
 				}
 				if len(bots) == 0 {
-					keyValueRow(k, L("No bots assigned"), "", false, &p.Label2)
+					keyValueRow(c, k, L("No bots assigned"), "", false, &p.Label2)
 				}
-				add := actionRow(k, L("New"), actionRowOptions{Tint: &p.Label2, Action: L("New Bot…")})
-				s.mark(add.Row, L("New"))
-				if add.Action.Clicked() {
+				addElement, add := actionRow(c, k, L("New"), actionRowOptions{Tint: &p.Label2, Action: L("New Bot…")})
+				s.mark(c, addElement, L("New"))
+				if add.Action {
 					m.newBot()
 				}
 			})
 		})
-		s.footnote(L("A bot runs on the Runner it is assigned to, with your account's credentials and that Runner's plugins."))
+		s.footnote(c, L("A bot runs on the Runner it is assigned to, with your account's credentials and that Runner's plugins."))
 	})
 }
 
 // device is the picked Device itself: what it is, whether it is online, its machine key, and
 // Unpair.
-func (s settingsPane) device(m *mainWindow) {
-	c := s.c
+func (s settingsPane) device(c *ui.Context, m *mainWindow) {
 	p := colors(c)
 	device := store.Device(m.settingsDeviceID)
-	s.frame(string(model.PaneDevice)+"|"+m.settingsDeviceID, func() {
+	s.frame(c, string(model.PaneDevice)+"|"+m.settingsDeviceID, func() {
 		if device == nil {
 			return
 		}
 		settingsDeviceHeader(c, device)
-		s.section(L("Machine"), nil, func(k *card) {
+		s.section(c, L("Machine"), nil, func(k *card) {
 			unknown := device.OS == model.OSUnknown
 			if unknown {
-				noteRow(k, model.UnknownDeviceNote(), nil)
+				noteRow(c, k, model.UnknownDeviceNote(), nil)
 			}
 			machineKey := machineKeyEntry().row
-			s.mark(keyValueRow(k, machineKey, device.MachineKey, true, nil), machineKey)
+			s.mark(c, keyValueRow(c, k, machineKey, device.MachineKey, true, nil), machineKey)
 			if !unknown {
-				s.mark(keyValueRow(k, L("OS"), device.OS.DisplayName()+" · "+device.OSVersion, false, nil), L("OS"))
+				s.mark(c, keyValueRow(c, k, L("OS"), device.OS.DisplayName()+" · "+device.OSVersion, false, nil), L("OS"))
 			}
 			if device.Update != nil {
-				s.cliUpdateRow(k, device, *device.Update)
+				s.cliUpdateRow(c, k, device, *device.Update)
 			}
 			role := L("Device · never runs bots")
 			if device.IsRunner() {
 				role = L("Runner · runs bots with its own credentials")
 			}
-			s.mark(keyValueRow(k, L("Role"), role, false, nil), L("Role"))
+			s.mark(c, keyValueRow(c, k, L("Role"), role, false, nil), L("Role"))
 			lastSeen := model.LastSeen(device.LastSeen)
 			if device.Status == model.StatusOnline {
 				lastSeen = L("Active now")
 			}
-			s.mark(keyValueRow(k, L("Last seen"), lastSeen, false, nil), L("Last seen"))
-			s.mark(keyValueRow(k, L("Relay"), settingsRelayText(), true, nil), L("Relay"))
+			s.mark(c, keyValueRow(c, k, L("Last seen"), lastSeen, false, nil), L("Last seen"))
+			s.mark(c, keyValueRow(c, k, L("Relay"), settingsRelayText(), true, nil), L("Relay"))
 			pairing := pairingEntry().row
-			unpair := actionRow(k, pairing, actionRowOptions{Value: L("Paired to this account"), Tint: &p.Label2, Action: L("Unpair…")})
-			s.mark(unpair.Row, pairing)
-			if unpair.Action.Clicked() {
+			unpairElement, unpair := actionRow(c, k, pairing, actionRowOptions{Value: L("Paired to this account"), Tint: &p.Label2, Action: L("Unpair…")})
+			s.mark(c, unpairElement, pairing)
+			if unpair.Action {
 				s.w.confirmUnpair(device)
 			}
 		})
@@ -156,8 +154,8 @@ func settingsDeviceHeader(c *ui.Context, device *model.Device) {
 
 // cliUpdateRow is the version of a CLI that updates itself, how its update goes, and Update while
 // a newer release waits and the Runner is online.
-func (s settingsPane) cliUpdateRow(k *card, device *model.Device, update model.DeviceUpdate) {
-	p := colors(s.c)
+func (s settingsPane) cliUpdateRow(c *ui.Context, k *card, device *model.Device, update model.DeviceUpdate) {
+	p := colors(c)
 	version, latest := device.Version, update.Latest
 	value, offersUpdate := "", false
 	switch {
@@ -180,9 +178,9 @@ func (s settingsPane) cliUpdateRow(k *card, device *model.Device, update model.D
 	if offersUpdate {
 		action = L("Update")
 	}
-	row := actionRow(k, L("Lorca CLI"), actionRowOptions{Value: value, Tint: &p.Label2, Tooltip: update.Error, Action: action})
-	s.mark(row.Row, L("Lorca CLI"))
-	if row.Action != nil && row.Action.Clicked() {
+	rowElement, row := actionRow(c, k, L("Lorca CLI"), actionRowOptions{Value: value, Tint: &p.Label2, Tooltip: update.Error, Action: action})
+	s.mark(c, rowElement, L("Lorca CLI"))
+	if row.Action {
 		id, name, w := device.ID, device.Name, s.w
 		store.UpdateDevice(id, func(err error) {
 			if err != nil {

@@ -164,9 +164,9 @@ func (mk *marketplace) homePage(c *ui.Context, page *marketPage) {
 
 // marketSearchField is the home page's large capsule search field. Escape leaves its text alone and
 // closes the sheet, as it does from anywhere in it.
-func marketSearchField(c *ui.Context, value *string, placeholder string) *ui.Element {
+func marketSearchField(c *ui.Context, value *string, placeholder string) ui.Element {
 	p := colors(c)
-	var input *ui.Element
+	var input ui.Element
 	box := ui.Row(c).Height(34).Gap(6).Padding(0, 8, 0, 10).Radius(17).Background(p.SearchBG).TextColor(p.Label2).Cursor(ui.CursorText)
 	box.Children(func() {
 		symbol(c, "magnifyingglass", 13, 2)
@@ -224,12 +224,12 @@ func (mk *marketplace) installedPage(c *ui.Context) {
 		plugins := mk.installedPlugins()
 		section(c, L("Installed"), sectionHeading, nil, func(k *card) {
 			if len(plugins) == 0 {
-				noteRow(k, L("Nothing installed yet. Find plugins in the marketplace."), nil)
+				noteRow(c, k, L("Nothing installed yet. Find plugins in the marketplace."), nil)
 				return
 			}
 			for _, plugin := range plugins {
-				ui.Box(c).Key(plugin.ID).Children(func() {
-					if pluginRow(k, plugin, true, L("Open %@", plugin.Name)).Clicked {
+				ui.Box(c.Key(plugin.ID)).Children(func() {
+					if _, result := pluginRow(c, k, plugin, true, L("Open %@", plugin.Name)); result.Clicked {
 						mk.manage(plugin.ID)
 					}
 				})
@@ -250,7 +250,7 @@ func marketCard(c *ui.Context, title string, count int, rows func(k *card)) {
 }
 
 // marketWebsiteButton is a push button for a link, with the arrow that says it leaves the app.
-func marketWebsiteButton(c *ui.Context, link string) *ui.Element {
+func marketWebsiteButton(c *ui.Context, link string) ui.Element {
 	p := colors(c)
 	b := ui.ButtonBase(c).Height(24).Padding(0, 12).Radius(6).Gap(5).Justify(ui.Center).FontSize(13).TextColor(p.Label).Label(L("Website")).Tooltip(link)
 	fill := p.ButtonBG
@@ -336,7 +336,7 @@ func (mk *marketplace) pluginPage(c *ui.Context, page *marketPage) {
 				case model.PluginNeedsSetup:
 					action = L("Set Up")
 				}
-				row := statusRow(k, statusRowOptions{Symbol: on.Symbol(), Title: installed.Detail, Subtitle: L("Every bot on %@ can use it.", on.Name), ActionTitle: action})
+				_, row := statusRow(c, k, statusRowOptions{Symbol: on.Symbol(), Title: installed.Detail, Subtitle: L("Every bot on %@ can use it.", on.Name), ActionTitle: action})
 				if row.Action {
 					mk.manage(plugin.ID)
 				}
@@ -353,14 +353,14 @@ func (mk *marketplace) pluginPage(c *ui.Context, page *marketPage) {
 						}
 						symbolName, subtitle = "network", strings.Join(parts, " · ")
 					}
-					statusRow(k, statusRowOptions{Symbol: symbolName, Title: server.Name, Subtitle: subtitle})
+					statusRow(c, k, statusRowOptions{Symbol: symbolName, Title: server.Name, Subtitle: subtitle})
 				}
 			})
 		}
 		if len(plugin.Skills) > 0 {
 			marketCard(c, L("Skills"), len(plugin.Skills), func(k *card) {
 				for _, skill := range plugin.Skills {
-					statusRow(k, statusRowOptions{Symbol: "cube", Title: skill.Name, Subtitle: skill.Description})
+					statusRow(c, k, statusRowOptions{Symbol: "cube", Title: skill.Name, Subtitle: skill.Description})
 				}
 			})
 		}
@@ -374,20 +374,20 @@ func (mk *marketplace) pluginPage(c *ui.Context, page *marketPage) {
 					if variable.Required {
 						state = L("Required")
 					}
-					statusRow(k, statusRowOptions{Symbol: symbolName, Title: variable.Name, Subtitle: variable.Description, State: state})
+					statusRow(c, k, statusRowOptions{Symbol: symbolName, Title: variable.Name, Subtitle: variable.Description, State: state})
 				}
 			})
 		}
 		if plugin.Author != "" || plugin.Category != "" || site != "" {
 			marketCard(c, L("Information"), -1, func(k *card) {
 				if plugin.Author != "" {
-					keyValueRow(k, L("Developer"), plugin.Author, false, nil)
+					keyValueRow(c, k, L("Developer"), plugin.Author, false, nil)
 				}
 				if plugin.Category != "" {
-					keyValueRow(k, L("Category"), marketCategoryTitle(plugin.Category), false, nil)
+					keyValueRow(c, k, L("Category"), marketCategoryTitle(plugin.Category), false, nil)
 				}
 				if site != "" {
-					keyValueRow(k, L("Website"), site, false, nil)
+					keyValueRow(c, k, L("Website"), site, false, nil)
 				}
 			})
 		}
@@ -431,7 +431,7 @@ func (part marketPart) subtitle() string {
 }
 
 // marketParagraph is a paragraph of a bot's panel, in its lines as written.
-func marketParagraph(c *ui.Context, text string, tint ui.Color) *ui.Element {
+func marketParagraph(c *ui.Context, text string, tint ui.Color) ui.Element {
 	return ui.Text(c, text).FontSize(13).LineHeight(1.45).TextColor(tint)
 }
 
@@ -494,7 +494,7 @@ func (mk *marketplace) botPage(c *ui.Context, page *marketPage) {
 		ui.Row(c).Gap(16).AlignItems(ui.Stretch).Children(func() {
 			ui.Column(c).Width(196).Gap(2).AlignSelf(ui.Start).Children(func() {
 				for _, part := range parts {
-					ui.Box(c).Key(int(part)).Children(func() {
+					ui.Box(c.Key(int(part))).Children(func() {
 						on := part == selected
 						item := ui.ButtonBase(c).Column().Gap(2).Padding(10, 10, 10, 14).Radius(10).Justify(ui.Start).AlignItems(ui.Start).
 							Label(part.title()).Role(ui.RoleToggleButton).Checked(on)

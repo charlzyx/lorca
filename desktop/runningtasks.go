@@ -119,7 +119,7 @@ func (m *mainWindow) runningTasksButton(c *ui.Context, chatID string) {
 		return
 	}
 	holder := ui.Box(c)
-	var button *ui.Element
+	var button ui.Element
 	holder.Children(func() {
 		button = hoverButton(c, hoverButtonOptions{Symbol: "terminal", Tooltip: L("Running tasks"), Label: L("Running tasks (%d)", count), Active: s.open})
 		if count > 1 {
@@ -135,7 +135,7 @@ func (m *mainWindow) runningTasksButton(c *ui.Context, chatID string) {
 		s.listed, s.errors, s.busy, s.hadAny = map[string]bool{}, map[string]string{}, map[string]bool{}, false
 	}
 	s.wasOpen = s.open
-	ui.PopoverBase(c, button, &s.open, func(panel *ui.Element) {
+	ui.PopoverBase(c, button, &s.open, func(panel ui.Element) {
 		popoverPanel(c, panel).Width(420)
 		m.runningTasksList(c, chatID)
 	})
@@ -172,7 +172,7 @@ func (m *mainWindow) runningTasksList(c *ui.Context, chatID string) {
 	}
 	ui.Scroll(c).MaxHeight(480).Padding(4, 6).Children(func() {
 		for i, task := range tasks {
-			row := ui.Row(c).Key(task.id).AlignItems(ui.Start).Gap(10).Padding(10, 8)
+			row := ui.Row(c.Key(task.id)).AlignItems(ui.Start).Gap(10).Padding(10, 8)
 			if i > 0 {
 				line := p.Separator
 				row.DrawOver(func(painter *ui.Painter, r ui.Rect) {

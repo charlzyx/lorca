@@ -622,13 +622,13 @@ func (s *mcpSheet) view(c *ui.Context, sh *sheet) {
 			if s.asJSON {
 				mode = 1
 			}
-			if segmented(c, &mode, L("Edit as"), L("Form"), L("JSON")).Changed() {
+			segmented(c, &mode, L("Edit as"), func(mode int) {
 				if mode == 1 {
 					s.showJSON("")
 				} else {
 					s.showForm()
 				}
-			}
+			}, L("Form"), L("JSON"))
 		})
 		s.formView(c)
 		if !s.asJSON && s.saved == nil {
@@ -654,10 +654,7 @@ func (s *mcpSheet) formView(c *ui.Context) {
 	ui.Column(c).Gap(8).Children(func() {
 		if several == nil {
 			providerFormRow(c, labelWidth, L("Name"), func() {
-				before := s.name
-				if textField(c, &s.name, fieldOptions{Placeholder: "github", Disabled: s.busy, AutoFocus: true, Label: L("Name")}).Changed() {
-					s.pasted(&s.name, before)
-				}
+				s.pasteField(c, &s.name, fieldOptions{Placeholder: "github", Disabled: s.busy, AutoFocus: true, Label: L("Name")})
 			})
 			providerFormNote(c, labelWidth, L("Bots call its tools as %@__tool.", mcpToolPrefix(s.name)), nil)
 		}
@@ -686,26 +683,20 @@ func (s *mcpSheet) formView(c *ui.Context) {
 				if s.form.Remote {
 					kind = 1
 				}
-				if segmented(c, &kind, L("Type"), L("Command"), L("URL")).Changed() {
+				segmented(c, &kind, L("Type"), func(kind int) {
 					s.form.Remote = kind == 1
-				}
+				}, L("Command"), L("URL"))
 			})
 		})
 		if s.form.Remote {
 			providerFormRow(c, labelWidth, L("URL"), func() {
-				before := s.form.URL
-				if textField(c, &s.form.URL, fieldOptions{Placeholder: "https://mcp.example.com/mcp", Mono: true, Disabled: s.busy, Label: L("URL")}).Changed() {
-					s.pasted(&s.form.URL, before)
-				}
+				s.pasteField(c, &s.form.URL, fieldOptions{Placeholder: "https://mcp.example.com/mcp", Mono: true, Disabled: s.busy, Label: L("URL")})
 			})
 			providerFormNote(c, labelWidth, L("Streamable HTTP. When the server asks for a sign-in, Lorca signs in with OAuth; or send a token in a header."), nil)
 			s.pairsRow(c, labelWidth, L("Headers"), "headers", &s.form.Headers, "Authorization", "Bearer …", L("Add Header"))
 		} else {
 			providerFormRow(c, labelWidth, L("Command"), func() {
-				before := s.form.Command
-				if textField(c, &s.form.Command, fieldOptions{Placeholder: "npx -y @modelcontextprotocol/server-filesystem ~/Documents", Mono: true, Disabled: s.busy, Label: L("Command")}).Changed() {
-					s.pasted(&s.form.Command, before)
-				}
+				s.pasteField(c, &s.form.Command, fieldOptions{Placeholder: "npx -y @modelcontextprotocol/server-filesystem ~/Documents", Mono: true, Disabled: s.busy, Label: L("Command")})
 			})
 			note := L("Starts on %@ from its login shell, so npx, uvx, and docker resolve as they do in a terminal there.", s.runner.Name)
 			if s.runner.IsThisDevice {
@@ -718,6 +709,16 @@ func (s *mcpSheet) formView(c *ui.Context) {
 			textField(c, &s.form.Description, fieldOptions{Placeholder: L("What it is for, which bots read (optional)"), Disabled: s.busy, Label: L("About")})
 		})
 	})
+}
+
+// pasteField keeps the value preceding the edit until the next build observes Changed.
+func (s *mcpSheet) pasteField(c *ui.Context, value *string, options fieldOptions) {
+	field := textField(c, value, options)
+	before := ui.Local(field, "before", func() string { return *value })
+	if field.Changed() {
+		s.pasted(value, *before)
+	}
+	*before = *value
 }
 
 // jsonNote is what the JSON holds, or why it cannot be read.
@@ -782,7 +783,7 @@ func (s *mcpSheet) pairsEditor(c *ui.Context, label, list string, pairs *[]model
 	ui.Column(c).Gap(6).Label(label).Children(func() {
 		for i := range *pairs {
 			pair := &(*pairs)[i]
-			ui.Row(c).Key(i).Gap(6).Children(func() {
+			ui.Row(c.Key(i)).Gap(6).Children(func() {
 				name := textField(c, &pair.Name, fieldOptions{Placeholder: namePlaceholder, Mono: true, Disabled: s.busy, Label: L("Name")}).
 					MinHeight(24).Padding(2, 7).Grow(1).Basis(0).MinWidth(0)
 				if s.focusPair == list && i == len(*pairs)-1 {
@@ -894,12 +895,9 @@ func (s *mcpSheet) statusView(c *ui.Context) {
 			})
 		}
 		if server.Problem == "" {
-			accessoryRow(k, L("On"), L("Off, no bot on %@ sees it and it never starts.", s.runner.Name), func() {
+			accessoryRow(c, k, L("On"), L("Off, no bot on %@ sees it and it never starts.", s.runner.Name), func() {
 				on := server.Enabled
-				toggle := toggleSwitch(c, &on, true).Label(L("On")).Disabled(s.busy)
-				if toggle.Changed() {
-					s.setEnabled(on)
-				}
+				toggleSwitch(c, &on, true).Label(L("On")).Disabled(s.busy).OnClick(func() { s.setEnabled(on) })
 			})
 		}
 	})
@@ -907,11 +905,10 @@ func (s *mcpSheet) statusView(c *ui.Context) {
 		return
 	}
 	section(c, L("Tools"), sectionCaption, nil, func(k *card) {
-		toggled, shown := "", false
 		ui.Scroll(c).MaxHeight(172).Children(func() {
-			rows := &card{c: c}
+			rows := &card{line: p.Separator}
 			for _, tool := range server.Tools {
-				r := rows.row(ui.Row(c).Key(tool.Name).Gap(8).MinWidth(0).Padding(5, 12))
+				r := rows.row(ui.Row(c.Key(tool.Name)).Gap(8).MinWidth(0).Padding(5, 12))
 				if tool.Description != "" {
 					r.Tooltip(tool.Description)
 				}
@@ -934,15 +931,10 @@ func (s *mcpSheet) statusView(c *ui.Context) {
 					if tool.Hidden {
 						tooltip = L("Hidden from bots")
 					}
-					toggle := toggleSwitch(c, &on, true).Label(L("Offer %@ to bots", tool.Name)).Tooltip(tooltip).Disabled(s.busy)
-					if toggle.Changed() {
-						toggled, shown = tool.Name, on
-					}
+					toggleSwitch(c, &on, true).Label(L("Offer %@ to bots", tool.Name)).Tooltip(tooltip).Disabled(s.busy).
+						OnClick(func() { s.showTool(tool.Name, on) })
 				})
 			}
 		})
-		if toggled != "" {
-			s.showTool(toggled, shown)
-		}
 	})
 }

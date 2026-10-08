@@ -627,7 +627,7 @@ func (m *mainWindow) view(c *ui.Context) {
 
 // paneHeader is a pane's header: where the title bar would be, under the window controls, which
 // drags the window; the buttons in it stay buttons.
-func (m *mainWindow) paneHeader(c *ui.Context) *ui.Element {
+func (m *mainWindow) paneHeader(c *ui.Context) ui.Element {
 	return ui.Row(c).Height(headerHeight).Gap(8).Padding(0, 12).MinWidth(0).DragWindow()
 }
 

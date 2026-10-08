@@ -8,13 +8,12 @@ import (
 // providers is the account's provider credentials: connected on any Device, used by every Runner.
 // The built-in providers come first, then the custom ones in the order they were added, and a row
 // to add one.
-func (s settingsPane) providers() {
-	c := s.c
+func (s settingsPane) providers(c *ui.Context) {
 	p := colors(c)
-	s.frame(string(model.PaneProviders), func() {
-		s.section(L("Credentials"), nil, func(k *card) {
+	s.frame(c, string(model.PaneProviders), func() {
+		s.section(c, L("Credentials"), nil, func(k *card) {
 			if len(store.Providers) == 0 {
-				keyValueRow(k, L("Waiting for the CLI"), "", false, nil)
+				keyValueRow(c, k, L("Waiting for the CLI"), "", false, nil)
 				return
 			}
 			for _, credential := range store.Providers {
@@ -39,9 +38,9 @@ func (s settingsPane) providers() {
 				if credential.IsConnected {
 					o.State = L("Connected")
 				}
-				ui.Column(c).Key(kind).Children(func() {
-					row := statusRow(k, o)
-					s.mark(row.Row, o.Title)
+				ui.Column(c.Key(kind)).Children(func() {
+					rowElement, row := statusRow(c, k, o)
+					s.mark(c, rowElement, o.Title)
 					if !row.Action {
 						return
 					}
@@ -55,10 +54,9 @@ func (s settingsPane) providers() {
 					}
 				})
 			}
-			add := actionRow(k, L("Custom"), actionRowOptions{Tint: &p.Label2, Action: L("Add Provider…")})
-			s.mark(add.Row, L("Custom"))
-			add.Action.Menu(s.w.addProviderMenu)
+			addElement, _ := actionRow(c, k, L("Custom"), actionRowOptions{Tint: &p.Label2, Action: L("Add Provider…"), Menu: s.w.addProviderMenu})
+			s.mark(c, addElement, L("Custom"))
 		})
-		s.footnote(L("Credentials belong to your account. They reach your paired Devices encrypted with the account key, so a bot uses them on whichever Runner it is assigned to; the relay stores ciphertext."))
+		s.footnote(c, L("Credentials belong to your account. They reach your paired Devices encrypted with the account key, so a bot uses them on whichever Runner it is assigned to; the relay stores ciphertext."))
 	})
 }

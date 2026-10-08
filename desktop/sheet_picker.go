@@ -14,11 +14,10 @@ import (
 
 // pickerBotRow is a bot to pick: a check, its avatar, its name over its provider and Runner, and
 // "offline" when the Runner is. It reports a click while it is enabled.
-func pickerBotRow(k *card, bot *model.Bot, selected, enabled bool) bool {
-	c := k.c
+func pickerBotRow(c *ui.Context, k *card, bot *model.Bot, selected, enabled bool) bool {
 	p := colors(c)
 	runner := store.Device(bot.RunnerID)
-	r := k.row(rowBox(c).MinHeight(46).Padding(0, 12).Key(bot.ID).Label(bot.Name).Role(ui.RoleCheckBox).Checked(selected))
+	r := k.row(rowBox(c.Key(bot.ID)).MinHeight(46).Padding(0, 12).Label(bot.Name).Role(ui.RoleCheckBox).Checked(selected))
 	clicked := false
 	if enabled {
 		r.Cursor(ui.CursorPointer)
@@ -71,7 +70,7 @@ func (w *appWindow) presentNewGroupChat(onCreate func(botIDs []string, title str
 			section(c, L("Bots"), sectionCaption, nil, func(k *card) {
 				for _, bot := range bots {
 					picked := slices.Contains(selected, bot.ID)
-					if pickerBotRow(k, bot, picked, picked || len(selected) < model.MaxGroupBots) {
+					if pickerBotRow(c, k, bot, picked, picked || len(selected) < model.MaxGroupBots) {
 						toggled = bot.ID
 					}
 				}
@@ -118,7 +117,7 @@ func (w *appWindow) presentBotPicker(title string, bots []*model.Bot, onPick fun
 		}, func() {
 			section(c, L("Available"), sectionCaption, nil, func(k *card) {
 				for _, bot := range bots {
-					if pickerBotRow(k, bot, bot.ID == selected, true) {
+					if pickerBotRow(c, k, bot, bot.ID == selected, true) {
 						selected = bot.ID
 					}
 				}

@@ -44,7 +44,7 @@ func symbolSVG(name string, stroke float32) *ui.SVG {
 }
 
 // symbol draws an SF Symbol name `size` DIPs square in the text color.
-func symbol(c *ui.Context, name string, size, stroke float32) *ui.Element {
+func symbol(c *ui.Context, name string, size, stroke float32) ui.Element {
 	return ui.Icon(c, symbolSVG(name, stroke)).Size(size, size)
 }
 

@@ -151,7 +151,7 @@ var pairingQRCodes = map[string]*qr.Code{}
 
 // pairingQR is a QR code of `text`, `size` across: crisp dark modules on the white of the frame
 // around it, which is its quiet zone. With no text yet it is the empty square the code will fill.
-func pairingQR(c *ui.Context, text string, size float32) *ui.Element {
+func pairingQR(c *ui.Context, text string, size float32) ui.Element {
 	box := ui.Box(c).Size(size, size)
 	if text == "" {
 		return box

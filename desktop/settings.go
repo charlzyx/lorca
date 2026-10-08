@@ -91,7 +91,6 @@ func (s *settingsPageState) claim(c *ui.Context, label string, section bool) (re
 // settingsPane is a pane while it is built: the window its sheets and alerts go over, and the
 // page that carries out a search's reveal, which the small Settings window does without.
 type settingsPane struct {
-	c    *ui.Context
 	w    *appWindow
 	page *settingsPageState
 }
@@ -99,40 +98,39 @@ type settingsPane struct {
 // settingsPage is the content of a settings pane in the main window.
 func (m *mainWindow) settingsPage(c *ui.Context, pane model.SettingsPane) {
 	m.settings.begin(c, m.revealed, pane)
-	s := settingsPane{c: c, w: &m.appWindow, page: &m.settings}
+	s := settingsPane{w: &m.appWindow, page: &m.settings}
 	if pane != model.PanePlugins {
 		// The Plugins pane asks for the Runner's mcp.json again whenever it comes back.
 		m.settings.mcp.key = ""
 	}
 	switch pane {
 	case model.PaneGeneral:
-		s.general()
+		s.general(c)
 	case model.PaneProviders:
-		s.providers()
+		s.providers(c)
 	case model.PaneAutoReview:
-		s.autoReview()
+		s.autoReview(c)
 	case model.PanePlugins:
-		s.plugins(m)
+		s.plugins(c, m)
 	case model.PaneBots:
-		s.bots(m)
+		s.bots(c, m)
 	case model.PaneDevice:
-		s.device(m)
+		s.device(c, m)
 	case model.PaneAdvanced:
-		s.advanced()
+		s.advanced(c)
 	}
 }
 
 // frame is a page: its cards and footnotes in a column that scrolls. Another pane, or another
 // Device's page, starts at its top.
-func (s settingsPane) frame(key string, content func()) {
-	ui.Scroll(s.c).Key(key).Grow(1).MinHeight(0).Background(colors(s.c).Content).Children(func() {
-		ui.Column(s.c).Gap(22).Padding(24, 28, 32, 28).Children(content)
+func (s settingsPane) frame(c *ui.Context, key string, content func()) {
+	ui.Scroll(c.Key(key)).Grow(1).MinHeight(0).Background(colors(c).Content).Children(func() {
+		ui.Column(c).Gap(22).Padding(24, 28, 32, 28).Children(content)
 	})
 }
 
 // section is a titled card of rows, the target of a search pick by its title.
-func (s settingsPane) section(title string, accessory func(), rows func(k *card)) {
-	c := s.c
+func (s settingsPane) section(c *ui.Context, title string, accessory func(), rows func(k *card)) {
 	section(c, title, sectionHeading, accessory, func(k *card) {
 		if s.page == nil {
 			rows(k)
@@ -149,24 +147,24 @@ func (s settingsPane) section(title string, accessory func(), rows func(k *card)
 }
 
 // mark makes a row the target of a search pick by its label: it scrolls into view and flashes.
-func (s settingsPane) mark(e *ui.Element, label string) *ui.Element {
+func (s settingsPane) mark(c *ui.Context, e ui.Element, label string) ui.Element {
 	if s.page == nil {
 		return e
 	}
-	reveal, flash := s.page.claim(s.c, label, false)
+	reveal, flash := s.page.claim(c, label, false)
 	if flash > 0 {
-		fill := colors(s.c).Accent.Alpha(flash)
+		fill := colors(c).Accent.Alpha(flash)
 		e.Draw(func(p *ui.Painter, r ui.Rect) { p.Fill(r, fill, 0) })
 	}
 	if reveal {
-		e.Children(func() { settingsRevealBox(s.c) })
+		e.Children(func() { settingsRevealBox(c) })
 	}
 	return e
 }
 
 // markBox marks a row whose builder answers no element by a box around it.
-func (s settingsPane) markBox(label string, build func()) {
-	s.mark(ui.Column(s.c).Children(build), label)
+func (s settingsPane) markBox(c *ui.Context, label string, build func()) {
+	s.mark(c, ui.Column(c).Children(build), label)
 }
 
 // settingsRevealBox scrolls what holds it into view with room above it for its section's
@@ -176,8 +174,8 @@ func settingsRevealBox(c *ui.Context) {
 }
 
 // footnote is a paragraph under a card, in the tertiary color.
-func (s settingsPane) footnote(text string) {
-	ui.Text(s.c, text).FontSize(textCaption).LineHeight(1.4).TextColor(colors(s.c).Label3)
+func (s settingsPane) footnote(c *ui.Context, text string) {
+	ui.Text(c, text).FontSize(textCaption).LineHeight(1.4).TextColor(colors(c).Label3)
 }
 
 // MARK: - The small window
@@ -218,11 +216,11 @@ func (s *settingsWindow) view(c *ui.Context) {
 		})
 		ui.Box(c).Height(1).Background(p.ToolbarLine)
 		ui.Column(c).Grow(1).MinHeight(0).Children(func() {
-			pane := settingsPane{c: c, w: &s.appWindow}
+			pane := settingsPane{w: &s.appWindow}
 			if s.tab == model.PaneAdvanced {
-				pane.advanced()
+				pane.advanced(c)
 			} else {
-				pane.general()
+				pane.general(c)
 			}
 		})
 	})

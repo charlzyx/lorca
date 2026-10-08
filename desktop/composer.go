@@ -136,7 +136,7 @@ func (frostedGlass) PaintMaterial(p *ui.Painter, box ui.Rect, radii [4]float32) 
 	glass.Glass{}.PaintMaterial(p, box, radii)
 }
 
-func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*model.Bot, chatS *chatState) *ui.Element {
+func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*model.Bot, chatS *chatState) ui.Element {
 	p := colors(c)
 	s := &chatS.composer
 	if m.focusComposer {
@@ -209,8 +209,8 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 	// One line beside the controls unless the text needs more room: a newline, a wrap, or files.
 	expanded := len(s.attachments) > 0 || s.reply != nil || strings.Contains(s.draft, "\n")
 	// Keyed, so its state and size stay its own as the button to the latest comes and goes before it.
-	outer := ui.Column(c).Key("composer").Absolute().Left(0).Right(0).Bottom(0).Padding(8, 20, 14, 20).PassThrough()
-	var field *ui.Element
+	outer := ui.Column(c.Key("composer")).Absolute().Left(0).Right(0).Bottom(0).Padding(8, 20, 14, 20).PassThrough()
+	var field ui.Element
 	outer.Children(func() {
 		field = ui.Grid(c).ColumnTracks(ui.Fixed(28), ui.Fr(1), ui.FitContent()).GapX(8).MinHeight(46).Padding(8).
 			Radius(22).Border(0.5, p.ComposerBorder).Material(frostedGlass{}).Cursor(ui.CursorText)
@@ -242,7 +242,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 		field.Children(func() {
 			if s.reply != nil {
 				reply := s.reply
-				ui.Row(c).Key("reply").ColumnSpan(-1).RowStart(row).Gap(6).MinWidth(0).Padding(0, 4, 2, 6).FontSize(12).TextColor(p.Label2).Children(func() {
+				ui.Row(c.Key("reply")).ColumnSpan(-1).RowStart(row).Gap(6).MinWidth(0).Padding(0, 4, 2, 6).FontSize(12).TextColor(p.Label2).Children(func() {
 					symbol(c, "arrowshape.turn.up.left.fill", 13, 2.4)
 					ui.RichText(c, ui.Span{Text: L("Replying to %@", reply.name), Weight: 600, Color: p.Label}, ui.Span{Text: " " + reply.text}).Grow(1).Shrink(1).MinWidth(0).SingleLine()
 					cancel := ui.ButtonBase(c).TextColor(p.Label3).Label(L("Cancel reply")).Tooltip(L("Cancel reply")).Cursor(ui.CursorPointer)
@@ -257,9 +257,9 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 			if len(s.attachments) > 0 {
 				removed := -1
 				// Chips 14 apart side by side (8, and the remove button's overhang), rows 8 apart.
-				ui.Row(c).Key("strip").ColumnSpan(-1).RowStart(row).Wrap().GapX(14).GapY(8).Padding(6, 4).Children(func() {
+				ui.Row(c.Key("strip")).ColumnSpan(-1).RowStart(row).Wrap().GapX(14).GapY(8).Padding(6, 4).Children(func() {
 					for i, item := range s.attachments {
-						chip := ui.Box(c).Key(item.Attachment.ID).Tooltip(item.Attachment.Name)
+						chip := ui.Box(c.Key(item.Attachment.ID)).Tooltip(item.Attachment.Name)
 						chip.Children(func() {
 							if item.Attachment.IsImage() {
 								ui.Box(c).Size(56, 56).Radius(10).Clip().Children(func() {
@@ -295,7 +295,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 			if expanded {
 				controlsRow = row + 1
 			}
-			attach := ui.ButtonBase(c).Key("attach").RowStart(controlsRow).ColumnStart(1).Size(28, 28).Radius(14).Center().
+			attach := ui.ButtonBase(c.Key("attach")).RowStart(controlsRow).ColumnStart(1).Size(28, 28).Radius(14).Center().
 				Background(p.ComposerControl).TextColor(p.Label).Label(L("Attach files")).Tooltip(L("Attach files"))
 			attach.Children(func() { symbol(c, "plus", 16, 2.2) })
 			if attach.Clicked() {
@@ -306,7 +306,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 					s.focus = true
 				})
 			}
-			holder := ui.Box(c).Key("text").RowStart(textRow).MinWidth(0)
+			holder := ui.Box(c.Key("text")).RowStart(textRow).MinWidth(0)
 			if expanded {
 				holder.ColumnStart(1).ColumnSpan(-1).Padding(0, 4)
 			} else {
@@ -385,7 +385,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 					c.Invalidate()
 				}
 			})
-			trailing := ui.Row(c).Key("trailing").RowStart(controlsRow).ColumnStart(3).Gap(4)
+			trailing := ui.Row(c.Key("trailing")).RowStart(controlsRow).ColumnStart(3).Gap(4)
 			trailing.Children(func() {
 				if responding {
 					stop := ui.ButtonBase(c).Size(28, 28).Radius(14).Center().Label(L("Stop responding")).Tooltip(L("Stop responding (%@)", shortcutText("CmdOrCtrl+.")))
@@ -437,7 +437,7 @@ func (m *mainWindow) composerView(c *ui.Context, chat *model.Chat, members []*mo
 }
 
 // mentionPanel is the `@` menu: above the composer, five rows showing and the rest scrolling.
-func (m *mainWindow) mentionPanel(c *ui.Context, field *ui.Element, bots []*model.Bot, s *composerState, pick func(*model.Bot)) {
+func (m *mainWindow) mentionPanel(c *ui.Context, field ui.Element, bots []*model.Bot, s *composerState, pick func(*model.Bot)) {
 	p := colors(c)
 	ui.Overlay(c, func() {
 		height := float32(min(len(bots), mentionRows)*mentionRowHeight + 10)
@@ -445,7 +445,7 @@ func (m *mainWindow) mentionPanel(c *ui.Context, field *ui.Element, bots []*mode
 			AttachTo(field, ui.AnchorTopLeft, ui.AnchorBottomLeft).Margin(0, 0, 8, 40)
 		panel.Children(func() {
 			for i, bot := range bots {
-				row := ui.Row(c).Key(bot.ID).Height(mentionRowHeight).Gap(8).Padding(0, 8).Radius(7).Cursor(ui.CursorPointer)
+				row := ui.Row(c.Key(bot.ID)).Height(mentionRowHeight).Gap(8).Padding(0, 8).Radius(7).Cursor(ui.CursorPointer)
 				highlighted := i == s.mentionIndex
 				if row.Hovered() {
 					s.mentionIndex, highlighted = i, true

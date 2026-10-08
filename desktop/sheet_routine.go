@@ -59,8 +59,8 @@ func (w *appWindow) routineView(c *ui.Context, s *sheet, title, routineID string
 			state = L("Paused while you were away")
 		}
 		section(c, L("Schedule"), sectionCaption, nil, func(k *card) {
-			keyValueRow(k, L("State"), state, false, &tint)
-			keyValueRow(k, L("Schedule"), routine.ScheduleText, false, nil).Tooltip(routine.Schedule)
+			keyValueRow(c, k, L("State"), state, false, &tint)
+			keyValueRow(c, k, L("Schedule"), routine.ScheduleText, false, nil).Tooltip(routine.Schedule)
 			next, nextLabel := "—", L("Next run")
 			if routine.HasCheck {
 				nextLabel = L("Next check")
@@ -68,8 +68,8 @@ func (w *appWindow) routineView(c *ui.Context, s *sheet, title, routineID string
 			if !routine.NextRunAt.IsZero() {
 				next = model.Upcoming(routine.NextRunAt)
 			}
-			keyValueRow(k, nextLabel, next, false, nil)
-			keyValueRow(k, L("Last run"), routine.LastRunSummary(), false, nil)
+			keyValueRow(c, k, nextLabel, next, false, nil)
+			keyValueRow(c, k, L("Last run"), routine.LastRunSummary(), false, nil)
 		})
 		section(c, L("Task"), sectionCaption, nil, func(k *card) {
 			k.row(ui.Scroll(c).Height(96).Padding(8, 12).Children(func() {

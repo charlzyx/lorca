@@ -429,7 +429,7 @@ func (mk *marketplace) view(c *ui.Context, s *sheet) {
 		Transition(ui.ElementTransition{Enter: &ui.Motion{Y: -10}, Duration: 160 * time.Millisecond})
 	panel.Children(func() {
 		ui.Box(c).Absolute().Top(44).Left(0).Right(0).Bottom(0).Children(func() {
-			content := ui.Scroll(c).Key(page.serial).Fill().Padding(2, 32, 32, 32).Gap(24).TrackScroll(&page.scroll).
+			content := ui.Scroll(c.Key(page.serial)).Fill().Padding(2, 32, 32, 32).Gap(24).TrackScroll(&page.scroll).
 				Transition(ui.ElementTransition{Enter: &ui.Motion{}, Duration: 180 * time.Millisecond})
 			content.Children(func() { mk.pageView(c, page) })
 		})
@@ -495,7 +495,7 @@ func (mk *marketplace) noticeView(c *ui.Context) {
 	if n.isError {
 		tint = p.Red
 	}
-	box := ui.Box(c).Key("notice").Attach(ui.AnchorBottom, ui.AnchorBottom).Bottom(18).MaxWidth(mk.width-96).Padding(9, 14).Radius(10).
+	box := ui.Box(c.Key("notice")).Attach(ui.AnchorBottom, ui.AnchorBottom).Bottom(18).MaxWidth(mk.width-96).Padding(9, 14).Radius(10).
 		Border(1, p.Separator).Background(p.Window).Shadow(0, 2, 12, 0, ui.RGBA(0, 0, 0, 0.18)).Role(ui.RoleStatus).
 		Transition(ui.ElementTransition{Exit: &ui.Motion{}, Duration: 250 * time.Millisecond})
 	box.Children(func() {
@@ -522,7 +522,7 @@ func (mk *marketplace) pageView(c *ui.Context, page *marketPage) {
 
 // marketPluginIcon is a plugin's icon: its real mark on a white tile, or its symbol on a light tile
 // with a hairline.
-func marketPluginIcon(c *ui.Context, pluginID, symbolName string, size float32) *ui.Element {
+func marketPluginIcon(c *ui.Context, pluginID, symbolName string, size float32) ui.Element {
 	if pluginMark(pluginID) != nil {
 		return pluginTile(c, pluginID, symbolName, size)
 	}
@@ -547,7 +547,7 @@ type marketRowOptions struct {
 func marketRow(c *ui.Context, key string, o marketRowOptions, media, accessory func()) bool {
 	p := colors(c)
 	opened := false
-	ui.Box(c).Key(key).MinWidth(0).Children(func() {
+	ui.Box(c.Key(key)).MinWidth(0).Children(func() {
 		label := o.Title
 		for _, part := range []string{o.Byline, o.Subtitle} {
 			if part != "" {
@@ -666,7 +666,7 @@ func (mk *marketplace) grid(c *ui.Context, items []marketItem) {
 // section is a home page section: its title with View all when there is more, or a control, over
 // its grid.
 func (mk *marketplace) section(c *ui.Context, title string, items []marketItem, control func(), viewAll func()) {
-	ui.Column(c).Key(title).Gap(6).Children(func() {
+	ui.Column(c.Key(title)).Gap(6).Children(func() {
 		header := ui.Row(c).Height(28).Gap(8).Padding(0, 4, 0, 12).Justify(ui.SpaceBetween)
 		// View all hangs 4 in from the edge; a control, as the kind filter, 12.
 		if viewAll == nil && control != nil {
@@ -699,11 +699,11 @@ func marketPageTitle(c *ui.Context, text string, control func()) {
 
 // marketStatusLine is a line of secondary text on the rows' leading edge, for loading, empty, and
 // notes.
-func marketStatusLine(c *ui.Context, text string) *ui.Element {
+func marketStatusLine(c *ui.Context, text string) ui.Element {
 	return ui.Text(c, text).Padding(0, 12).FontSize(13).LineHeight(1.4).TextColor(colors(c).Label2)
 }
 
 // marketKindFilter is All, Plugins, and Bots, when both kinds are there.
 func marketKindFilter(c *ui.Context, kind *int) {
-	segmented(c, kind, L("Filter results"), L("All"), L("Plugins"), L("Bots"))
+	segmented(c, kind, L("Filter results"), nil, L("All"), L("Plugins"), L("Bots"))
 }

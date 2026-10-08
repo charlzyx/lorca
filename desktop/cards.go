@@ -54,7 +54,7 @@ func commandBlock(c *ui.Context, text string, lines int) bool {
 
 // commandOutput is a command's last lines: a code block that grows to `lines` lines and then
 // scrolls, the newest line in view.
-func commandOutput(c *ui.Context, text string, lines int) *ui.Element {
+func commandOutput(c *ui.Context, text string, lines int) ui.Element {
 	p := colors(c)
 	box := ui.Scroll(c).Margin(6, 0, 0, 0).MaxHeight(float32(lines)*15+10).Padding(5, 8).Radius(6).Background(p.Code).TextColor(p.Label)
 	state := ui.Local(box, "scroll", func() outputScroll { return outputScroll{} })
@@ -184,7 +184,7 @@ func (m *mainWindow) permissionCard(c *ui.Context, chat *model.Chat, message *mo
 			if request.IsPending() {
 				ui.Row(c).Wrap().Gap(6).Margin(10, 0, 0, 0).Children(func() {
 					for _, choice := range request.Choices() {
-						if pushButton(c, choice.Title, pushOptions{Small: true}).Key(choice.Decision).Clicked() {
+						if pushButton(c.Key(choice.Decision), choice.Title, pushOptions{Small: true}).Clicked() {
 							store.AnswerPermission(chatID, messageID, choice.Decision)
 						}
 					}
@@ -263,7 +263,7 @@ func (m *mainWindow) commandCard(c *ui.Context, chat *model.Chat, message *model
 	run := message.Body.Tool.Run
 	name := botName(message)
 	chatID, messageID := chat.ID, message.ID
-	holder := ui.Box(c).Key("card:" + message.ID)
+	holder := ui.Box(c.Key("card:" + message.ID))
 	st := ui.Local(holder, "card", func() commandCardState { return commandCardState{seen: run.State, seenText: run.Output} })
 	// Another state or new output clears what went wrong; ending takes back what was typed.
 	if st.seen != run.State || st.seenText != run.Output {
@@ -328,7 +328,7 @@ func (m *mainWindow) commandCard(c *ui.Context, chat *model.Chat, message *model
 				if run.State == model.CommandAsking {
 					ui.Row(c).Wrap().Gap(6).Margin(10, 0, 0, 0).Children(func() {
 						for _, choice := range run.Choices() {
-							if pushButton(c, choice.Title, pushOptions{Small: true}).Key(choice.Decision).Clicked() {
+							if pushButton(c.Key(choice.Decision), choice.Title, pushOptions{Small: true}).Clicked() {
 								store.AnswerPermission(chatID, messageID, choice.Decision)
 							}
 						}

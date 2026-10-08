@@ -28,15 +28,15 @@ const (
 // card is a section's card while its rows are built: each row after the first draws the divider
 // above it.
 type card struct {
-	c     *ui.Context
+	line  ui.Color
 	inset float32
 	rows  int
 }
 
 // row draws the divider above `e` when a row came before it, and counts it.
-func (k *card) row(e *ui.Element) *ui.Element {
+func (k *card) row(e ui.Element) ui.Element {
 	if k.rows > 0 {
-		inset, line := k.inset, colors(k.c).Separator
+		inset, line := k.inset, k.line
 		e.DrawOver(func(p *ui.Painter, r ui.Rect) {
 			p.Fill(ui.Rect{X: r.X + inset, Y: r.Y, W: r.W - 2*inset, H: 1}, line, 0)
 		})
@@ -46,7 +46,7 @@ func (k *card) row(e *ui.Element) *ui.Element {
 }
 
 // section is a title over a card of rows. `accessory` sits on the title's line.
-func section(c *ui.Context, title string, style sectionStyle, accessory func(), rows func(k *card)) *ui.Element {
+func section(c *ui.Context, title string, style sectionStyle, accessory func(), rows func(k *card)) ui.Element {
 	p := colors(c)
 	s := ui.Column(c).MinWidth(0).Label(title)
 	s.Children(func() {
@@ -66,7 +66,7 @@ func section(c *ui.Context, title string, style sectionStyle, accessory func(), 
 				ui.Row(c).Margin(-6, 0).Children(accessory)
 			}
 		})
-		k := &card{c: c}
+		k := &card{line: p.Separator}
 		body := ui.Column(c).Background(p.BotBubble).Clip()
 		if style == sectionCaption {
 			body.Radius(9).Border(1, p.BotBubbleBorder)
@@ -80,17 +80,16 @@ func section(c *ui.Context, title string, style sectionStyle, accessory func(), 
 }
 
 // rowBox is a row's box: its children in a line, 32 tall at least.
-func rowBox(c *ui.Context) *ui.Element {
+func rowBox(c *ui.Context) ui.Element {
 	return ui.Row(c).Gap(10).MinHeight(32).Padding(8, 12).MinWidth(0)
 }
 
-func rowKey(c *ui.Context, label string) *ui.Element {
+func rowKey(c *ui.Context, label string) ui.Element {
 	return ui.Text(c, label).FontSize(12).TextColor(colors(c).Label2).SingleLine()
 }
 
 // keyValueRow is a key on the left and a value on the right that wraps and can be selected.
-func keyValueRow(k *card, label, value string, mono bool, tint *ui.Color) *ui.Element {
-	c := k.c
+func keyValueRow(c *ui.Context, k *card, label, value string, mono bool, tint *ui.Color) ui.Element {
 	r := k.row(rowBox(c).AlignItems(ui.Start).Label(label))
 	r.Children(func() {
 		rowKey(c, label).Padding(1, 0, 0, 0)
@@ -115,18 +114,16 @@ type botRowOptions struct {
 }
 
 type botRowResult struct {
-	Row       *ui.Element
 	Clicked   bool
 	Accessory bool
 	Avatar    bool
 }
 
 // botRow is a bot, as the inspector, the Device pane, and pickers list them.
-func botRow(k *card, bot *model.Bot, o botRowOptions) botRowResult {
-	c := k.c
+func botRow(c *ui.Context, k *card, bot *model.Bot, o botRowOptions) (ui.Element, botRowResult) {
 	p := colors(c)
 	var result botRowResult
-	r := k.row(rowBox(c).MinHeight(46).Padding(0, 10, 0, 12).Gap(9).Label(bot.Name).Key(bot.ID))
+	r := k.row(rowBox(c.Key(bot.ID)).MinHeight(46).Padding(0, 10, 0, 12).Gap(9).Label(bot.Name))
 	if o.Clickable {
 		r.Cursor(ui.CursorPointer)
 		if r.Hovered() {
@@ -156,16 +153,15 @@ func botRow(k *card, bot *model.Bot, o botRowOptions) botRowResult {
 			result.Accessory = b.Clicked()
 		}
 	})
-	result.Row = r
 	if result.Accessory || result.Avatar {
 		result.Clicked = false
 	}
-	return result
+	return r, result
 }
 
 // pluginTile is a plugin's real mark on a white tile, which stays white in dark mode so a dark
 // brand color still reads, or its symbol when it has no mark.
-func pluginTile(c *ui.Context, pluginID, symbolName string, size float32) *ui.Element {
+func pluginTile(c *ui.Context, pluginID, symbolName string, size float32) ui.Element {
 	mark := pluginMark(pluginID)
 	if mark == nil {
 		return symbol(c, symbolName, float32(int(size*0.8+0.5)), 1.8)
@@ -193,15 +189,13 @@ type statusRowOptions struct {
 }
 
 type statusRowResult struct {
-	Row     *ui.Element
 	Clicked bool
 	Action  bool
 }
 
 // statusRow is a leading symbol, a title over a subtitle, and a trailing state, as words or a
 // symbol, or an action button.
-func statusRow(k *card, o statusRowOptions) statusRowResult {
-	c := k.c
+func statusRow(c *ui.Context, k *card, o statusRowOptions) (ui.Element, statusRowResult) {
 	p := colors(c)
 	var result statusRowResult
 	r := k.row(rowBox(c).MinHeight(44).Label(o.Title))
@@ -238,7 +232,7 @@ func statusRow(k *card, o statusRowOptions) statusRowResult {
 			if o.StateColor != nil {
 				tint = *o.StateColor
 			}
-			var state *ui.Element
+			var state ui.Element
 			if o.StateSymbol != "" {
 				state = ui.Row(c).TextColor(tint).Label(o.State).Tooltip(o.State)
 				state.Children(func() { symbol(c, o.StateSymbol, 14, 2.4) })
@@ -251,17 +245,16 @@ func statusRow(k *card, o statusRowOptions) statusRowResult {
 			}
 		}
 	})
-	result.Row = r
 	if result.Action {
 		result.Clicked = false
 	}
-	return result
+	return r, result
 }
 
 // pluginRow is a plugin and its state as a symbol: a check when it is ready, an exclamation mark
 // when it needs something, whose words are its tooltip and a click away.
-func pluginRow(k *card, plugin model.InstalledPlugin, clickable bool, tooltip string) statusRowResult {
-	p := colors(k.c)
+func pluginRow(c *ui.Context, k *card, plugin model.InstalledPlugin, clickable bool, tooltip string) (ui.Element, statusRowResult) {
+	p := colors(c)
 	ready := plugin.State == model.PluginReady
 	o := statusRowOptions{
 		Symbol:    plugin.Symbol(),
@@ -276,12 +269,11 @@ func pluginRow(k *card, plugin model.InstalledPlugin, clickable bool, tooltip st
 	} else {
 		o.State, o.StateSymbol, o.StateColor, o.StateDetail = plugin.Detail, "exclamationmark.circle.fill", &p.Orange, plugin.Detail
 	}
-	return statusRow(k, o)
+	return statusRow(c, k, o)
 }
 
 // popUpRow is a label on the left and a pop-up on the right.
-func popUpRow(k *card, label string, o popUp) (string, bool) {
-	c := k.c
+func popUpRow(c *ui.Context, k *card, label string, o popUp) (string, bool) {
 	var picked string
 	var changed bool
 	r := k.row(rowBox(c).MinHeight(34).Padding(4, 8, 4, 12).Label(label))
@@ -304,18 +296,17 @@ type actionRowOptions struct {
 	Copied bool
 	// Second is an action before the main one, when the row has two.
 	Second string
+	Menu   func(*ui.Menu)
 }
 
 type actionRowResult struct {
-	Row    *ui.Element
-	Action *ui.Element
+	Action bool
 	Second bool
 }
 
 // actionRow is a key on the left, a status value on the right, and a text action after it. A
 // monospaced value is something to copy (a sign-in code), so it is selectable.
-func actionRow(k *card, label string, o actionRowOptions) actionRowResult {
-	c := k.c
+func actionRow(c *ui.Context, k *card, label string, o actionRowOptions) (ui.Element, actionRowResult) {
 	p := colors(c)
 	var result actionRowResult
 	r := k.row(rowBox(c).Label(label))
@@ -345,17 +336,18 @@ func actionRow(k *card, label string, o actionRowOptions) actionRowResult {
 				}
 				ui.Text(c, o.Action).SingleLine()
 			})
-			result.Action = b
+			result.Action = b.Clicked()
+			if o.Menu != nil {
+				b.Menu(o.Menu)
+			}
 		}
 	})
-	result.Row = r
-	return result
+	return r, result
 }
 
 // summaryActionRow is a key and an action on the first line, with a wrapping two-line preview
 // under them. With no preview, the key and the action sit alone on one line. It reports the action.
-func summaryActionRow(k *card, label, value, action string) bool {
-	c := k.c
+func summaryActionRow(c *ui.Context, k *card, label, value, action string) bool {
 	p := colors(c)
 	clicked := false
 	r := k.row(ui.Column(c).Gap(2).Padding(6, 12, 8, 12).Label(label))
@@ -382,8 +374,7 @@ type editableRowState struct {
 // editableRow is a key on the left and an editable value on the right that looks like a value
 // until it is clicked, and commits when editing ends (Return, or the keyboard leaving). While the
 // user types, the value from the model waits. It answers the committed text.
-func editableRow(k *card, label, value, placeholder string, mono, alignRight bool) (string, bool) {
-	c := k.c
+func editableRow(c *ui.Context, k *card, label, value, placeholder string, mono, alignRight bool) (string, bool) {
 	p := colors(c)
 	committed, ok := "", false
 	r := k.row(rowBox(c).AlignItems(ui.Center).Label(label))
@@ -423,15 +414,12 @@ func editableRow(k *card, label, value, placeholder string, mono, alignRight boo
 }
 
 type switchRowResult struct {
-	Toggled bool
 	Clicked bool
-	Row     *ui.Element
 }
 
 // switchRow is a row with an icon for its state, a title over a detail line, and a switch: a
 // routine that pauses or resumes. A click anywhere but the switch opens its details.
-func switchRow(k *card, symbolName string, tint ui.Color, title, detail string, on *bool, toggleTooltip, tooltip string) switchRowResult {
-	c := k.c
+func switchRow(c *ui.Context, k *card, symbolName string, tint ui.Color, title, detail string, on *bool, toggleTooltip, tooltip string, change func(bool)) (ui.Element, switchRowResult) {
 	p := colors(c)
 	var result switchRowResult
 	r := k.row(rowBox(c).MinHeight(44).Label(title).Cursor(ui.CursorPointer))
@@ -445,19 +433,17 @@ func switchRow(k *card, symbolName string, tint ui.Color, title, detail string, 
 			ui.Text(c, title).FontSize(12.5).FontWeight(500).SingleLine()
 			ui.Text(c, detail).FontSize(textCaption).TextColor(p.Label2).SingleLine()
 		})
-		s := toggleSwitch(c, on, true).Tooltip(toggleTooltip).Label(toggleTooltip)
-		result.Toggled = s.Changed()
+		s := toggleSwitch(c, on, true).Tooltip(toggleTooltip).Label(toggleTooltip).
+			OnClick(func() { change(*on) })
+		if s.Clicked() {
+			result.Clicked = false
+		}
 	})
-	if result.Toggled {
-		result.Clicked = false
-	}
-	result.Row = r
-	return result
+	return r, result
 }
 
 // noteRow is a sentence inside a card, for an empty state, or in a color for what went wrong.
-func noteRow(k *card, text string, tint *ui.Color) *ui.Element {
-	c := k.c
+func noteRow(c *ui.Context, k *card, text string, tint *ui.Color) ui.Element {
 	p := colors(c)
 	r := k.row(ui.Row(c).Padding(10, 12))
 	r.Children(func() {
@@ -470,8 +456,7 @@ func noteRow(k *card, text string, tint *ui.Color) *ui.Element {
 }
 
 // accessoryRow is a label on the left and any control on the right.
-func accessoryRow(k *card, label, tooltip string, control func()) *ui.Element {
-	c := k.c
+func accessoryRow(c *ui.Context, k *card, label, tooltip string, control func()) ui.Element {
 	r := k.row(rowBox(c).MinHeight(36).Label(label))
 	if tooltip != "" {
 		r.Tooltip(tooltip)

@@ -132,7 +132,7 @@ func (m *mainWindow) inspectorParticipants(c *ui.Context, chat *model.Chat, memb
 			if chat.CanRemoveBot() {
 				o.AccessorySymbol, o.AccessoryTooltip = "minus.circle", L("Remove from chat")
 			}
-			row := botRow(k, bot, o)
+			rowElement, row := botRow(c, k, bot, o)
 			botID, chatID := bot.ID, chat.ID
 			if row.Accessory {
 				store.RemoveBot(botID, chatID)
@@ -153,8 +153,8 @@ func (m *mainWindow) inspectorParticipants(c *ui.Context, chat *model.Chat, memb
 						}
 					}
 				}
-				row.Row.ContextMenu(menu)
-				row.Row.Menu(menu)
+				rowElement.ContextMenu(menu)
+				rowElement.Menu(menu)
 			}
 		}
 	}).Label(L("Bots in this chat"))
@@ -168,10 +168,10 @@ func (m *mainWindow) inspectorGroup(c *ui.Context, chat *model.Chat, members []*
 		names = append(names, bot.Name)
 	}
 	section(c, L("Group"), sectionCaption, nil, func(k *card) {
-		if value, ok := editableRow(k, L("Name"), chat.CustomTitle, strings.Join(names, ", "), false, true); ok && value != chat.CustomTitle {
+		if value, ok := editableRow(c, k, L("Name"), chat.CustomTitle, strings.Join(names, ", "), false, true); ok && value != chat.CustomTitle {
 			store.Rename(chat.ID, value)
 		}
-		if summaryActionRow(k, L("Description"), chat.GroupDescription, L("Edit…")) {
+		if summaryActionRow(c, k, L("Description"), chat.GroupDescription, L("Edit…")) {
 			m.presentGroupDescription(chat.ID)
 		}
 	})
@@ -180,12 +180,12 @@ func (m *mainWindow) inspectorGroup(c *ui.Context, chat *model.Chat, members []*
 func (m *mainWindow) inspectorProfile(c *ui.Context, bot *model.Bot) {
 	section(c, L("Profile"), sectionCaption, nil, func(k *card) {
 		// An emptied value keeps the old name; Description has its own sheet.
-		if value, ok := editableRow(k, L("Name"), bot.Name, L("Name"), false, true); ok {
+		if value, ok := editableRow(c, k, L("Name"), bot.Name, L("Name"), false, true); ok {
 			if value != "" && value != bot.Name {
 				store.UpdateBotProfile(bot.ID, value, nil)
 			}
 		}
-		if summaryActionRow(k, L("Description"), bot.Description, L("Edit…")) {
+		if summaryActionRow(c, k, L("Description"), bot.Description, L("Edit…")) {
 			m.presentBotDescription(bot.ID)
 		}
 	})
@@ -211,7 +211,7 @@ func (m *mainWindow) inspectorRuntime(c *ui.Context, bot *model.Bot, chat *model
 			providers = append(providers, popUpOption{Value: kind, Label: model.ProviderName(kind, store.Providers)})
 		}
 		// A new provider starts on its default model and thinking level.
-		if kind, ok := popUpRow(k, L("Provider"), popUp{Options: providers, Value: bot.Provider}); ok {
+		if kind, ok := popUpRow(c, k, L("Provider"), popUp{Options: providers, Value: bot.Provider}); ok {
 			store.SetBotRuntime(bot.ID, kind, "", "")
 		}
 		defaultLabel := ""
@@ -226,7 +226,7 @@ func (m *mainWindow) inspectorRuntime(c *ui.Context, bot *model.Bot, chat *model
 				current = each.ID
 			}
 		}
-		if id, ok := popUpRow(k, L("Model"), popUp{Options: modelOptions, Value: current}); ok && id != bot.Model {
+		if id, ok := popUpRow(c, k, L("Model"), popUp{Options: modelOptions, Value: current}); ok && id != bot.Model {
 			// A level the new model does not take goes back to the default.
 			thinking := ""
 			for _, level := range model.ThinkingLevels(catalog, bot.Provider, id) {
@@ -246,7 +246,7 @@ func (m *mainWindow) inspectorRuntime(c *ui.Context, bot *model.Bot, chat *model
 					current = level.ID
 				}
 			}
-			if id, ok := popUpRow(k, L("Thinking"), popUp{Options: options, Value: current}); ok && id != bot.Thinking {
+			if id, ok := popUpRow(c, k, L("Thinking"), popUp{Options: options, Value: current}); ok && id != bot.Thinking {
 				store.SetBotRuntime(bot.ID, bot.Provider, bot.Model, id)
 			}
 		}
@@ -257,7 +257,7 @@ func (m *mainWindow) inspectorRuntime(c *ui.Context, bot *model.Bot, chat *model
 		if connected {
 			value, tint, action = firstNonEmpty(credential.Detail, L("Connected")), p.Label, L("Change")
 		}
-		if actionRow(k, L("Credential"), actionRowOptions{Value: value, Tint: &tint, Action: action}).Action.Clicked() {
+		if _, result := actionRow(c, k, L("Credential"), actionRowOptions{Value: value, Tint: &tint, Action: action}); result.Action {
 			if model.IsCustomKind(bot.Provider) {
 				m.presentCustomProvider(bot.Provider, nil, nil)
 			} else {
@@ -271,10 +271,10 @@ func (m *mainWindow) inspectorRuntime(c *ui.Context, bot *model.Bot, chat *model
 		// What the turns here have used, and a way to shorten the context by hand.
 		if usage := chat.Usage; usage != nil {
 			label := p.Label
-			if actionRow(k, L("Context"), actionRowOptions{Value: usage.ContextSummary(), Tint: &label, Action: L("Compact")}).Action.Clicked() {
+			if _, result := actionRow(c, k, L("Context"), actionRowOptions{Value: usage.ContextSummary(), Tint: &label, Action: L("Compact")}); result.Action {
 				store.CompactChat(chat.ID)
 			}
-			keyValueRow(k, L("Spent"), usage.SpendSummary(), false, nil)
+			keyValueRow(c, k, L("Spent"), usage.SpendSummary(), false, nil)
 		}
 	})
 }
@@ -289,7 +289,7 @@ func (m *mainWindow) inspectorMemory(c *ui.Context, bot *model.Bot) {
 	section(c, L("Memory"), sectionCaption, nil, func(k *card) {
 		if !known {
 			if text := s.errors[bot.ID]; text != "" {
-				if actionRow(k, L("Notes"), actionRowOptions{Value: text, Tint: &p.Label2, Action: L("Retry")}).Action.Clicked() {
+				if _, result := actionRow(c, k, L("Notes"), actionRowOptions{Value: text, Tint: &p.Label2, Action: L("Retry")}); result.Action {
 					s.refreshMemory(bot.ID)
 				}
 				return
@@ -298,7 +298,7 @@ func (m *mainWindow) inspectorMemory(c *ui.Context, bot *model.Bot) {
 			if s.fetching[bot.ID] {
 				value = L("Loading…")
 			}
-			keyValueRow(k, L("Notes"), value, false, &p.Label2)
+			keyValueRow(c, k, L("Notes"), value, false, &p.Label2)
 			return
 		}
 		tint := p.Label
@@ -307,7 +307,7 @@ func (m *mainWindow) inspectorMemory(c *ui.Context, bot *model.Bot) {
 			tint = p.Orange
 			tooltip = L("Only the first %d lines or %@ open each turn; the rest is not read.", memory.MaxLines, model.Kilobytes(memory.MaxBytes))
 		}
-		if actionRow(k, L("Notes"), actionRowOptions{Value: memory.BudgetSummary(), Tint: &tint, Action: L("Edit…"), Tooltip: tooltip}).Action.Clicked() {
+		if _, result := actionRow(c, k, L("Notes"), actionRowOptions{Value: memory.BudgetSummary(), Tint: &tint, Action: L("Edit…"), Tooltip: tooltip}); result.Action {
 			// The rows outlive a rename, so the sheet takes the bot as it is now.
 			if current := store.Bot(bot.ID); current != nil {
 				botID := current.ID
@@ -319,8 +319,8 @@ func (m *mainWindow) inspectorMemory(c *ui.Context, bot *model.Bot) {
 		if memory.Here {
 			folder, action = memory.FilesSummary(), L("Show")
 		}
-		row := actionRow(k, L("Folder"), actionRowOptions{Value: folder, Tint: &p.Label2, Action: action, Tooltip: memory.Path})
-		if row.Action != nil && row.Action.Clicked() {
+		_, row := actionRow(c, k, L("Folder"), actionRowOptions{Value: folder, Tint: &p.Label2, Action: action, Tooltip: memory.Path})
+		if row.Action {
 			showInFolder(joinPath(memory.Path, "MEMORY.md"))
 		}
 	})
@@ -333,7 +333,7 @@ func (m *mainWindow) inspectorRoutines(c *ui.Context, bot *model.Bot) {
 	routines := store.RoutinesFor(bot.ID)
 	section(c, L("Routines"), sectionCaption, nil, func(k *card) {
 		if len(routines) == 0 {
-			noteRow(k, L("Routines are recurring tasks this bot runs on a schedule. Ask it in chat to set one up."), nil)
+			noteRow(c, k, L("Routines are recurring tasks this bot runs on a schedule. Ask it in chat to set one up."), nil)
 			return
 		}
 		for _, routine := range routines {
@@ -351,12 +351,10 @@ func (m *mainWindow) inspectorRoutines(c *ui.Context, bot *model.Bot) {
 			on := routine.IsEnabled
 			id, botID := routine.ID, bot.ID
 			var result switchRowResult
-			ui.Box(c).Key(routine.ID).Children(func() {
-				result = switchRow(k, symbolName, tint, routine.Name, routine.Detail(), &on, toggle, routine.Prompt)
+			ui.Box(c.Key(routine.ID)).Children(func() {
+				_, result = switchRow(c, k, symbolName, tint, routine.Name, routine.Detail(), &on, toggle, routine.Prompt,
+					func(on bool) { store.SetRoutineEnabled(id, on) })
 			})
-			if result.Toggled {
-				store.SetRoutineEnabled(id, on)
-			}
 			if result.Clicked {
 				if current := store.Bot(botID); current != nil {
 					m.presentRoutine(id, current, m.prefill)
@@ -390,8 +388,8 @@ func (m *mainWindow) inspectorPlugins(c *ui.Context, bot *model.Bot) {
 		for _, plugin := range plugins {
 			pluginID := plugin.ID
 			var row statusRowResult
-			ui.Box(c).Key(plugin.ID).Children(func() {
-				row = pluginRow(k, plugin, true, L("Open %@", plugin.Name))
+			ui.Box(c.Key(plugin.ID)).Children(func() {
+				_, row = pluginRow(c, k, plugin, true, L("Open %@", plugin.Name))
 			})
 			if row.Clicked && runner != nil {
 				m.presentPlugin(pluginID, runner)
@@ -402,9 +400,9 @@ func (m *mainWindow) inspectorPlugins(c *ui.Context, bot *model.Bot) {
 			if runner != nil {
 				name = runner.Name
 			}
-			noteRow(k, L("No plugins on %@ yet. Add one from the marketplace, or ask %@ to find one.", name, bot.Name), nil)
+			noteRow(c, k, L("No plugins on %@ yet. Add one from the marketplace, or ask %@ to find one.", name, bot.Name), nil)
 		}
-		if actionRow(k, L("Marketplace"), actionRowOptions{Tint: &p.Label2, Action: L("Add from Plugins…")}).Action.Clicked() {
+		if _, result := actionRow(c, k, L("Marketplace"), actionRowOptions{Tint: &p.Label2, Action: L("Add from Plugins…")}); result.Action {
 			m.presentMarketplace(bot.RunnerID)
 		}
 	})
@@ -437,8 +435,8 @@ func (m *mainWindow) inspectorRouting(c *ui.Context, members []*model.Bot) {
 				state, color = L("Online"), p.Green
 			}
 			var row statusRowResult
-			ui.Box(c).Key(runner.ID).Children(func() {
-				row = statusRow(k, statusRowOptions{Symbol: runner.Symbol(), Title: runner.Name, Subtitle: strings.Join(names, ", "), State: state, StateColor: &color, Clickable: true})
+			ui.Box(c.Key(runner.ID)).Children(func() {
+				_, row = statusRow(c, k, statusRowOptions{Symbol: runner.Symbol(), Title: runner.Name, Subtitle: strings.Join(names, ", "), State: state, StateColor: &color, Clickable: true})
 			})
 			if row.Clicked {
 				m.openDevice(id)

@@ -44,7 +44,7 @@ func providerStatusLine(c *ui.Context, status *providerStatus) {
 }
 
 // providerNote is a note under a field, or a sheet's note: small, in the tertiary color.
-func providerNote(c *ui.Context, text string, tint *ui.Color) *ui.Element {
+func providerNote(c *ui.Context, text string, tint *ui.Color) ui.Element {
 	p := colors(c)
 	color := p.Label3
 	if tint != nil {
@@ -65,7 +65,7 @@ func mcpFormLabelWidth(c *ui.Context, labels ...string) float32 {
 }
 
 // providerFormRow is a label in the form's label column and its control, which fills the rest.
-func providerFormRow(c *ui.Context, labelWidth float32, label string, control func()) *ui.Element {
+func providerFormRow(c *ui.Context, labelWidth float32, label string, control func()) ui.Element {
 	p := colors(c)
 	return ui.Row(c).Gap(10).Children(func() {
 		ui.Text(c, label).Width(labelWidth).Shrink(0).FontSize(12).TextColor(p.Label2).SingleLine()
@@ -97,8 +97,8 @@ type providerKeyState struct {
 // providerKeyField is a provider's API key, after the macOS app's APIKeyField: masked by default,
 // with an eye inside the field that shows or hides the key and keeps the selection while it
 // switches. `autoFocus` makes it the field a sheet starts in.
-func providerKeyField(c *ui.Context, value *string, placeholder string, disabled, autoFocus bool) *ui.Element {
-	var field *ui.Element
+func providerKeyField(c *ui.Context, value *string, placeholder string, disabled, autoFocus bool) ui.Element {
+	var field ui.Element
 	box := ui.Box(c).MinWidth(0)
 	st := ui.Local(box, "key", func() providerKeyState { return providerKeyState{} })
 	box.Children(func() {
@@ -553,11 +553,10 @@ func (s *providerCustomSheet) modelsView(c *ui.Context) {
 		if searchField(c, &s.search, L("Search or add a model ID")).Submitted() {
 			s.searchReturn()
 		}
-		toggled := ""
 		list := ui.Scroll(c).Height(196).Radius(9).Border(1, p.BotBubbleBorder).Background(p.BotBubble).Label(L("Models"))
 		list.Children(func() {
 			if adding != "" {
-				ui.Box(c).Key("add").Children(func() {
+				ui.Box(c.Key("add")).Children(func() {
 					title := L("Add “%@”", adding)
 					b := ui.ButtonBase(c).Height(34).Padding(0, 10).Gap(6).Justify(ui.Start).TextColor(p.Accent).Label(title).Disabled(s.busy)
 					b.Children(func() {
@@ -570,13 +569,12 @@ func (s *providerCustomSheet) modelsView(c *ui.Context) {
 				})
 			}
 			for _, each := range rows {
-				if providerModelRow(c, each, s.checklist.Selected[each.ID], s.busy) {
-					toggled = each.ID
-				}
+				providerModelRow(c, each, s.checklist.Selected[each.ID], s.busy,
+					func() { s.checklist = s.checklist.Toggle(each.ID) })
 			}
 			if isEmpty {
 				if message := s.overlay(); message != "" {
-					ui.Column(c).Key("message").MinHeight(194).Gap(8).Padding(0, 24).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
+					ui.Column(c.Key("message")).MinHeight(194).Gap(8).Padding(0, 24).Justify(ui.Center).AlignItems(ui.Center).Children(func() {
 						if s.listing == providerLoading {
 							spinner(c, 14)
 						}
@@ -585,9 +583,6 @@ func (s *providerCustomSheet) modelsView(c *ui.Context) {
 				}
 			}
 		})
-		if toggled != "" {
-			s.checklist = s.checklist.Toggle(toggled)
-		}
 		// The row keeps its height while nothing is picked.
 		picked := s.picked()
 		ui.Row(c).Height(22).Gap(6).Justify(ui.SpaceBetween).Children(func() {
@@ -614,15 +609,13 @@ func (s *providerCustomSheet) modelsView(c *ui.Context) {
 }
 
 // providerModelRow is a model to pick: a click anywhere on it toggles it, as the Mac's checklist
-// does. It reports the toggle.
-func providerModelRow(c *ui.Context, each model.CustomModel, checked, disabled bool) bool {
+// does. The action writes the choice back after bound input.
+func providerModelRow(c *ui.Context, each model.CustomModel, checked, disabled bool, toggle func()) {
 	p := colors(c)
-	toggled := false
-	ui.Box(c).Key(each.ID).Children(func() {
+	ui.Box(c.Key(each.ID)).Children(func() {
 		on := checked
 		name := each.DisplayName()
-		row := ui.CheckboxBase(c, &on).Height(34).Padding(0, 10).Gap(6).Label(name).Disabled(disabled)
-		toggled = row.Changed()
+		row := ui.CheckboxBase(c, &on).Height(34).Padding(0, 10).Gap(6).Label(name).Disabled(disabled).OnClick(toggle)
 		row.Children(func() {
 			box := ui.Box(c).Size(14, 14).Radius(3.5).Shrink(0).Center()
 			if checked {
@@ -648,7 +641,6 @@ func providerModelRow(c *ui.Context, each model.CustomModel, checked, disabled b
 			}
 		})
 	})
-	return toggled
 }
 
 // MARK: - Connect a built-in provider
