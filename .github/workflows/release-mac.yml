@@ -16,6 +16,10 @@ on:
         description: Upload to R2 (off builds, signs, and notarizes only)
         type: boolean
         default: true
+      build_only:
+        description: Ad-hoc build without Apple credentials or notarization (requires publish off)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -34,6 +38,7 @@ jobs:
     timeout-minutes: 90
     env:
       # A pushed tag publishes.
+      BUILD_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.build_only }}
       PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
       ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
       ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
@@ -47,6 +52,12 @@ jobs:
       RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
     steps:
       - uses: actions/checkout@v7
+      - name: Validate build mode
+        run: |
+          if [[ $BUILD_ONLY == true && $PUBLISH == true ]]; then
+            echo "::error::build_only requires publish to be off"
+            exit 1
+          fi
       - name: Apply dots branding
         run: git apply --check brand.patch && git apply brand.patch
       - uses: oven-sh/setup-bun@v2
@@ -94,6 +105,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Sign in to App Store Connect and add the signing identity
+        if: env.BUILD_ONLY != 'true'
         env:
           ASC_KEY: ${{ secrets.ASC_KEY }}
           IDENTITY: ${{ secrets.MAC_SIGNING_IDENTITY }}
@@ -155,8 +167,40 @@ jobs:
         if: env.PUBLISH == 'true'
         run: bun run release-mac
       - name: Build and notarize
-        if: env.PUBLISH != 'true'
+        if: env.PUBLISH != 'true' && env.BUILD_ONLY != 'true'
         run: bun run release-mac --local
+      - name: Build with an ad-hoc signature
+        if: env.BUILD_ONLY == 'true'
+        run: bun run release-mac --local --build-only
+      - name: Verify the build-only app and bundled CLI
+        if: env.BUILD_ONLY == 'true'
+        run: |
+          app="macos/.build/bundle/release/dots.app"
+          cli="$PWD/$app/Contents/Resources/bin/dots"
+          test "$(plutil -extract CFBundleName raw "$app/Contents/Info.plist")" = dots
+          executable=$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist")
+          test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
+          test "$(lipo -archs "$cli")" = arm64
+          codesign --verify --deep --strict "$app"
+          codesign -dv "$app" 2>&1 | grep -F "Signature=adhoc"
+          codesign -dv "$cli" 2>&1 | grep -F "Signature=adhoc"
+          test "$("$cli" --version)" = "dots ${{ steps.package.outputs.version }}"
+          export HOME="$RUNNER_TEMP/dots-smoke-home"
+          mkdir -p "$HOME"
+          unset LORCA_HOME
+          "$cli" mcp add-json build-smoke '{"command":"/usr/bin/true","enabled":false}'
+          test -f "$HOME/.dots/mcp.json"
+          grep -F build-smoke "$HOME/.dots/mcp.json"
+          "$cli" mcp list | grep -F build-smoke
+          "$cli" mcp remove build-smoke
+          if grep -q build-smoke "$HOME/.dots/mcp.json"; then exit 1; fi
+      - name: Keep the build-only ZIP
+        if: env.BUILD_ONLY == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: dots-${{ steps.package.outputs.version }}-adhoc-zip
+          path: dist/mac/dots-${{ steps.package.outputs.version }}.zip
+          if-no-files-found: error
       - name: Keep the disk image
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@v7
@@ -165,7 +209,7 @@ jobs:
           path: dist/mac/dots-${{ steps.package.outputs.version }}.dmg
           if-no-files-found: error
       - name: Remove the keys and the keychain
-        if: always()
+        if: always() && env.BUILD_ONLY != 'true'
         run: |
           security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP/sparkle.key"

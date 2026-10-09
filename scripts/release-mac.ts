@@ -4,6 +4,7 @@
 //   bun run release-mac 0.2.0        bump "version" in package.json, then release
 //   bun run release-mac              release the version package.json holds
 //   bun run release-mac --local      build, sign, and notarize; publish nothing
+//   bun run release-mac --local --build-only  ad-hoc build; no notarization or publishing
 //   FORCE=1 bun run release-mac      replace a version that is already published
 //   NO_HISTORY=1 bun run release-mac skip the old archives (a full download, no deltas)
 //
@@ -40,20 +41,22 @@ function die(message: string): never {
 
 const args = process.argv.slice(2)
 const local = args.includes("--local")
-const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--local")
+const buildOnly = args.includes("--build-only")
+if (buildOnly && !local) die("--build-only requires --local; it cannot publish")
+const unknown = args.find((arg) => arg.startsWith("--") && arg !== "--local" && arg !== "--build-only")
 if (unknown) die(`unknown option: ${unknown}`)
 const positional = args.filter((arg) => !arg.startsWith("--"))
 if (positional.length > 1) die("expected at most one version")
 
 const NOTARY_PROFILE = process.env.NOTARY_PROFILE ?? "NOTARY"
 const apiKey = ["ASC_KEY_PATH", "ASC_KEY_ID", "ASC_ISSUER_ID"].map((name) => process.env[name])
-if (apiKey.some(Boolean) && !apiKey.every(Boolean)) die("set all of ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID, or none")
+if (!buildOnly && apiKey.some(Boolean) && !apiKey.every(Boolean)) die("set all of ASC_KEY_PATH, ASC_KEY_ID, and ASC_ISSUER_ID, or none")
 const [keyPath, keyID, issuerID] = apiKey
 const notaryAuth = keyPath
   ? ["--key", keyPath, "--key-id", keyID!, "--issuer", issuerID!]
   : ["--keychain-profile", NOTARY_PROFILE]
 // A partial name matches while the keychain holds one Developer ID Application certificate.
-const SIGN_IDENTITY = process.env.SIGN_IDENTITY ?? "Developer ID Application"
+const SIGN_IDENTITY = buildOnly ? "-" : process.env.SIGN_IDENTITY ?? "Developer ID Application"
 const R2_DEST = `${process.env.R2_REMOTE ?? "r2"}:${process.env.R2_BUCKET ?? "lorca-mac-releases"}`
 // A bucket-scoped R2 token cannot create buckets, which rclone otherwise checks before an upload.
 const RCLONE_FLAGS = ["--s3-no-check-bucket"]
@@ -116,7 +119,18 @@ await $`create-dmg --volname ${`${APP_NAME} ${version}`} --window-size 540 380 -
   .nothrow()
   .quiet()
 if (!existsSync(dmgPath)) die("create-dmg produced no disk image")
-if (!(await codesign(["--force", "--timestamp", "--sign", SIGN_IDENTITY, dmgPath]))) die("signing the disk image failed")
+if (!(await codesign(["--force", ...(buildOnly ? [] : ["--timestamp"]), "--sign", SIGN_IDENTITY, dmgPath]))) die("signing the disk image failed")
+
+if (buildOnly) {
+  await $`codesign --verify --deep --strict ${app}`
+  await $`codesign --verify --strict ${dmgPath}`
+  const zipPath = join(BUILD_DIR, zipName)
+  await rm(zipPath, { force: true })
+  await $`ditto -c -k --keepParent ${app} ${zipPath}`
+  log(`${color.green("built")} ${APP_NAME} ${version}; ad-hoc signed, not notarized; nothing was published`)
+  console.log(`  app      ${app}\n  download ${dmgPath}\n  archive  ${zipPath}`)
+  process.exit(0)
+}
 
 // ---- 4. notarize and staple
 // Notarizing the disk image notarizes the code inside it, so one submission staples both.

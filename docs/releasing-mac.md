@@ -155,6 +155,13 @@ off, it stops after notarizing, as `--local` does, and keeps `Lorca-<version>.dm
 artifact: a way to check the signing secrets without releasing anything. A version already in the
 bucket fails the run before the build.
 
+For a personal test build without Apple credentials, turn **publish** off and **build_only** on.
+This explicitly uses an ad-hoc signature, skips notarization, and keeps a ZIP and DMG as Actions
+artifacts. It cannot publish; selecting both options fails before building. The Mac workflow
+applies `brand.patch`, so these artifacts are named `dots-<version>`. macOS may require an
+explicit security confirmation to open this unnotarized build. The equivalent local command is
+`bun run release-mac --local --build-only`. Normal signed releases retain the setup below.
+
 The runner has no login keychain items, so the workflow hands the script what a Mac keeps there:
 
 - the Developer ID identity, imported into a keychain of its own;

@@ -18,8 +18,9 @@ Other identity/data paths, protocols, dependencies, architectures, access polici
 update enablement, signing keys and upstream endpoints remain unchanged.
 The upstream update/install services still provide upstream-branded releases;
 installing those can restore upstream branding. No old user files are migrated.
-The application release workflows retain upstream signing/publishing requirements;
-applying this patch does not grant credentials or turn them into build-only jobs.
+Normal application releases retain upstream signing/publishing requirements.
+The Mac workflow also has an explicit non-publishing build-only mode; applying
+this branding patch does not grant credentials or change the selected build mode.
 
 diff --git a/.github/workflows/release-cli.yml b/.github/workflows/release-cli.yml
 index 7334e82d266e9cf9add919f52a50b975b4cdcd75..874afb615e29ebe3160ecd8ea90c28426e5467ab 100644
@@ -72,10 +73,10 @@ index 7334e82d266e9cf9add919f52a50b975b4cdcd75..874afb615e29ebe3160ecd8ea90c2842
            $userPath = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path')
            if ($userPath -notlike "*$HOME\.local\bin*") { throw "the user PATH lacks .local\bin: $userPath" }
 diff --git a/.github/workflows/release-mac.yml b/.github/workflows/release-mac.yml
-index d43a242175c7cfe2e74b0574f6e5be02ab9e1d1c..6a92d5b8e0404d0767743054bd2e4658401cc8e2 100644
+index deac53de1056d608cb5d3aeb4d633703fea3e4ab..197f5c7877128d47b3b1f9f6d38981dfed85633d 100644
 --- a/.github/workflows/release-mac.yml
 +++ b/.github/workflows/release-mac.yml
-@@ -87,8 +87,8 @@
+@@ -98,8 +98,8 @@
            done
            # Before the build, so wrong credentials or a released version cost seconds, not the build.
            published=$(rclone lsf r2:lorca-mac-releases --s3-no-check-bucket --files-only --include "*.zip")
