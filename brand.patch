@@ -1,29 +1,5 @@
-dots branding patch
-Upstream base: egoist/lorca 9033c17710c5d4711a542bf28d2adf756e745af2
-
-Apply only when building dots, preferably in a separate checkout:
-  git worktree add --detach ../lorca-dots HEAD
-  cd ../lorca-dots
-  git apply --check brand.patch
-  git apply brand.patch
-  bun run build
-
-Undo with: git apply --reverse brand.patch
-After syncing upstream, run --check again; review conflicts rather than forcing application.
-The Mac release workflow applies this patch automatically before building dots.
-Other workflows do not apply it. All other unpatched files follow upstream.
-The patch changes display names, executable names/lookup, and the default MCP path
-(~/.dots/mcp.json). Explicit alternate data homes retain their own mcp.json.
-Other identity/data paths, protocols, dependencies, architectures, access policies,
-update enablement, signing keys and upstream endpoints remain unchanged.
-The upstream update/install services still provide upstream-branded releases;
-installing those can restore upstream branding. No old user files are migrated.
-Normal application releases retain upstream signing/publishing requirements.
-The Mac workflow also has an explicit non-publishing build-only mode; applying
-this branding patch does not grant credentials or change the selected build mode.
-
 diff --git a/.github/workflows/release-cli.yml b/.github/workflows/release-cli.yml
-index 7334e82d266e9cf9add919f52a50b975b4cdcd75..874afb615e29ebe3160ecd8ea90c28426e5467ab 100644
+index 7334e82..874afb6 100644
 --- a/.github/workflows/release-cli.yml
 +++ b/.github/workflows/release-cli.yml
 @@ -110,9 +110,11 @@ jobs:
@@ -73,10 +49,10 @@ index 7334e82d266e9cf9add919f52a50b975b4cdcd75..874afb615e29ebe3160ecd8ea90c2842
            $userPath = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path')
            if ($userPath -notlike "*$HOME\.local\bin*") { throw "the user PATH lacks .local\bin: $userPath" }
 diff --git a/.github/workflows/release-mac.yml b/.github/workflows/release-mac.yml
-index deac53de1056d608cb5d3aeb4d633703fea3e4ab..197f5c7877128d47b3b1f9f6d38981dfed85633d 100644
+index 32552c4..52b29f7 100644
 --- a/.github/workflows/release-mac.yml
 +++ b/.github/workflows/release-mac.yml
-@@ -98,8 +98,8 @@
+@@ -98,8 +98,8 @@ jobs:
            done
            # Before the build, so wrong credentials or a released version cost seconds, not the build.
            published=$(rclone lsf r2:lorca-mac-releases --s3-no-check-bucket --files-only --include "*.zip")
@@ -87,8 +63,60 @@ index deac53de1056d608cb5d3aeb4d633703fea3e4ab..197f5c7877128d47b3b1f9f6d38981df
              exit 1
            fi
        - uses: dtolnay/rust-toolchain@stable
+diff --git a/ARCHITECTURE.md b/ARCHITECTURE.md
+index 70f1465..c4ca417 100644
+--- a/ARCHITECTURE.md
++++ b/ARCHITECTURE.md
+@@ -37,7 +37,7 @@ Identity is a **key pair**. Devices pair. The relay stores public keys and ciphe
+ - **CLI:** identity and machine keys, local websocket, encrypt/decrypt, agent loop, the account’s provider credentials, sync with the relay.
+ - **Relay:** store-and-forward API. Rust, axum, SQLite or Postgres (`crates/relay`). Self-host it anywhere; clients point `LORCA_RELAY_URL` at it.
+ 
+-Production installs are named **Lorca** and use `app.lorca`; development installs are named **Lorca Dev** and use `app.lorca.dev`. They are separate applications on macOS, Windows, Linux, iOS, and Android. The production CLI stores its account under `~/.lorca` and listens on `4862`, while the desktop-app development build sets `LORCA_HOME=~/.lorca-dev` and listens on `4863`. On phones the distinct application ids give each build its own OS sandbox, and the core uses `lorca/core` or `lorca-dev/core` inside that sandbox. Their iOS keychain groups are `group.app.lorca` and `group.app.lorca.dev`.
++Production installs are named **Lorca** and use `app.lorca`; development installs are named **Lorca Dev** and use `app.lorca.dev`. They are separate applications on macOS, Windows, Linux, iOS, and Android. The production CLI stores its account under `~/.dots` and listens on `4862`, while the desktop-app development build sets `LORCA_HOME=~/.dots-dev` and listens on `4863`. On phones the distinct application ids give each build its own OS sandbox, and the core uses `lorca/core` or `lorca-dev/core` inside that sandbox. Their iOS keychain groups are `group.app.lorca` and `group.app.lorca.dev`.
+ 
+ If the CLI is down, the app shows a native empty state with the launcher’s status and the manual `lorca serve` command.
+ 
+diff --git a/crates/agent/src/providers/chatgpt/mod.rs b/crates/agent/src/providers/chatgpt/mod.rs
+index d4a2a6f..68b744f 100644
+--- a/crates/agent/src/providers/chatgpt/mod.rs
++++ b/crates/agent/src/providers/chatgpt/mod.rs
+@@ -299,7 +299,7 @@ mod tests {
+         }
+     }
+ 
+-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_chatgpt --
++    /// `LORCA_CREDENTIALS=~/.dots/credentials.json cargo test -p lorca-agent live_chatgpt --
+     /// --ignored --nocapture`: the model reads a random code off a tool's screenshot.
+     #[tokio::test]
+     #[ignore]
+diff --git a/crates/agent/src/providers/grok/mod.rs b/crates/agent/src/providers/grok/mod.rs
+index 1612f16..ba330cf 100644
+--- a/crates/agent/src/providers/grok/mod.rs
++++ b/crates/agent/src/providers/grok/mod.rs
+@@ -306,7 +306,7 @@ mod tests {
+         }
+     }
+ 
+-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_grok --
++    /// `LORCA_CREDENTIALS=~/.dots/credentials.json cargo test -p lorca-agent live_grok --
+     /// --ignored --nocapture`: the model reads a random code off a tool's screenshot sent in a
+     /// user message, and the probe reports whether it also reads one inside the output.
+     #[tokio::test]
+diff --git a/crates/agent/src/providers/openai_responses.rs b/crates/agent/src/providers/openai_responses.rs
+index 3efc1c3..8a34d68 100644
+--- a/crates/agent/src/providers/openai_responses.rs
++++ b/crates/agent/src/providers/openai_responses.rs
+@@ -278,7 +278,7 @@ mod tests {
+         assert_eq!(openai.body(&request)["input"][2]["output"][1]["type"], "input_image");
+     }
+ 
+-    /// `LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent live_opencode_zen --
++    /// `LORCA_CREDENTIALS=~/.dots/credentials.json cargo test -p lorca-agent live_opencode_zen --
+     /// --ignored --nocapture`: Zen's GPT, Grok, and Muse Spark routes read a random code off a
+     /// tool's screenshot sent in a user message, and the probe reports whether each also reads
+     /// one inside the output. `live_opencode_go` does the same on Go's GPT and Grok.
 diff --git a/crates/cli/Cargo.toml b/crates/cli/Cargo.toml
-index 17f0a924e1433d762853058d4a7820291c81d76f..7ec5c6b5c3f0a7d473fcd36e317cd8b972995ac1 100644
+index 17f0a92..7ec5c6b 100644
 --- a/crates/cli/Cargo.toml
 +++ b/crates/cli/Cargo.toml
 @@ -10,7 +10,7 @@ name = "lorca"
@@ -101,30 +129,57 @@ index 17f0a924e1433d762853058d4a7820291c81d76f..7ec5c6b5c3f0a7d473fcd36e317cd8b9
  required-features = ["cli"]
  
 diff --git a/crates/cli/src/config.rs b/crates/cli/src/config.rs
-index fc1827abe35f0cd1efef231db56ce9eef4c4434b..c193c70e21fbbba661d68bfce08cbbe23bb07ed7 100644
+index fc1827a..ec9f758 100644
 --- a/crates/cli/src/config.rs
 +++ b/crates/cli/src/config.rs
-@@ -50,9 +50,14 @@ impl Config {
+@@ -17,7 +17,7 @@ impl Config {
+     pub fn load(home_override: Option<PathBuf>, port_override: Option<u16>) -> Self {
+         let home = home_override
+             .or_else(|| std::env::var_os("LORCA_HOME").map(PathBuf::from))
+-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".lorca"));
++            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".dots"));
+         let port = port_override
+             .or_else(|| std::env::var("LORCA_PORT").ok().and_then(|p| p.parse().ok()))
+             .unwrap_or(DEFAULT_PORT);
+@@ -50,7 +50,7 @@ impl Config {
          self.home.join("plugins")
      }
  
 -    /// The MCP servers the user adds themselves, in the format Claude Desktop and Cursor share.
-+    /// User MCP servers live in ~/.dots; an isolated data home keeps its own mcp.json.
++    /// User MCP servers, beside the account's other configuration.
      pub fn mcp_path(&self) -> PathBuf {
--        self.home.join("mcp.json")
-+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-+        if self.home == home.join(".lorca") {
-+            home.join(".dots").join("mcp.json")
-+        } else {
-+            self.home.join("mcp.json")
-+        }
+         self.home.join("mcp.json")
      }
+diff --git a/crates/cli/src/files.rs b/crates/cli/src/files.rs
+index dee61c9..3a0313e 100644
+--- a/crates/cli/src/files.rs
++++ b/crates/cli/src/files.rs
+@@ -1,6 +1,6 @@
+ //! Attachments: files a Device sends with a message. The bytes leave as a `file` blob under
+ //! the attachment's id, encrypted with the account key like a chat op, and land in
+-//! `~/.lorca/files/<id>` on every Device that needs them: the Runner copies them into the
++//! `~/.dots/files/<id>` on every Device that needs them: the Runner copies them into the
+ //! bot's working directory for its turn, and the app shows them in the transcript.
  
-     /// The last model catalog fetched, with what the next check sends back.
+ use std::path::{Path, PathBuf};
 diff --git a/crates/cli/src/local_review.rs b/crates/cli/src/local_review.rs
-index a2e57fe37348b5b3bd4da9f2182c2b813c883491..d4a25d9dd954b6f6f490a323967bef03e0190052 100644
+index a2e57fe..d6578da 100644
 --- a/crates/cli/src/local_review.rs
 +++ b/crates/cli/src/local_review.rs
+@@ -234,11 +234,11 @@ fn names_secrets(command: &str) -> bool {
+     .any(|marker| lower.contains(marker))
+ }
+ 
+-/// Lorca's own folders, where the bots' workspaces live: `~/.lorca`, `~/.lorca-dev`, and this CLI's
++/// Lorca's own folders, where the bots' workspaces live: `~/.dots`, `~/.dots-dev`, and this CLI's
+ /// home when `LORCA_HOME` puts it elsewhere.
+ fn lorca_folders(app: &App) -> Vec<PathBuf> {
+     let mut folders: Vec<PathBuf> = Vec::new();
+-    let named = dirs::home_dir().into_iter().flat_map(|home| [home.join(".lorca"), home.join(".lorca-dev")]);
++    let named = dirs::home_dir().into_iter().flat_map(|home| [home.join(".dots"), home.join(".dots-dev")]);
+     for folder in named.chain(std::iter::once(app.config.home.clone())) {
+         let folder = std::fs::canonicalize(&folder).unwrap_or(folder);
+         if !folders.contains(&folder) {
 @@ -265,7 +265,7 @@ fn stays_in_lorca(command: &str, workdir: &Path, folders: &[PathBuf], home: Opti
          if let Some((name, args)) = command_and_args(stage) {
              // The lorca command changes the Runner and the account (its MCP servers, sign-ins,
@@ -143,7 +198,7 @@ index a2e57fe37348b5b3bd4da9f2182c2b813c883491..d4a25d9dd954b6f6f490a323967bef03
          _ => false,
      }
  }
-@@ -864,7 +864,7 @@ mod tests {
+@@ -864,20 +864,22 @@ mod tests {
  
      #[test]
      fn the_lorca_command_is_reviewed_unless_it_only_reads() {
@@ -152,7 +207,11 @@ index a2e57fe37348b5b3bd4da9f2182c2b813c883491..d4a25d9dd954b6f6f490a323967bef03
              assert!(read_only(command), "{command}");
          }
          let home = Path::new("/home/me");
-@@ -874,6 +874,8 @@ mod tests {
+-        let folders = [PathBuf::from("/home/me/.lorca")];
+-        let workspace = Path::new("/home/me/.lorca/workspaces/bot-1");
++        let folders = [PathBuf::from("/home/me/.dots")];
++        let workspace = Path::new("/home/me/.dots/workspaces/bot-1");
+         for command in [
              "lorca mcp add memory npx -y @modelcontextprotocol/server-memory",
              "lorca mcp add x -- npx --help",
              r#"lorca mcp add-json memory '{"command": "npx"}'"#,
@@ -161,19 +220,58 @@ index a2e57fe37348b5b3bd4da9f2182c2b813c883491..d4a25d9dd954b6f6f490a323967bef03
              "lorca mcp remove github",
              "lorca identity new",
              "/Applications/Lorca.app/Contents/Resources/bin/lorca mcp remove github",
+-            "cd ~/.lorca && lorca mcp reload",
++            "cd ~/.dots && lorca mcp reload",
+         ] {
+             assert!(!read_only(command), "{command}");
+             assert!(!stays_in_lorca(command, workspace, &folders, Some(home)), "it changes the Runner, whatever folder it runs in: {command}");
+@@ -887,16 +889,16 @@ mod tests {
+     #[test]
+     fn commands_inside_lorca_folders_skip_the_review() {
+         let home = Path::new("/home/me");
+-        let folders = [PathBuf::from("/home/me/.lorca"), PathBuf::from("/home/me/.lorca-dev")];
+-        let workspace = Path::new("/home/me/.lorca-dev/workspaces/bot-1");
++        let folders = [PathBuf::from("/home/me/.dots"), PathBuf::from("/home/me/.dots-dev")];
++        let workspace = Path::new("/home/me/.dots-dev/workspaces/bot-1");
+         let stays = |command: &str| stays_in_lorca(command, workspace, &folders, Some(home));
+         for command in [
+             "rm -rf node_modules && npm install && npm run build",
+             "git clone https://github.com/acme/demo && cd demo && make",
+-            "cat ~/.lorca/identity.json ~/.lorca-dev/credentials.json",
+-            "sqlite3 /home/me/.lorca-dev/lorca.sqlite3 .tables",
++            "cat ~/.dots/identity.json ~/.dots-dev/credentials.json",
++            "sqlite3 /home/me/.dots-dev/lorca.sqlite3 .tables",
+             "rm -rf ../bot-2/cache",
+-            "python3 train.py --out=/home/me/.lorca-dev/workspaces/bot-1/out",
++            "python3 train.py --out=/home/me/.dots-dev/workspaces/bot-1/out",
+             "git push origin main",
+             "curl -L https://example.com/data.json -o data.json",
+         ] {
+@@ -908,7 +910,7 @@ mod tests {
+             "cd && rm -rf *",
+             "cd - && rm -rf *",
+             "rm -rf ~/Documents",
+-            "rm -rf ~/.lorca*",
++            "rm -rf ~/.dots*",
+             "rm -rf $TARGET",
+             "git -C/home/me/dev/app reset --hard",
+             "sudo make install",
 diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
-index 350158068c6e061826d9575bc6f756d5c6485093..7ab2d096ac4678a2d1d75be1cb1e4228a2039dd1 100644
+index 3501580..008ad5c 100644
 --- a/crates/cli/src/main.rs
 +++ b/crates/cli/src/main.rs
-@@ -9,7 +9,7 @@ use lorca::config::Config;
+@@ -9,9 +9,9 @@ use lorca::config::Config;
  use lorca::{identity, keys, pairing, routines, runtime, sync, ws};
  
  #[derive(usage::Cli, Debug)]
 -#[usage(bin = "lorca", version, about = "Lorca CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
 +#[usage(bin = "dots", version, about = "dots CLI: identity, local API, agent loop, relay sync", unknown_flags = "error")]
  struct Cli {
-     /// Data directory (default ~/.lorca).
+-    /// Data directory (default ~/.lorca).
++    /// Data directory (default ~/.dots).
      #[usage(long, env = "LORCA_HOME", global)]
+     home: Option<PathBuf>,
+ 
 @@ -60,18 +60,18 @@ enum Command {
          #[usage(subcommand)]
          command: ProviderCommand,
@@ -618,8 +716,21 @@ index 350158068c6e061826d9575bc6f756d5c6485093..7ab2d096ac4678a2d1d75be1cb1e4228
      match app.relay_url() {
          Some(url) => {
              let reachable = app.relay.health(&url).await.is_ok();
+diff --git a/crates/cli/src/model.rs b/crates/cli/src/model.rs
+index fb438b2..a544778 100644
+--- a/crates/cli/src/model.rs
++++ b/crates/cli/src/model.rs
+@@ -217,7 +217,7 @@ pub enum Author {
+ }
+ 
+ /// A file sent with a message. Its bytes travel as a `file` blob whose id is this id,
+-/// encrypted with the account key; Devices keep a copy under `~/.lorca/files/<id>`.
++/// encrypted with the account key; Devices keep a copy under `~/.dots/files/<id>`.
+ #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+ pub struct Attachment {
+     pub id: String,
 diff --git a/crates/cli/src/service.rs b/crates/cli/src/service.rs
-index 751679b9f2c4b54dcc4ec86c7a48916980cbf1ae..baf187c475cc80b5968f6a5ef59d112dbc3fc508 100644
+index 751679b..94b803b 100644
 --- a/crates/cli/src/service.rs
 +++ b/crates/cli/src/service.rs
 @@ -1,8 +1,8 @@
@@ -658,7 +769,7 @@ index 751679b9f2c4b54dcc4ec86c7a48916980cbf1ae..baf187c475cc80b5968f6a5ef59d112d
      pub log: String,
  }
  
-@@ -38,7 +38,7 @@ fn exe() -> anyhow::Result<PathBuf> {
+@@ -38,11 +38,11 @@ fn exe() -> anyhow::Result<PathBuf> {
      Ok(std::fs::canonicalize(&exe).unwrap_or(exe))
  }
  
@@ -667,6 +778,11 @@ index 751679b9f2c4b54dcc4ec86c7a48916980cbf1ae..baf187c475cc80b5968f6a5ef59d112d
  /// folder or port other than the default, and a relay named in the environment.
  fn passed_on(config: &Config) -> Vec<(&'static str, String)> {
      let mut vars = Vec::new();
+-    if Some(&config.home) != dirs::home_dir().map(|home| home.join(".lorca")).as_ref() {
++    if Some(&config.home) != dirs::home_dir().map(|home| home.join(".dots")).as_ref() {
+         vars.push(("LORCA_HOME", config.home.to_string_lossy().to_string()));
+     }
+     if config.port != crate::config::DEFAULT_PORT {
 @@ -54,7 +54,7 @@ fn passed_on(config: &Config) -> Vec<(&'static str, String)> {
      vars
  }
@@ -676,6 +792,15 @@ index 751679b9f2c4b54dcc4ec86c7a48916980cbf1ae..baf187c475cc80b5968f6a5ef59d112d
  /// same file forever, so one past [`LOG_LIMIT`] starts over.
  pub fn trim_log() {
      #[cfg(unix)]
+@@ -75,7 +75,7 @@ fn plist_path() -> anyhow::Result<PathBuf> {
+ 
+ #[cfg(target_os = "macos")]
+ fn log_path() -> PathBuf {
+-    dirs::home_dir().unwrap_or_default().join("Library/Logs/Lorca/serve.log")
++    dirs::home_dir().unwrap_or_default().join("Library/Logs/dots/serve.log")
+ }
+ 
+ #[cfg(target_os = "macos")]
 @@ -170,7 +170,7 @@ fn systemctl(args: &[&str]) -> Command {
  pub fn install(config: &Config) -> anyhow::Result<Status> {
      if !systemctl(&["show-environment"]).output().is_ok_and(|o| o.status.success()) {
@@ -735,8 +860,29 @@ index 751679b9f2c4b54dcc4ec86c7a48916980cbf1ae..baf187c475cc80b5968f6a5ef59d112d
  }
  
  #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+@@ -380,3 +380,20 @@ fn run(command: &mut Command) -> anyhow::Result<()> {
+     let program = command.get_program().to_string_lossy().to_string();
+     anyhow::bail!("{program} failed{}", if text.is_empty() { String::new() } else { format!(": {text}") })
+ }
++
++#[cfg(test)]
++mod branded_home_tests {
++    use super::*;
++
++    #[test]
++    fn background_service_retains_custom_and_legacy_homes() {
++        let home = dirs::home_dir().unwrap();
++        for name in [".dots-dev", ".lorca", "custom-dots-home"] {
++            let config = Config { home: home.join(name), port: crate::config::DEFAULT_PORT };
++            let vars = passed_on(&config);
++            assert!(vars.iter().any(|(key, value)| *key == "LORCA_HOME" && value == &config.home.to_string_lossy()));
++        }
++        let config = Config { home: home.join(".dots"), port: crate::config::DEFAULT_PORT };
++        assert!(!passed_on(&config).iter().any(|(key, _)| *key == "LORCA_HOME"));
++    }
++}
 diff --git a/crates/cli/src/shell.rs b/crates/cli/src/shell.rs
-index be99ea9dda528f059d7b599f0ae486a2863bf9a8..a9ab2cf5eb759bd9b6a5494fe5d055d2ef6388b8 100644
+index be99ea9..a9ab2cf 100644
 --- a/crates/cli/src/shell.rs
 +++ b/crates/cli/src/shell.rs
 @@ -600,13 +600,13 @@ impl Sessions {
@@ -756,7 +902,7 @@ index be99ea9dda528f059d7b599f0ae486a2863bf9a8..a9ab2cf5eb759bd9b6a5494fe5d055d2
          .into_iter()
          .collect();
 diff --git a/crates/cli/src/turns.rs b/crates/cli/src/turns.rs
-index 459a2a7fb58ce2e2f8b5ad6e14494b613600a370..cd33e56d649a699ec72eddf018490125f65de8c6 100644
+index 459a2a7..cd33e56 100644
 --- a/crates/cli/src/turns.rs
 +++ b/crates/cli/src/turns.rs
 @@ -1618,8 +1618,8 @@ fn plugins_prompt(app: &App, bot: &Bot, plugins: &[crate::plugins::mcp::PluginBr
@@ -781,23 +927,24 @@ index 459a2a7fb58ce2e2f8b5ad6e14494b613600a370..cd33e56d649a699ec72eddf018490125
          let variable = |name: &str| extras.variables.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone());
 diff --git a/crates/cli/tests/mcp_path.rs b/crates/cli/tests/mcp_path.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..bcb46d70054979afad0e5ed7f17adad266617dd2
+index 0000000..9eff66f
 --- /dev/null
 +++ b/crates/cli/tests/mcp_path.rs
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,141 @@
 +#![cfg(all(feature = "runner", unix))]
 +
 +use std::path::PathBuf;
 +use std::process::Command;
 +
 +use lorca::app::App;
-+use lorca::config::Config;
++use lorca::config::{Config, Settings, write_json_private};
++use lorca::keys::{Identity, IdentityFile};
 +use lorca::plugins::mcp_json;
 +use serde_json::json;
 +
 +/// A subprocess isolates HOME from other tests and never opens the real user's MCP config.
 +#[test]
-+fn branded_mcp_reads_and_writes_in_a_temporary_home() {
++fn branded_account_reads_and_writes_in_a_temporary_home() {
 +    const CHILD: &str = "DOTS_MCP_PATH_TEST_CHILD";
 +    if std::env::var_os(CHILD).is_none() {
 +        let home = std::env::temp_dir().join(format!("dots-mcp-path-{}", uuid::Uuid::new_v4()));
@@ -806,7 +953,7 @@ index 0000000000000000000000000000000000000000..bcb46d70054979afad0e5ed7f17adad2
 +            .env_clear()
 +            .env("HOME", &home)
 +            .env(CHILD, "1")
-+            .args(["--exact", "branded_mcp_reads_and_writes_in_a_temporary_home", "--nocapture"])
++            .args(["--exact", "branded_account_reads_and_writes_in_a_temporary_home", "--nocapture"])
 +            .output()
 +            .unwrap();
 +        let _ = std::fs::remove_dir_all(home);
@@ -816,16 +963,35 @@ index 0000000000000000000000000000000000000000..bcb46d70054979afad0e5ed7f17adad2
 +
 +    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
 +    let config = Config::load(None, Some(0));
-+    assert_eq!(config.home, home.join(".lorca"));
-+    assert_eq!(config.identity_path(), home.join(".lorca/identity.json"));
-+    assert_eq!(config.credentials_path(), home.join(".lorca/credentials.json"));
-+    assert_eq!(config.plugins_dir(), home.join(".lorca/plugins"));
++    assert_eq!(config.home, home.join(".dots"));
++    assert_eq!(config.identity_path(), home.join(".dots/identity.json"));
++    assert_eq!(config.credentials_path(), home.join(".dots/credentials.json"));
++    assert_eq!(config.plugins_dir(), home.join(".dots/plugins"));
 +    assert_eq!(config.mcp_path(), home.join(".dots/mcp.json"));
 +
-+    std::fs::create_dir_all(&config.home).unwrap();
-+    let legacy = config.home.join("mcp.json");
-+    std::fs::write(&legacy, b"legacy config is neither read nor overwritten").unwrap();
++    // Seed a separate legacy account. The default must neither load nor mutate it.
++    let legacy = home.join(".lorca");
++    std::fs::create_dir_all(&legacy).unwrap();
++    let legacy_settings = br#"{"relay_url":"http://legacy.invalid"}"#;
++    std::fs::write(legacy.join("settings.json"), legacy_settings).unwrap();
++    std::fs::write(legacy.join("mcp.json"), b"legacy config is neither read nor overwritten").unwrap();
++    std::fs::write(legacy.join("lorca.sqlite3"), b"legacy database must never be opened").unwrap();
++    std::fs::write(legacy.join("state.json"), b"legacy state must never be deleted").unwrap();
++    assert_eq!(config.machine_path(), config.home.join("machine.json"));
++    assert_eq!(config.database_path(), config.home.join("lorca.sqlite3"));
++    assert_eq!(config.settings_path(), config.home.join("settings.json"));
++    assert_eq!(config.files_dir(), config.home.join("files"));
++    assert_eq!(config.catalog_path(), config.home.join("catalog.json"));
++    assert_eq!(config.marketplace_path(), config.home.join("marketplace.json"));
++    assert_eq!(config.update_path(), config.home.join("update.json"));
 +    let app = App::load(config.clone()).unwrap();
++    assert!(app.identity.lock().unwrap().is_none());
++    assert!(app.settings.lock().unwrap().relay_url.is_none());
++    assert!(config.database_path().is_file());
++    let identity = IdentityFile::new(&Identity::generate());
++    write_json_private(&config.identity_path(), &identity).unwrap();
++    Settings { relay_url: Some("http://dots.invalid".into()), auto_update: Some(false) }.save(&config).unwrap();
++    write_json_private(&config.credentials_path(), &json!({})).unwrap();
 +    assert!(!config.mcp_path().exists(), "reading a missing MCP file does not create it");
 +    let list = mcp_json::list(&app);
 +    assert_eq!(list["path"], json!(config.mcp_path()));
@@ -835,27 +1001,79 @@ index 0000000000000000000000000000000000000000..bcb46d70054979afad0e5ed7f17adad2
 +    // A disabled entry tests persistence without executing any command or using the network.
 +    mcp_json::save(&app, "fixture", None, &json!({"command": "never-executed", "disabled": true})).unwrap();
 +    use std::os::unix::fs::PermissionsExt;
-+    assert_eq!(std::fs::metadata(config.mcp_path()).unwrap().permissions().mode() & 0o777, 0o600);
++    assert_eq!(std::fs::metadata(&config.home).unwrap().permissions().mode() & 0o777, 0o700);
++    for path in [config.mcp_path(), config.identity_path(), config.credentials_path(), config.settings_path(), config.database_path()] {
++        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
++    }
 +    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(config.mcp_path()).unwrap()).unwrap();
 +    assert_eq!(saved["mcpServers"]["fixture"]["command"], "never-executed");
 +    assert_eq!(mcp_json::get(&app, "fixture").unwrap()["path"], json!(config.mcp_path()));
 +    drop(app);
 +
 +    let app = App::load(config.clone()).unwrap();
++    assert_eq!(app.identity.lock().unwrap().as_ref().unwrap().master_secret, identity.master_secret);
++    assert_eq!(app.settings.lock().unwrap().relay_url.as_deref(), Some("http://dots.invalid"));
 +    assert_eq!(mcp_json::list(&app)["servers"][0]["name"], "fixture", "startup reads the branded path");
 +    mcp_json::remove(&app, "fixture").unwrap();
 +    let removed: serde_json::Value = serde_json::from_slice(&std::fs::read(config.mcp_path()).unwrap()).unwrap();
 +    assert!(removed["mcpServers"].get("fixture").is_none());
-+    assert_eq!(std::fs::read(&legacy).unwrap(), b"legacy config is neither read nor overwritten");
-+    assert!(!home.join(".dots/identity.json").exists());
++    assert_eq!(std::fs::read(legacy.join("mcp.json")).unwrap(), b"legacy config is neither read nor overwritten");
++    assert_eq!(std::fs::read(legacy.join("settings.json")).unwrap(), legacy_settings);
++    assert_eq!(std::fs::read(legacy.join("lorca.sqlite3")).unwrap(), b"legacy database must never be opened");
++    assert_eq!(std::fs::read(legacy.join("state.json")).unwrap(), b"legacy state must never be deleted");
++    assert!(!legacy.join("identity.json").exists());
 +
 +    let isolated = Config::load(Some(home.join("isolated")), Some(0));
 +    assert_eq!(isolated.mcp_path(), home.join("isolated/mcp.json"));
-+    let dev = Config::load(Some(home.join(".lorca-dev")), Some(0));
-+    assert_eq!(dev.mcp_path(), home.join(".lorca-dev/mcp.json"));
++    let dev = Config::load(Some(home.join(".dots-dev")), Some(0));
++    assert_eq!(dev.mcp_path(), home.join(".dots-dev/mcp.json"));
++    // Launchers always pass LORCA_HOME. Exercise production and development launches,
++    // including persistence and the returned path the Settings UI actually displays.
++    for root in [".dots", ".dots-dev"] {
++        let launch_home = home.join(root);
++        std::env::set_var("LORCA_HOME", &launch_home);
++        let launched = Config::load(None, Some(0));
++        assert_eq!(launched.home, launch_home);
++        let launched_app = App::load(launched.clone()).unwrap();
++        mcp_json::save(&launched_app, "launcher", None, &json!({"command": "never-executed", "disabled": true})).unwrap();
++        assert_eq!(mcp_json::list(&launched_app)["path"], json!(launch_home.join("mcp.json")));
++        drop(launched_app);
++        let restarted = App::load(Config::load(None, Some(0))).unwrap();
++        assert_eq!(mcp_json::get(&restarted, "launcher").unwrap()["path"], json!(launch_home.join("mcp.json")));
++    }
++    // Explicit old and custom homes retain their exact meaning, including MCP.
++    std::env::set_var("LORCA_HOME", &legacy);
++    let explicit_legacy = Config::load(None, Some(0));
++    assert_eq!(explicit_legacy.home, legacy);
++    assert_eq!(explicit_legacy.mcp_path(), legacy.join("mcp.json"));
++    let custom = home.join("custom-env");
++    std::env::set_var("LORCA_HOME", &custom);
++    assert_eq!(Config::load(None, Some(0)).home, custom);
++    assert_eq!(Config::load(Some(home.join("flag-wins")), Some(0)).home, home.join("flag-wins"));
++    std::env::remove_var("LORCA_HOME");
++}
++
++/// Linux CI checks the actual Mac/Go launch-site contract without pretending to run AppKit.
++#[test]
++fn desktop_launchers_pass_the_branded_home_and_preserve_overrides() {
++    let mac_info = include_str!("../../../macos/Sources/Lorca/App/AppInfo.swift");
++    assert!(mac_info.contains("isDevelopment ? \".dots-dev\" : \".dots\""));
++    assert!(mac_info.contains("dots serve --home ~/.dots-dev --port 4863"));
++    let mac_launcher = include_str!("../../../macos/Sources/Lorca/App/CLILauncher.swift");
++    assert!(mac_launcher.contains("environment[\"LORCA_HOME\"] = environment[\"LORCA_HOME\"] ?? AppInfo.defaultCLIHome.path"));
++    let mac_worker = include_str!("../../../macos/Sources/Lorca/App/CLILaunchWorker.swift");
++    assert!(mac_worker.contains("process.environment = configuration.environment"));
++    let desktop_info = include_str!("../../../desktop/appinfo.go");
++    assert!(desktop_info.contains("filepath.Join(home, \".dots-dev\")"));
++    assert!(desktop_info.contains("filepath.Join(home, \".dots\")"));
++    let desktop_launcher = include_str!("../../../desktop/launcher.go");
++    assert!(desktop_launcher.contains("if _, ok := os.LookupEnv(key); !ok"));
++    assert!(desktop_launcher.contains("set(\"LORCA_HOME\", defaultCLIHome())"));
++    let reset = include_str!("../../../scripts/reset.ts");
++    assert!(reset.contains("process.env.LORCA_HOME ?? join(homedir(), development ? \".dots-dev\" : \".dots\")"));
 +}
 diff --git a/crates/cli/tests/serve_ready.rs b/crates/cli/tests/serve_ready.rs
-index 95be20c5093cae613f04d41b70757075d8dd3d55..7ff18c3cc3d117933e4fdf445cf0e716d97fe598 100644
+index 95be20c..e1f7d32 100644
 --- a/crates/cli/tests/serve_ready.rs
 +++ b/crates/cli/tests/serve_ready.rs
 @@ -17,7 +17,7 @@ impl Home {
@@ -867,7 +1085,7 @@ index 95be20c5093cae613f04d41b70757075d8dd3d55..7ff18c3cc3d117933e4fdf445cf0e716
          command.env_clear();
          // Windows loads its network stack from under %SystemRoot%: without the variable, binding a
          // socket fails with WSAEPROVIDERFAILEDINIT.
-@@ -139,10 +139,10 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
+@@ -139,10 +139,51 @@ async fn a_failed_bind_exits_without_announcing_readiness() {
  #[tokio::test]
  async fn bare_lorca_lists_the_commands_and_starts_nothing() {
      let home = Home::new();
@@ -880,8 +1098,49 @@ index 95be20c5093cae613f04d41b70757075d8dd3d55..7ff18c3cc3d117933e4fdf445cf0e716
 +    assert!(help.contains("Usage: dots") && help.contains("serve") && help.contains("mcp"), "{help}");
      assert!(!home.0.exists(), "a help page makes no data folder");
  }
++
++/// Apps pass the data home in the environment, not `--home`. Check the live API
++/// response used by Settings, in both release and development launches.
++#[cfg(unix)]
++#[tokio::test]
++async fn launcher_environment_selects_the_live_mcp_root() {
++    let fixture = Home::new();
++    for name in [".dots", ".dots-dev"] {
++        let home = fixture.0.join(name);
++        let mut child = Command::new(env!("CARGO_BIN_EXE_dots"))
++            .env_clear()
++            .env("HOME", &fixture.0)
++            .env("LORCA_HOME", &home)
++            .env("RUST_LOG", "off")
++            .args(["serve", "--ready-stdout", "--port", "0"])
++            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
++            .kill_on_drop(true).spawn().unwrap();
++        let mut stdout = BufReader::new(child.stdout.take().unwrap());
++        let mut line = String::new();
++        timeout(Duration::from_secs(5), stdout.read_line(&mut line)).await.unwrap().unwrap();
++        let ready: Value = serde_json::from_str(&line).unwrap();
++        let port = ready["port"].as_u64().unwrap();
++        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws")).await.unwrap();
++        socket.send(tokio_tungstenite::tungstenite::Message::Text(
++            json!({"id": 8, "method": "mcp.list", "params": {}}).to_string().into()
++        )).await.unwrap();
++        let response = timeout(Duration::from_secs(2), async {
++            loop {
++                let frame = socket.next().await.unwrap().unwrap();
++                if let Ok(text) = frame.to_text() {
++                    let value: Value = serde_json::from_str(text).unwrap();
++                    if value["id"] == 8 { break value; }
++                }
++            }
++        }).await.unwrap();
++        assert_eq!(response["result"]["path"], json!(home.join("mcp.json")));
++        assert!(home.join("lorca.sqlite3").is_file());
++        child.kill().await.unwrap();
++    }
++    assert!(!fixture.0.join(".lorca").exists());
++}
 diff --git a/crates/relay/Cargo.toml b/crates/relay/Cargo.toml
-index 366402fae87434ff7bbc21b83e43f8504968d633..351c29546dca8c0813114325d966b3d3ae07413a 100644
+index 366402f..351c295 100644
 --- a/crates/relay/Cargo.toml
 +++ b/crates/relay/Cargo.toml
 @@ -6,7 +6,7 @@ edition.workspace = true
@@ -894,7 +1153,7 @@ index 366402fae87434ff7bbc21b83e43f8504968d633..351c29546dca8c0813114325d966b3d3
  
  [dependencies]
 diff --git a/crates/relay/Dockerfile b/crates/relay/Dockerfile
-index 1d94cbfad143b0386747e6f287547b5777e28a15..61e0f4909a98c885fcdb1d87f13ed511ae29cd59 100644
+index 1d94cbf..61e0f49 100644
 --- a/crates/relay/Dockerfile
 +++ b/crates/relay/Dockerfile
 @@ -23,11 +23,11 @@ RUN cargo build --release --locked -p lorca-relay
@@ -912,7 +1171,7 @@ index 1d94cbfad143b0386747e6f287547b5777e28a15..61e0f4909a98c885fcdb1d87f13ed511
 -CMD ["/bin/sh", "-c", "exec lorca-relay --bind \"${LORCA_RELAY_BIND:-[::]:${PORT:-8787}}\""]
 +CMD ["/bin/sh", "-c", "exec dots-relay --bind \"${LORCA_RELAY_BIND:-[::]:${PORT:-8787}}\""]
 diff --git a/crates/relay/src/main.rs b/crates/relay/src/main.rs
-index 2b33810534c124bc539fe0a7d029486ce258547c..bdf5b05859d673dddef3b00c76d2cfc18c42dcd4 100644
+index 2b33810..bdf5b05 100644
 --- a/crates/relay/src/main.rs
 +++ b/crates/relay/src/main.rs
 @@ -20,7 +20,7 @@ use std::sync::Arc;
@@ -934,7 +1193,7 @@ index 2b33810534c124bc539fe0a7d029486ce258547c..bdf5b05859d673dddef3b00c76d2cfc1
      let shared = args.db.contains("://");
      if shared && args.secret.is_none() {
 diff --git a/crates/relay/src/push.rs b/crates/relay/src/push.rs
-index b3362771f71b763640a33aef5bcf97638a468216..194faffa59c2f261d01524ca98205f7e14165ee7 100644
+index b336277..194faff 100644
 --- a/crates/relay/src/push.rs
 +++ b/crates/relay/src/push.rs
 @@ -27,7 +27,7 @@ const APNS_JWT_TTL: i64 = 40 * 60;
@@ -947,7 +1206,7 @@ index b3362771f71b763640a33aef5bcf97638a468216..194faffa59c2f261d01524ca98205f7e
  
  pub enum Delivery {
 diff --git a/desktop/appinfo.go b/desktop/appinfo.go
-index 0f82c924d2d8bd4acfe0a17ec90cdc738a1d7be0..0f97a49ac8c3a483b262bcef185716cfb6916b6d 100644
+index 0f82c92..30b0447 100644
 --- a/desktop/appinfo.go
 +++ b/desktop/appinfo.go
 @@ -19,15 +19,15 @@ func isDevelopment() bool { return mygo.IsDev() }
@@ -969,12 +1228,22 @@ index 0f82c924d2d8bd4acfe0a17ec90cdc738a1d7be0..0f97a49ac8c3a483b262bcef185716cf
  }
  
  func defaultCLIPort() int {
-@@ -48,9 +48,9 @@ func defaultCLIHome() string {
+@@ -40,17 +40,17 @@ func defaultCLIPort() int {
+ func defaultCLIHome() string {
+ 	home, _ := os.UserHomeDir()
+ 	if isDevelopment() {
+-		return filepath.Join(home, ".lorca-dev")
++		return filepath.Join(home, ".dots-dev")
+ 	}
+-	return filepath.Join(home, ".lorca")
++	return filepath.Join(home, ".dots")
+ }
+ 
  // cliCommand is how to start the CLI by hand, for the offline state and the Help note.
  func cliCommand() string {
  	if isDevelopment() {
 -		return "lorca serve --home ~/.lorca-dev --port 4863"
-+		return "dots serve --home ~/.lorca-dev --port 4863"
++		return "dots serve --home ~/.dots-dev --port 4863"
  	}
 -	return "lorca serve"
 +	return "dots serve"
@@ -982,7 +1251,7 @@ index 0f82c924d2d8bd4acfe0a17ec90cdc738a1d7be0..0f97a49ac8c3a483b262bcef185716cf
  
  // logDir holds cli.log and startup.log.
 diff --git a/desktop/commands.go b/desktop/commands.go
-index 8b795696bd27356cb5f65b221c16bbb34c12a85e..fa41a66d5c66785dd7d3243dc45047b009620f70 100644
+index 8b79569..fa41a66 100644
 --- a/desktop/commands.go
 +++ b/desktop/commands.go
 @@ -83,7 +83,7 @@ var commandTable = []command{
@@ -995,7 +1264,7 @@ index 8b795696bd27356cb5f65b221c16bbb34c12a85e..fa41a66d5c66785dd7d3243dc45047b0
  	{id: "checkForUpdates", title: func() string { return L("Check for Updates…") }, enabled: updatesEnabled},
  	{id: "about", title: func() string { return L("About %@", appName()) }},
 diff --git a/desktop/e2e_test.go b/desktop/e2e_test.go
-index d4ec9022998102178e9d912ee8ba078aafbaf8a3..ef6245fea1e9ba5751ac86156b0ead1cbb40fa9a 100644
+index d4ec902..ef6245f 100644
 --- a/desktop/e2e_test.go
 +++ b/desktop/e2e_test.go
 @@ -99,7 +99,7 @@ func TestE2EAgainstCLI(t *testing.T) {
@@ -1008,7 +1277,7 @@ index d4ec9022998102178e9d912ee8ba078aafbaf8a3..ef6245fea1e9ba5751ac86156b0ead1c
  		t.Fatalf("no base URL note: %q", tt.Texts())
  	}
 diff --git a/desktop/l10n/zh.go b/desktop/l10n/zh.go
-index 9d0513c433107388d80bacedc294f99445f7d074..07dc3042163072872ee765493fd7518119c92d5a 100644
+index 9d0513c..07dc304 100644
 --- a/desktop/l10n/zh.go
 +++ b/desktop/l10n/zh.go
 @@ -9,7 +9,7 @@ var zh = map[string]string{
@@ -1158,7 +1427,7 @@ index 9d0513c433107388d80bacedc294f99445f7d074..07dc3042163072872ee765493fd75181
  	"update upgrade release":       "更新 升级 版本 发布 update upgrade release",
  	"Updates":                      "更新",
 diff --git a/desktop/launcher.go b/desktop/launcher.go
-index 97a7158332049cf6740a926914a242bc237da653..054c463f2890fa0b4034b87cdc48d2d28ebd2faa 100644
+index 97a7158..054c463 100644
 --- a/desktop/launcher.go
 +++ b/desktop/launcher.go
 @@ -313,9 +313,9 @@ func locateBinary() string {
@@ -1183,7 +1452,7 @@ index 97a7158332049cf6740a926914a242bc237da653..054c463f2890fa0b4034b87cdc48d2d2
  	}
  	return ""
 diff --git a/desktop/mainwindow.go b/desktop/mainwindow.go
-index 67770bebdb17f37529cc3f1f6aeda904bc70a68e..853119ff462dede2473473a6b56bfbe310851927 100644
+index 67770be..853119f 100644
 --- a/desktop/mainwindow.go
 +++ b/desktop/mainwindow.go
 @@ -316,7 +316,7 @@ func (m *mainWindow) relayStateChanged() {
@@ -1196,7 +1465,7 @@ index 67770bebdb17f37529cc3f1f6aeda904bc70a68e..853119ff462dede2473473a6b56bfbe3
  		Buttons:     buttons,
  	}, func(answer int) {
 diff --git a/desktop/model/models.go b/desktop/model/models.go
-index acd3585d75db56cff55b8314e92bb769b00973d6..9b3b9dc14241dddd2b8abec4287e6ea5551a4fbb 100644
+index acd3585..29bf592 100644
 --- a/desktop/model/models.go
 +++ b/desktop/model/models.go
 @@ -323,7 +323,7 @@ func CustomEndpoint(api CustomAPI, baseURL string) string {
@@ -1208,8 +1477,17 @@ index acd3585d75db56cff55b8314e92bb769b00973d6..9b3b9dc14241dddd2b8abec4287e6ea5
  	}
  	return L("Requests go to %@.", CustomEndpoint(api, baseURL))
  }
+@@ -1271,7 +1271,7 @@ func (t *ToolInvocation) IsShown() bool {
+ 	return run.State == CommandAsking || (run.IsLive() && run.HandedOver)
+ }
+ 
+-// Attachment is a file sent with a message. The bytes live under `~/.lorca/files/<id>` once this
++// Attachment is a file sent with a message. The bytes live under `~/.dots/files/<id>` once this
+ // Device has them; Width and Height size an image's thumbnail before the file arrives.
+ type Attachment struct {
+ 	ID     string
 diff --git a/desktop/model/store.go b/desktop/model/store.go
-index 3d0edf70a28f0bcdc1d1c6eded67693494eb4744..bbe85a4ec61aee355fb120b5561b6d22b41a8315 100644
+index 3d0edf7..232813e 100644
 --- a/desktop/model/store.go
 +++ b/desktop/model/store.go
 @@ -311,7 +311,7 @@ func (s *Store) Reconnect() {
@@ -1230,6 +1508,15 @@ index 3d0edf70a28f0bcdc1d1c6eded67693494eb4744..bbe85a4ec61aee355fb120b5561b6d22
  		s.post(func() { done(file, nil) })
  		return
  	}
+@@ -1668,7 +1668,7 @@ func (s *Store) DeleteRoutine(id string) {
+ func (s *Store) BotMemory(id string, done func(BotMemory, error)) {
+ 	if s.IsMock {
+ 		memory := BotMemory{
+-			BotID: id, Here: true, Runner: "This computer", Path: "~/.lorca/workspaces/" + id,
++			BotID: id, Here: true, Runner: "This computer", Path: "~/.dots/workspaces/" + id,
+ 			Text: "- 2026-09-10 · from your chat with the user · the user prefers short replies\n- 2026-09-12 · invoices are reconciled on Mondays\n",
+ 			Hash: "mock", Lines: 2, Bytes: 128, MaxLines: 200, MaxBytes: 24_000,
+ 			Topics: []string{"clients.md"}, Logs: []string{"2026-09-12", "2026-09-15"},
 @@ -2504,11 +2504,11 @@ func (s *Store) OfflineStatus() string {
  		}
  		switch failure.Kind {
@@ -1245,11 +1532,13 @@ index 3d0edf70a28f0bcdc1d1c6eded67693494eb4744..bbe85a4ec61aee355fb120b5561b6d22
  			return L("Could not start %@: %@", binary, failure.Reason)
  		case "exited":
 diff --git a/desktop/mygo.config.ts b/desktop/mygo.config.ts
-index b2c5caad2bcae4773d83289224066cd24a021fe9..fdd94c33dbdc9f155347439d16bd85650ecffec2 100644
+index b2c5caa..675d168 100644
 --- a/desktop/mygo.config.ts
 +++ b/desktop/mygo.config.ts
-@@ -2,7 +2,7 @@
- // (app.lorca.dev), which keeps its account in ~/.lorca-dev and its CLI on port 4863, apart from an
+@@ -1,8 +1,8 @@
+ // Lorca for Windows and Linux, an app of native UI. `go tool mygo dev` builds Lorca Dev
+-// (app.lorca.dev), which keeps its account in ~/.lorca-dev and its CLI on port 4863, apart from an
++// (app.lorca.dev), which keeps its account in ~/.dots-dev and its CLI on port 4863, apart from an
  // installed Lorca.
  export default ({ command }: { command: string }) => ({
 -  name: "Lorca",
@@ -1258,7 +1547,7 @@ index b2c5caad2bcae4773d83289224066cd24a021fe9..fdd94c33dbdc9f155347439d16bd8565
    // The app's own version, apart from the Mac app's (the root package.json's). `bun run
    // release-desktop` and the Release desktop workflow read it here.
 diff --git a/desktop/onboarding.go b/desktop/onboarding.go
-index 31521d28730488e2e04115667a38a33c41c8fe4c..ba37ee6bf8287d07d72ca4919f14820ef17cfb0f 100644
+index 31521d2..ba37ee6 100644
 --- a/desktop/onboarding.go
 +++ b/desktop/onboarding.go
 @@ -173,7 +173,7 @@ func (o *onboardingWindow) createIdentity() {
@@ -1298,7 +1587,7 @@ index 31521d28730488e2e04115667a38a33c41c8fe4c..ba37ee6bf8287d07d72ca4919f14820e
  		ui.Row(c).Margin(0, 0, 6, 0).TextColor(p.Green).Children(func() { symbol(c, "checkmark.circle.fill", 56, 1.6) })
  		ui.Text(c, title).FontSize(22).FontWeight(600).TextAlign(ui.Center)
 diff --git a/desktop/onboarding_test.go b/desktop/onboarding_test.go
-index b36a87b340e7e55c1413a5875418f96d65b195eb..73a28d1b5651993ca203a1d18d0f1df43136d03a 100644
+index b36a87b..73a28d1 100644
 --- a/desktop/onboarding_test.go
 +++ b/desktop/onboarding_test.go
 @@ -118,8 +118,8 @@ func TestOnboardingCreate(t *testing.T) {
@@ -1322,7 +1611,7 @@ index b36a87b340e7e55c1413a5875418f96d65b195eb..73a28d1b5651993ca203a1d18d0f1df4
  
  	onboardingClick(t, tt, L("Skip for Now"))
 diff --git a/desktop/settings_autoreview.go b/desktop/settings_autoreview.go
-index 7f617fde24350154ffc71c1637c2f5cd21c02cb3..8003d6ef966349287591a4878eee9b85b2e6c4e6 100644
+index 7f617fd..8003d6e 100644
 --- a/desktop/settings_autoreview.go
 +++ b/desktop/settings_autoreview.go
 @@ -24,7 +24,7 @@ func (s settingsPane) autoReview(c *ui.Context) {
@@ -1344,7 +1633,7 @@ index 7f617fde24350154ffc71c1637c2f5cd21c02cb3..8003d6ef966349287591a4878eee9b85
  }
  
 diff --git a/desktop/settings_device.go b/desktop/settings_device.go
-index ce4baf7cb4541e6834aa3d92dc62e6fb4b0191b8..948e1dd431eb51ad2f39bdd20cee67ac0f985262 100644
+index ce4baf7..948e1dd 100644
 --- a/desktop/settings_device.go
 +++ b/desktop/settings_device.go
 @@ -96,7 +96,7 @@ func settingsRelayText() string {
@@ -1377,7 +1666,7 @@ index ce4baf7cb4541e6834aa3d92dc62e6fb4b0191b8..948e1dd431eb51ad2f39bdd20cee67ac
  		id, name, w := device.ID, device.Name, s.w
  		store.UpdateDevice(id, func(err error) {
 diff --git a/desktop/settings_general.go b/desktop/settings_general.go
-index a2a57b68a8151b1a554ecb43250c3e73fa8e15f4..1bcdeec7444d2cdbeb21d2ffe613cb6c5b20dc67 100644
+index a2a57b6..1bcdeec 100644
 --- a/desktop/settings_general.go
 +++ b/desktop/settings_general.go
 @@ -106,7 +106,7 @@ func (s settingsPane) general(c *ui.Context) {
@@ -1399,7 +1688,7 @@ index a2a57b68a8151b1a554ecb43250c3e73fa8e15f4..1bcdeec7444d2cdbeb21d2ffe613cb6c
  			label := onboardingEntry().row
  			rowElement, row := actionRow(c, k, label, actionRowOptions{Tint: &p.Label2, Action: L("Show Onboarding Again")})
 diff --git a/desktop/settings_plugins.go b/desktop/settings_plugins.go
-index 0044c82c226a09594a18be4d759d0beb643914a1..ae981b807f0750746fbc9d5be88a7b1d640645df 100644
+index 0044c82..ae981b8 100644
 --- a/desktop/settings_plugins.go
 +++ b/desktop/settings_plugins.go
 @@ -50,7 +50,7 @@ func (s settingsPane) plugins(c *ui.Context, m *mainWindow) {
@@ -1421,7 +1710,7 @@ index 0044c82c226a09594a18be4d759d0beb643914a1..ae981b807f0750746fbc9d5be88a7b1d
  		for _, server := range file.Servers {
  			ui.Column(c.Key(server.Name)).Children(func() {
 diff --git a/desktop/sheet_mcp.go b/desktop/sheet_mcp.go
-index 954b38fbb152551988a2db904dc7114786206821..463b65bac18709ff753df8fc680eb040f5c561ba 100644
+index 954b38f..463b65b 100644
 --- a/desktop/sheet_mcp.go
 +++ b/desktop/sheet_mcp.go
 @@ -692,7 +692,7 @@ func (s *mcpSheet) formView(c *ui.Context) {
@@ -1434,7 +1723,7 @@ index 954b38fbb152551988a2db904dc7114786206821..463b65bac18709ff753df8fc680eb040
  		} else {
  			providerFormRow(c, labelWidth, L("Command"), func() {
 diff --git a/desktop/sheet_pairing.go b/desktop/sheet_pairing.go
-index cad4e71059d34ce2a31f2f6215c89b7e9667cb71..7a5ea766c8d0da008556418eab51aaacad579163 100644
+index cad4e71..7a5ea76 100644
 --- a/desktop/sheet_pairing.go
 +++ b/desktop/sheet_pairing.go
 @@ -87,7 +87,7 @@ func (st *pairingState) view(c *ui.Context, s *sheet) {
@@ -1447,7 +1736,7 @@ index cad4e71059d34ce2a31f2f6215c89b7e9667cb71..7a5ea766c8d0da008556418eab51aaac
  		Confirm:  L("Done"),
  	}, func() {
 diff --git a/desktop/sidebar.go b/desktop/sidebar.go
-index 233df955f73f398447aa0893c6bb9cc41e2c5d51..3217aeb772fec2e838cb258c078ffbfe48a40f5d 100644
+index 233df95..3217aeb 100644
 --- a/desktop/sidebar.go
 +++ b/desktop/sidebar.go
 @@ -291,7 +291,7 @@ func (m *mainWindow) sidebarFooter(c *ui.Context) {
@@ -1460,7 +1749,7 @@ index 233df955f73f398447aa0893c6bb9cc41e2c5d51..3217aeb772fec2e838cb258c078ffbfe
  			status = L("Can’t connect to the relay: %@", relayError)
  		default:
 diff --git a/desktop/states.go b/desktop/states.go
-index e98404b76b330c8d9edee485f8b349417ec24f18..ba12c3da3b6a6a10390642c7513e448c930ee959 100644
+index e98404b..ba12c3d 100644
 --- a/desktop/states.go
 +++ b/desktop/states.go
 @@ -37,7 +37,7 @@ func offlineState(c *ui.Context, m *mainWindow) {
@@ -1483,20 +1772,150 @@ index e98404b76b330c8d9edee485f8b349417ec24f18..ba12c3da3b6a6a10390642c7513e448c
  }
  
  func showArchitecture(w *appWindow) {
+diff --git a/docs/agent/providers.md b/docs/agent/providers.md
+index 5893b24..3fd510b 100644
+--- a/docs/agent/providers.md
++++ b/docs/agent/providers.md
+@@ -152,7 +152,7 @@ It posts the shared Responses input and function-tool shapes to `{base_url}/resp
+ 
+ The transcript goes through the [shared transform](#before-conversion) first. `supports_images` (the catalog's, or true for a model it does not list), `tool_images` (`UserMessage`, since a gateway may take only a string `output`; OpenAI's own API takes `InOutput`), `max_retries` (2), and `max_retry_delay_ms` are public fields.
+ 
+-`LORCA_CREDENTIALS=~/.lorca/credentials.json cargo test -p lorca-agent reads_a_tool_screenshot -- --ignored --nocapture` has each Responses adapter connected in that data directory read a random code off a tool's screenshot, and reports whether Grok and OpenCode's Responses routes read it inside the output too. It uses the access tokens as they are and never refreshes them, which would spend the refresh token the account holds.
++`LORCA_CREDENTIALS=~/.dots/credentials.json cargo test -p lorca-agent reads_a_tool_screenshot -- --ignored --nocapture` has each Responses adapter connected in that data directory read a random code off a tool's screenshot, and reports whether Grok and OpenCode's Responses routes read it inside the output too. It uses the access tokens as they are and never refreshes them, which would spend the refresh token the account holds.
+ 
+ ### ChatGPT subscription
+ 
+diff --git a/docs/architecture/bots.md b/docs/architecture/bots.md
+index 6677feb..9aeae1e 100644
+--- a/docs/architecture/bots.md
++++ b/docs/architecture/bots.md
+@@ -35,7 +35,7 @@ The macOS app's DM inspector has a Routines section: a row per routine (clock, p
+ 
+ ## Memory
+ 
+-Every bot keeps its own long-term memory on its Runner, in Grok Bot's shape of a curated profile over append-only logs, as plain markdown under `~/.lorca/workspaces/<bot id>/` (keyed by id, so a rename or a changed working directory never moves it; `crates/cli/src/memory.rs`):
++Every bot keeps its own long-term memory on its Runner, in Grok Bot's shape of a curated profile over append-only logs, as plain markdown under `~/.dots/workspaces/<bot id>/` (keyed by id, so a rename or a changed working directory never moves it; `crates/cli/src/memory.rs`):
+ 
+ - `MEMORY.md` is the curated memory. Its first 200 lines or 24 KB, whichever cuts first, open in every turn's system prompt; past that nothing loads, and the prompt tells the bot how much is cut off and asks it to consolidate. The bot writes it only through `memory_update`, one dated entry per call (`- 2026-09-17 · from your chat with the user · the user prefers short replies`), never a whole-file write, so two of its turns cannot clobber each other: `append` adds a fact (an exact duplicate is refused), `replace` rewrites one unique passage, `supersede` strikes the old entry through with a date and adds the new fact so the file shows what changed, `remove` deletes a passage.
+ - `memory/<topic>.md` files hold longer notes the bot reads with `read` when it needs them; the prompt lists their names.
+diff --git a/docs/architecture/desktop-app.md b/docs/architecture/desktop-app.md
+index 3fe7fd4..27e1bb4 100644
+--- a/docs/architecture/desktop-app.md
++++ b/docs/architecture/desktop-app.md
+@@ -9,4 +9,4 @@
+ - **Title bar**: each pane of the main window has a header over its own background: the sidebar's holds the sidebar and Create buttons where the Mac app's titlebar accessory has them, the content's the title and subtitle, back and forward, the Device picker, and running tasks, and the inspector's its toggle. A chat's transcript runs under the content's header, as the Mac's runs under its titlebar: the header draws macOS's hard scroll edge (MyGo's `glass.ScrollEdge`, the transcript frosted under it with a hairline below) once the transcript scrolls from its top or the pointer is over the header, and nothing before. The main window has the sidebar material (`Vibrancy: VibrancySidebar`): where it shows (`c.Vibrancy()`: macOS, and Mica on Windows 11 22H2 and later), the sidebar is transparent over it, as the Mac's, and its text is antialiased in grayscale while the content and the inspector keep ClearType; elsewhere, Linux and Windows 10 included, the sidebar draws its own color. Each pane divider has its own key and uses captured pointer drag state to resize across the adjacent panes until release, when its width is saved in preferences. The sidebar stays between 232 and 340 DIPs and collapses when dragged well past its minimum; the inspector stays between 268 and 320 DIPs. The headers are the title bar: the main window hides its own (`TitleBarHidden`, 52 pixels tall like the headers), keeps the window controls over the headers, and the headers drag the window (`DragWindow`). On macOS the traffic lights sit in the sidebar's header (`TrafficLightPosition` at 19, 19, where the Mac app's toolbar puts them). On Windows and Linux MyGo puts the controls in a top corner: on Windows minimize, maximize, and close at the right, drawn as Windows 11 draws them, on Windows 10 too, and on Linux GTK's own title buttons wherever the desktop's button layout puts them, or none. The rightmost header and the sidebar and Create buttons keep clear of them by the insets `c.TitleBar()` reports. Onboarding hides its title bar too: its page fills the window under the window controls, the close button alone on Windows since the window can neither minimize nor maximize, and its background drags the window. The small settings window keeps the system's title bar. A window's title, which the taskbar and Alt+Tab show, is its content's title (the chat's, the settings pane's, Settings in the small window) followed by ` - Lorca`, the app's name, which stands alone where there is no title of its own (`setTitle` in `window.go`). On Windows and Linux every window's menu bar stays out of sight until Alt or F10 takes the keyboard to it (MyGo's `AutoHideMenuBar`), and its shortcuts work all along; the main window has no room for a bar on Windows, so there Alt and F10 open its menus from the window's top-left corner.
+ - **Commands** (`commands.go`): one table gives the menu bar (File, Edit, View, Chat, Window, Debug, Help, with Settings, Quit, About, and Check for Updates in File and Help) and the command palette's titles and enabled states, and the menu bars follow the table's states as the windows redraw. Ctrl stands where the macOS app has ⌘; Ctrl+1 to Ctrl+9 are the main window's own shortcuts, since the Windows menu bar keeps no hidden items. While a sheet is up only the app's own commands (Quit, About, Help, Check for Updates) run, as a sheet takes a Mac window's commands.
+ - **Updates** (`updater.go`): MyGo's updater plugin stands where Sparkle does on the Mac. It checks once a day in the background, and a window of its own shows a new version's release notes with Install Update, Remind Me Later, and Skip This Version, the download's progress, and the offer to relaunch. It installs releases signed with the update key, as a delta from the running version when the release has one, and keeps the user's choices in `updater.json` in the app's data directory. **Check for Updates…** opens that window, and General has the version, the last check, and switches for automatic checks and automatic installs, which follow the plugin's changes (`updater.OnChange` redraws the windows). The window speaks the language picked in Settings, else the system's; a new pick reaches it at the next launch, as the Mac's reaches Sparkle. Its releases are this repo's, tagged `desktop-vX.Y.Z` (`updates` in `mygo.config.ts`, with the public key). The repo's latest release stays the CLI's, so release builds find the newest `desktop-v` release through the GitHub API (MyGo's `tagPrefix`), and read its update manifests. `bun run release-desktop` uploads to a draft of the version through `go tool mygo build -upload`, here or in the Release desktop workflow (`.github/workflows/release-desktop.yml`), which a `desktop-vX.Y.Z` tag or a run by hand starts: it drafts the release with the changelog's section and builds Windows x64, Linux x64, and Linux arm64 side by side on Ubuntu, and publishing the draft, without making it the latest release, releases the update. The app has its own version, `version` in `desktop/mygo.config.ts`, apart from the Mac app's, and its own release notes, the version's section of `desktop/CHANGELOG.md`: [docs/releasing-desktop.md](../releasing-desktop.md). A build that cannot write where it is installed, `mygo dev`'s or the Debian package's in `/opt`, leaves the menu item and the General rows out.
+-- **Development and builds**: `bun run desktop` builds the CLI and runs `go tool mygo dev` (Lorca Dev, `app.lorca.dev`, with `~/.lorca-dev` and port 4863), which rebuilds and relaunches the app on a Go change; `LORCA_MOCK=1` runs the demo instead of the CLI, and `LORCA_PORT` points the app at a CLI on another port. `go tool mygo vet .` in `desktop/` runs Go vet and checks for build values stored in state or captured by workers. `go test ./...` runs the model's tests and the views' tests, which build the windows over the demo's store in MyGo's offscreen tester (`ui.NewTester`), click and type into them, and check what they show; with `LORCA_RENDER=<folder>` they also write each frame they look at as a PNG. `LORCA_E2E_PORT=<port> LORCA_E2E_SERVER=<base URL>` adds `TestE2EAgainstCLI`, which drives the main window over a CLI with an identity on that port: it adds an OpenAI-compatible server at that URL as a custom provider through its sheet, runs the first bot on it, and checks the reply that streams back. `bun run desktop:build [platforms]` builds the CLI for each platform into `desktop/resources/<goos>-<goarch>/bin` (static musl builds for Linux, with cargo-zigbuild, as the CLI releases are) and runs `go tool mygo build -platform`; MyGo needs no cgo, so every platform builds from any computer, and a Mac builds Windows and Linux on x86-64 by default.
++- **Development and builds**: `bun run desktop` builds the CLI and runs `go tool mygo dev` (Lorca Dev, `app.lorca.dev`, with `~/.dots-dev` and port 4863), which rebuilds and relaunches the app on a Go change; `LORCA_MOCK=1` runs the demo instead of the CLI, and `LORCA_PORT` points the app at a CLI on another port. `go tool mygo vet .` in `desktop/` runs Go vet and checks for build values stored in state or captured by workers. `go test ./...` runs the model's tests and the views' tests, which build the windows over the demo's store in MyGo's offscreen tester (`ui.NewTester`), click and type into them, and check what they show; with `LORCA_RENDER=<folder>` they also write each frame they look at as a PNG. `LORCA_E2E_PORT=<port> LORCA_E2E_SERVER=<base URL>` adds `TestE2EAgainstCLI`, which drives the main window over a CLI with an identity on that port: it adds an OpenAI-compatible server at that URL as a custom provider through its sheet, runs the first bot on it, and checks the reply that streams back. `bun run desktop:build [platforms]` builds the CLI for each platform into `desktop/resources/<goos>-<goarch>/bin` (static musl builds for Linux, with cargo-zigbuild, as the CLI releases are) and runs `go tool mygo build -platform`; MyGo needs no cgo, so every platform builds from any computer, and a Mac builds Windows and Linux on x86-64 by default.
+diff --git a/docs/architecture/identity.md b/docs/architecture/identity.md
+index cd6757b..cea5fd4 100644
+--- a/docs/architecture/identity.md
++++ b/docs/architecture/identity.md
+@@ -6,11 +6,11 @@ After Happy’s layering, the Device that creates or restores the identity is th
+ 
+ | Layer                    | What                                                                                | Where                                                                                                |
+ | ------------------------ | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+-| Master secret (32 bytes) | Root. Backup as a base32 phrase (13 groups of 4).                                   | `~/.lorca/identity.json`, mode 0600. Stays on the identity device.                                 |
++| Master secret (32 bytes) | Root. Backup as a base32 phrase (13 groups of 4).                                   | `~/.dots/identity.json`, mode 0600. Stays on the identity device.                                 |
+ | Content keypair          | X25519, HKDF from master. Secret unseals the DEK. Public key seals it.              | Secret on Devices that have the master. Public key on the relay.                                     |
+ | Identity signing key     | Ed25519, HKDF from master.                                                          | Private local. Public key on the relay; the identity id is `hash(pubkey)`.                           |
+ | Account DEK              | Random XChaCha20-Poly1305 key. Encrypts roster, chats, messages, machine metadata, provider credentials. | Made locally. On the relay as a `key` blob **sealed** to the content public key; handed to each paired machine inside the sealed pairing reply. |
+-| Machine keypair          | One 32-byte secret per Device → HKDF → Ed25519 signing key + X25519 box key.        | `~/.lorca/machine.json`. Public keys on the relay, attested by the identity or by the Device that paired it. |
++| Machine keypair          | One 32-byte secret per Device → HKDF → Ed25519 signing key + X25519 box key.        | `~/.dots/machine.json`. Public keys on the relay, attested by the identity or by the Device that paired it. |
+ | Chat/job envelopes       | Account DEK for roster/chat/machine/credentials blobs; sealed box to the Runner’s box key for jobs. | Relay stores ciphertext.                                                                          |
+ | Push key                 | HKDF from the account DEK. Seals what a push says.                                  | Every Device derives it. An iPhone keeps a copy in its app group's keychain for the notification extension. |
+ | Ephemeral pairing key    | X25519, one handshake.                                                              | Devices; discarded after pairing.                                                                    |
+diff --git a/docs/architecture/macos-app.md b/docs/architecture/macos-app.md
+index 25375ae..6b33f63 100644
+--- a/docs/architecture/macos-app.md
++++ b/docs/architecture/macos-app.md
+@@ -2,7 +2,7 @@
+ 
+ SPM `Lorca.app`, AppKit.
+ 
+-The app starts the bundled `lorca` (Contents/Resources/bin/lorca; `LORCA_CLI` overrides, PATH is the fallback) as `lorca serve --port <port>`, logs it under `~/Library/Logs/Lorca/` or `~/Library/Logs/Lorca Dev/`, and restarts it if it exits. Lorca uses port `4862`; Lorca Dev uses `4863`. If something already listens on that build's port, that instance is used.
++The app starts the bundled `lorca` (Contents/Resources/bin/lorca; `LORCA_CLI` overrides, PATH is the fallback) as `lorca serve --port <port>`, logs it under `~/Library/Logs/dots/` or `~/Library/Logs/Lorca Dev/`, and restarts it if it exits. Lorca uses port `4862`; Lorca Dev uses `4863`. If something already listens on that build's port, that instance is used.
+ 
+ Which window a launch opens depends on the identity, which only the CLI knows, so the app keeps a hint: `Preferences.hadIdentity`, whether the CLI's last answer had one. With it, the main window opens during AppKit launch with a loading indicator and the saved inspector visibility. Without it (a fresh install, or a Mac whose identity went away) no window opens until the snapshot picks onboarding or the main window, so onboarding never replaces a main window that just appeared; a startup failure or the 2.5-second deadline opens the main window on the offline recovery controls. The main window's inspector keeps its width while the snapshot loads; the chat and inspector views are built when their data arrives, and automatic layout changes apply without a collapse animation. A dedicated serial queue probes localhost, locates and spawns the CLI, and reads its readiness pipe while AppKit builds the window on the main thread. Only lifecycle notifications and the ready callback return to the main thread; stopping the launcher fences queued starts and terminates its child. It launches its child with `--ready-stdout`; after loading local state and binding its server, the CLI flushes `{"event":"ready","port":<port>}` to stdout. The app reads this startup pipe and opens its websocket on that signal. CLI logs go to stderr, and the app saves both streams in its log. An existing CLI is used once the localhost probe succeeds. A dropped connection backs off from 400 ms and asks the launcher to prepare the endpoint again; a child restart connects on its new readiness signal.
+ 
+@@ -24,6 +24,6 @@ Sidebar: an `NSOutlineView` (`Sidebar/SidebarViewController.swift`) with one ite
+ 
+ Inspector: `Inspector/InspectorViewController.swift` compares what each section would show with what it last showed on every store event and touches only a section that changed. A changed section reconfigures the rows it keeps for each bot, Runner, routine, and plugin; Runs with builds its pop-ups again only when the provider, model, thinking level, or the account's providers changed (custom providers follow the built-in ones in the Provider pop-up, and a custom provider's models fill Model), and the usage rows take each turn's values in place. Collapsed, or in a closed window, the inspector skips reloads and memory fetches and catches up in `viewWillAppear`.
+ 
+-Composer: the `+` button opens a file panel; files dropped on the composer or pasted (file URLs, or an image with no text beside it, written to a temporary PNG) attach the same way. Chips above the text show a thumbnail or the file's name and size, each with a remove button; a message can be attachments alone. The draft belongs to the chat on screen: opening another chat clears it (its text, files, `@` picks, and the message it replies to), and a visit to Settings keeps it. The app mints the attachment ids and hands the CLI paths (`chats.send { attachments: [{ id, path, name, mime, width, height }] }`), so the bubble it shows at once matches the message the CLI echoes back. In a bubble, images are thumbnails sized from the width and height in the message and files are cards; a click opens the file. An attachment from another Device is fetched through `files.path`, which pulls the `file` blob from the relay into `~/.lorca/files/` and answers with the path; the bubble reloads when it lands. The Dictate button (`mic.fill`, the primary disc while the field is empty) starts Apple's speech recognizer (`Speech` + `AVAudioEngine`, `Dictation.swift`). While recording, the text gives way to Grok Bot's pill: a stop square, the elapsed time, and bars that follow the input level, with Send still beside it. The transcript accumulates and lands at the caret when the square is clicked; Send commits it and sends in one go; Escape discards it. The recognizer listens in the language of the keyboard input source in use (a Pinyin input method means zh-CN, whatever the system language), else the first of the system's preferred languages it supports (matched on language and region, so "zh-Hans-CN" finds "zh-CN"), or the language chosen in Settings › General or the button's right-click menu (`Preferences.dictationLanguage`). The bundle declares `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`.
++Composer: the `+` button opens a file panel; files dropped on the composer or pasted (file URLs, or an image with no text beside it, written to a temporary PNG) attach the same way. Chips above the text show a thumbnail or the file's name and size, each with a remove button; a message can be attachments alone. The draft belongs to the chat on screen: opening another chat clears it (its text, files, `@` picks, and the message it replies to), and a visit to Settings keeps it. The app mints the attachment ids and hands the CLI paths (`chats.send { attachments: [{ id, path, name, mime, width, height }] }`), so the bubble it shows at once matches the message the CLI echoes back. In a bubble, images are thumbnails sized from the width and height in the message and files are cards; a click opens the file. An attachment from another Device is fetched through `files.path`, which pulls the `file` blob from the relay into `~/.dots/files/` and answers with the path; the bubble reloads when it lands. The Dictate button (`mic.fill`, the primary disc while the field is empty) starts Apple's speech recognizer (`Speech` + `AVAudioEngine`, `Dictation.swift`). While recording, the text gives way to Grok Bot's pill: a stop square, the elapsed time, and bars that follow the input level, with Send still beside it. The transcript accumulates and lands at the caret when the square is clicked; Send commits it and sends in one go; Escape discards it. The recognizer listens in the language of the keyboard input source in use (a Pinyin input method means zh-CN, whatever the system language), else the first of the system's preferred languages it supports (matched on language and region, so "zh-Hans-CN" finds "zh-CN"), or the language chosen in Settings › General or the button's right-click menu (`Preferences.dictationLanguage`). The bundle declares `NSMicrophoneUsageDescription` and `NSSpeechRecognitionUsageDescription`.
+ 
+ Working state, after Grok Bot: the CLI's `job.started` / `job.finished` events (and `running_turns` in the snapshot) name the chat and bot of every turn in flight on any Device. From them the app shows a breathing green dot on the bot's avatar in the sidebar, an "is working" row after the last message (the bot's avatar beside a shimmering line: "Working…" in a DM and "Chef is working…" in a group, or what the one working bot is doing: "Thinking…" from the Runner's `job.thinking`, sent when the model starts thinking and read until that bot's next message or the end of its turn, else its latest tool as an activity such as "Running command: Install dependencies…" from the call's `description`, kept between calls so it does not flash), the Stop button, and "Chef stopped without replying" when a turn ends with nothing said. A turn reads the same on every Device, whichever one started it. Each Device lists the turns in flight on it (the turns it runs and the group exchanges it holds, each with what it is doing, thinking or a retry, until the bot's next message) in its `machine` blob (`turns`), uploaded again whenever the list changes, and a Runner uploads each call's row as the call starts. Every other Device keeps each Device's latest list (`device_turns` in SQLite) while the relay's last machine list shows that Device online (`turns_online`, kept while this Device's own socket reconnects) and drops it when the relay shows it offline; a Device uploads its list again whenever its socket connects. So a Runner that quits mid-turn never shows that turn again, and one that only lost the relay shows it again when it is back. The CLI merges those lists with its own jobs, including one it sent to a Runner that has not listed it yet, and tells the app what changed (`App::turns_changed`). The Device that asked for a turn keeps the job in SQLite (`sent_jobs`) until its `job_result` arrives or its five-minute wait runs out, so a CLI or phone core that starts again shows its own turn at once (`runtime::resume_sent_jobs`) and the other Devices' turns once the relay says they are online. Stop cancels a turn wherever it runs: the CLI seals `job_cancel` to the Device that lists it. Replies arrive in chunks: the bubble appears with the first completed paragraph (or sentence, after 1.5 s) and grows by paragraphs, the way Grok Bot's server re-sends a message as it grows. Tool calls never appear in the transcript, as in Grok Bot: the CLI keeps them as `tool` messages so a later turn can rebuild its context, and the app renders none of them, leaving the "is working" row (with the running tool's activity) and whatever the bot says before and after its work. The exceptions are a sent `message_bot`, shown as the "Messaged ◉ X" marker, and a `bash` call's command card while the command needs the user (`Chat/CommandCellView.swift`, `ToolInvocation.isShown`; see [Terminal sessions](terminal-sessions.md)): while Auto-review asks, who wants to run it, the command's first line in a code block that opens the whole command in a sheet on click, why, Allow once, Always allow, and Deny, and the rule Always allow adds; once the bot handed the running command over, Stop on its title's line and its last lines in a code block of their own that grows to six lines and then scrolls, the newest line in view and an edge with more lines past it fading out (a gradient mask on the scroll view's layer, since the block's color is see-through); at a question, a field that hides what is typed unless the question is a yes or no, with Send. When the card leaves with the cursor in that field, the composer takes it. Running tasks (see [Terminal sessions](terminal-sessions.md)) sit behind a `HoverButton` with the terminal symbol in the toolbar at the content area's trailing edge (`MainWindowController.updateRunningTasks`), whose item carries the toolbar's own badge (`NSItemBadge`, macOS 26 and later) with their number when there are two or more. The item stays in the toolbar while a chat shows and only its button hides, so the toolbar keeps its layout, and the button stays while its transient popover (`Chat/RunningTasksViewController.swift`) is open; clicking a command in it closes the popover and opens the whole command in a sheet. Sidebar rows carry an unread count pill beside the preview (the CLI counts each finished bot reply, failed response, and pending confirmation, from its own turns or the relay, unless the app reports that chat as the one on screen; reading a chat on one Device uploads a `ClearUnread` chat blob that zeroes the count on the others, and so does a message the user sends, on every Device it reaches), a preview without a "You:" prefix (a bot's name only in groups; "Messaged X" and "Message from X: …" for bot-to-bot messages), and a stamp that is the time today, "Yesterday", the weekday within a week, then the date. A transcript inserts "Today 4:13 AM" separators after fifteen minutes of silence; in a group a bot's name sits above the first bubble of a run with its avatar beside that bubble's bottom edge, the run's later bubbles follow 4 pt below in the same column, and a DM shows neither.
 diff --git a/docs/architecture/mcp-servers.md b/docs/architecture/mcp-servers.md
-index 196dac0b4395e57c9bae08f0d1990472cc4f3b08..b8e91a23027ad97db63beb52cd6e6cf5ca4ecad0 100644
+index 196dac0..1b5992b 100644
 --- a/docs/architecture/mcp-servers.md
 +++ b/docs/architecture/mcp-servers.md
 @@ -1,6 +1,6 @@
  # MCP servers
  
 -The MCP servers the user adds themselves, beside the marketplace's [plugins](plugins.md#plugins), live in `mcp.json` in the CLI's data directory (`crates/cli/src/plugins/mcp_json.rs`), in the format Claude Desktop, Cursor, and Claude Code share: `{ "mcpServers": { "<name>": { … } } }`, each a command (`command`, `args`, `env`, `cwd`) or a remote server (`type` `http`, `url`, `headers`), with `description`, `disabled`, `timeout`, pi's `toolExposure` and `exposure`, and `oauth` (`false`, or how it signs in, below).
-+The MCP servers the user adds themselves, beside the marketplace's [plugins](plugins.md#plugins), live in `~/.dots/mcp.json` (`Config::mcp_path`, consumed by `crates/cli/src/plugins/mcp_json.rs`). An alternate data home set through `--home` or `LORCA_HOME` keeps its own `mcp.json`; identity, credentials, and the rest of the default data stay in `~/.lorca`. The file is in the format Claude Desktop, Cursor, and Claude Code share: `{ "mcpServers": { "<name>": { … } } }`, each a command (`command`, `args`, `env`, `cwd`) or a remote server (`type` `http`, `url`, `headers`), with `description`, `disabled`, `timeout`, pi's `toolExposure` and `exposure`, and `oauth` (`false`, or how it signs in, below).
++The MCP servers the user adds themselves, beside the marketplace's [plugins](plugins.md#plugins), live in `~/.dots/mcp.json` (`Config::mcp_path`, consumed by `crates/cli/src/plugins/mcp_json.rs`). An alternate data home set through `--home` or `LORCA_HOME` keeps its own `mcp.json`; identity, credentials, and the rest of the data share that same home. The file is in the format Claude Desktop, Cursor, and Claude Code share: `{ "mcpServers": { "<name>": { … } } }`, each a command (`command`, `args`, `env`, `cwd`) or a remote server (`type` `http`, `url`, `headers`), with `description`, `disabled`, `timeout`, pi's `toolExposure` and `exposure`, and `oauth` (`false`, or how it signs in, below).
  
  `timeout` is how long a call may go without an answer or progress: seconds, as pi writes it, or milliseconds when it is 1000 or more, as Gemini CLI writes it; ten minutes when unset (`ServerSpec::call_timeout`). `toolExposure` names tools, or patterns ending in `*`, `hidden` or shown (`codemode`, `deferred`, and `direct` all show one, since Lorca's bots reach every plugin tool from a script), and an `exposure` of `hidden` hides every tool not named: an exact name decides first, then the first pattern that matches (`ToolHints::hides`).
  
+diff --git a/docs/architecture/plugins.md b/docs/architecture/plugins.md
+index 9d8d291..9c54bb6 100644
+--- a/docs/architecture/plugins.md
++++ b/docs/architecture/plugins.md
+@@ -13,7 +13,7 @@ A bot uses plugins by writing a script, after pi's codemode: `codemode { code }`
+ 
+ A plugin is an MCP server (or several) a bot can use, after Grok Bot's marketplace: GitHub, Jira, Notion, Stripe, Zapier, a headless browser, and the other services the [marketplace](marketplace.md) lists. A plugin is described by a manifest (`crates/cli/src/plugins/mod.rs`): `id`, `name`, `description`, `icon`, `author`, `category`, and `featured` for the marketplace, `servers` (`stdio` with `command`, `args`, `env`, and `cwd`, or `http` with `url`, `headers`, and `auth`: `oauth`, `optional` when it signs in only once the server answers with a 401, with a preregistered client's `client_name`, `callback_port` or `callback_url`, and `auth_server_metadata_url` as [MCP servers](mcp-servers.md#values-and-sign-in) tells, or `bearer`; either with a `timeout` for its calls), `variables` (setup fields, `secret` ones never read back), `skills` (notes written to the plugin's folder that the prompt points the bot at), and `tools` hints (`readonly` patterns, `hide`, and pi's ordered `exposure`, `ToolHints::hides`). `${VAR}` in args, env, and headers is filled from the variables, and `${VAR:-default}` takes the default for an empty or unset one; a header or an environment variable that names a variable with no value and no default is left out, so an optional key left unset is never sent as its placeholder (Context7 refuses every call made with one). The servers the user adds themselves are plugins too, read from the Runner's `mcp.json` ([MCP servers](mcp-servers.md)). A stdio server starts in its `cwd`, else its plugin's folder, with the login shell's environment (see [Tools](tools.md)), so a `command` such as `npx` or `uvx` resolves from the user's `PATH`, on Windows through `PATHEXT` as a terminal finds it (`npx` is npm's `npx.cmd`); the manifest's `env` goes on top. A server that cannot start says so with the file it found: `Cannot start npx (C:\Program Files\nodejs\npx.cmd): batch file arguments are invalid`.
+ 
+-**Installed per Runner, for every bot there.** The Runner holds the install under `~/.lorca/plugins/` (`installed.json`, the plain variables; `secrets.json`, mode 0600, the secret variables and OAuth tokens; a folder per plugin with its skills) and advertises each plugin's id, name, and state (`ready`, `needs_setup`, `needs_auth`, `connecting`, `error`) in its `machine` blob, so every Device lists what each Runner has without a secret leaving it. Every bot on the Runner may use every plugin installed there, as every Grok Bot agent draws on the account's installs. Installing, removing, setting variables, signing in, and reading a plugin's detail run on the Runner: locally when the app's CLI is that Runner, else as a `request` sealed to it (`plugins.install`, `plugins.uninstall`, `plugins.variables`, `plugins.connect`, `plugins.sign_out`, `plugins.detail`), so a phone installs a plugin on another computer and hands it a key through ciphertext.
++**Installed per Runner, for every bot there.** The Runner holds the install under `~/.dots/plugins/` (`installed.json`, the plain variables; `secrets.json`, mode 0600, the secret variables and OAuth tokens; a folder per plugin with its skills) and advertises each plugin's id, name, and state (`ready`, `needs_setup`, `needs_auth`, `connecting`, `error`) in its `machine` blob, so every Device lists what each Runner has without a secret leaving it. Every bot on the Runner may use every plugin installed there, as every Grok Bot agent draws on the account's installs. Installing, removing, setting variables, signing in, and reading a plugin's detail run on the Runner: locally when the app's CLI is that Runner, else as a `request` sealed to it (`plugins.install`, `plugins.uninstall`, `plugins.variables`, `plugins.connect`, `plugins.sign_out`, `plugins.detail`), so a phone installs a plugin on another computer and hands it a key through ciphertext.
+ 
+ An installed marketplace plugin follows the [marketplace's index](marketplace.md#the-index) in use, keeping its variables, secrets, and sign-ins; the index, the bot templates, and the marketplace sheet are in [Marketplace](marketplace.md).
+ 
+diff --git a/docs/architecture/runtime.md b/docs/architecture/runtime.md
+index 09bcc79..dfc0e16 100644
+--- a/docs/architecture/runtime.md
++++ b/docs/architecture/runtime.md
+@@ -1,6 +1,8 @@
+ # CLI (runtime)
+ 
+-`crates/cli`, binary `lorca`. Local websocket for the app. Files live under the private data directory: `~/.lorca/` by default and for Lorca, `~/.lorca-dev/` when launched by Lorca Dev, or the explicit `LORCA_HOME`. It contains `identity.json` (master secret, identity devices only), `machine.json` (machine secret, identity and content public keys, account DEK, `name`, `os`), `credentials.json` (the account’s providers, as last merged), `settings.json` (relay URL), `mcp.json` (the user's own MCP servers, [MCP servers](mcp-servers.md)), `catalog.json` (the last model catalog fetched from lorca.app, its ETag, and when it was checked; see [Providers](providers.md)), `marketplace.json` (the same for the marketplace index; see [Marketplace](marketplace.md#the-index)), `update.json` (the CLI's own updates: [Updates and the service](#updates-and-the-service)), `plugins/` ([Plugins](plugins.md#plugins)), `lorca.sqlite3` (WAL-mode plaintext local state), and `files/<attachment id>` (attachment bytes, sent from here or fetched from the relay). SQLite holds devices, bots, chat metadata, routines, Auto-review, usage, compactions, sync bookkeeping, messages, the durable relay outbox, the jobs this Device sent to other Runners and still waits on, and the turns the other Devices list. The JSON and database files are mode 0600 and the directory is mode 0700; SQLite may create `-wal` and `-shm` companions inside that directory while it is open.
++`crates/cli`, binary `lorca`. Local websocket for the app. Files live under the private data directory: `~/.dots/` by default and for Lorca, `~/.dots-dev/` when launched by Lorca Dev, or the explicit `LORCA_HOME`. It contains `identity.json` (master secret, identity devices only), `machine.json` (machine secret, identity and content public keys, account DEK, `name`, `os`), `credentials.json` (the account’s providers, as last merged), `settings.json` (relay URL), `mcp.json` (the user's own MCP servers, [MCP servers](mcp-servers.md)), `catalog.json` (the last model catalog fetched from lorca.app, its ETag, and when it was checked; see [Providers](providers.md)), `marketplace.json` (the same for the marketplace index; see [Marketplace](marketplace.md#the-index)), `update.json` (the CLI's own updates: [Updates and the service](#updates-and-the-service)), `plugins/` ([Plugins](plugins.md#plugins)), `lorca.sqlite3` (WAL-mode plaintext local state), and `files/<attachment id>` (attachment bytes, sent from here or fetched from the relay). SQLite holds devices, bots, chat metadata, routines, Auto-review, usage, compactions, sync bookkeeping, messages, the durable relay outbox, the jobs this Device sent to other Runners and still waits on, and the turns the other Devices list. The JSON and database files are mode 0600 and the directory is mode 0700; SQLite may create `-wal` and `-shm` companions inside that directory while it is open.
++
++The dots build uses `~/.dots` (development: `~/.dots-dev`) for the whole account, including MCP. It does not discover, import, migrate, or delete an existing `~/.lorca` account. Old settings and chats therefore do not appear in the new default home. `--home` takes precedence over `LORCA_HOME`, and either explicit home keeps all account paths together. The database filename remains `lorca.sqlite3`; its schema and the phone sandbox and relay database paths are unchanged.
+ 
+ Commands:
+ 
+@@ -32,7 +34,7 @@ Only the builds `release-cli.yml` makes replace themselves (`update::SELF_UPDATI
+ 
+ Every Device's `machine` blob carries the `version` it runs and, for a self-updating CLI, `update`: `auto`, a newer `latest` the last check found, `state` (`installing`, `restarting` while it waits for its bots, `installed` when only a restart by hand is left), and the last `error`. The apps' Device panes show it and offer Update. `device.update` and `device.auto_update` act on this CLI or, by `id`, on another Runner through the `update.install` and `update.auto` requests ([Protocols](protocols.md)). A request names no release and no download: a Runner installs only what its own signed manifest offers.
+ 
+-`lorca service install` keeps `lorca serve` running from login on and whenever it stops: a launchd agent, `app.lorca.serve`, on macOS (its log `~/Library/Logs/Lorca/serve.log`); a systemd user unit, `lorca.service`, on Linux, with lingering so it runs without a login (its log in the journal); and on Windows a Run-key entry that starts `lorca service run` at sign-in, a supervisor that starts `lorca serve` again whenever it exits (its log `serve.log` in Lorca's folder). The service starts `lorca serve` with `LORCA_SERVICE=1` and the installing command's folder, port, and `LORCA_RELAY_URL`, and its log starts over past 20 MiB. Install refuses while another `lorca serve` answers on the port, as the app's does on a Mac with Lorca, and on Linux without a systemd user session (a container, WSL without systemd) it says to start `lorca serve` from the system's own init.
++`lorca service install` keeps `lorca serve` running from login on and whenever it stops: a launchd agent, `app.lorca.serve`, on macOS (its log `~/Library/Logs/dots/serve.log`); a systemd user unit, `lorca.service`, on Linux, with lingering so it runs without a login (its log in the journal); and on Windows a Run-key entry that starts `lorca service run` at sign-in, a supervisor that starts `lorca serve` again whenever it exits (its log `serve.log` in Lorca's folder). The service starts `lorca serve` with `LORCA_SERVICE=1` and the installing command's folder, port, and `LORCA_RELAY_URL`, and its log starts over past 20 MiB. Install refuses while another `lorca serve` answers on the port, as the app's does on a Mac with Lorca, and on Linux without a systemd user session (a container, WSL without systemd) it says to start `lorca serve` from the system's own init.
+ 
+ ## Agent loop
+ 
+diff --git a/docs/architecture/tools.md b/docs/architecture/tools.md
+index 1405400..d6440c9 100644
+--- a/docs/architecture/tools.md
++++ b/docs/architecture/tools.md
+@@ -22,12 +22,12 @@ Coding tools (`lorca_agent::tools`, ports of pi’s built-ins, same schemas and
+ - `bash_input { session_id, text, enter? }` — types into a command `bash` left running, Enter after the text unless `enter` is false (`\u0003` is Ctrl-C; a text that spells one key out as its escape, `\u0003` as six characters or `\u001b[B`, types that key), and waits for what it does next; `bash_output { session_id, wait_seconds? }` — what it printed since the bot last read it, waiting up to five minutes for more. Neither is offered on Windows
+ - `grep { pattern, path?, glob?, ignoreCase?, literal?, context?, limit? }`, `find { pattern, path?, limit? }`, `ls { path?, limit? }` — respect `.gitignore` through the `ignore` walker, no `rg`/`fd` needed
+ 
+-Every bot has a working directory on its Runner (`workdir`, default `~/.lorca/workspaces/<bot id>`, so a rename never moves files); relative paths resolve there. The tools run as the Runner's user and retain that user's normal filesystem, process, credential, and network access. The working directory is context, not a security boundary: absolute paths and shell commands can control the rest of the computer.
++Every bot has a working directory on its Runner (`workdir`, default `~/.dots/workspaces/<bot id>`, so a rename never moves files); relative paths resolve there. The tools run as the Runner's user and retain that user's normal filesystem, process, credential, and network access. The working directory is context, not a security boundary: absolute paths and shell commands can control the rest of the computer.
+ 
+ Commands and stdio plugin servers run with the user's login-shell environment (`lorca_agent::login_shell`), since a CLI the app starts inherits launchd's bare `PATH`. When `lorca serve` starts, it runs the account's shell once as an interactive login shell and reads the variables it exports (`env -0`, written to a private temp file). The account's shell is its passwd entry, ahead of `$SHELL`, which launchd leaves stale after `chsh`. That shell gets a session of its own: under a terminal, an interactive shell in the CLI's session stops as it tries to take the terminal over. Every `bash` command and stdio server starts with those variables: the shell's `PATH` first, then the CLI's own, then the usual install folders (`~/.local/bin`, `~/.bun/bin`, `~/.cargo/bin`, mise shims, Volta, `/opt/homebrew/bin`, `/usr/local/bin`). So `npx`, `uvx`, `bun`, or `cargo` resolve as in the user's terminal, and a fish user's config sets up `PATH` while the command itself runs in bash. Exported keys come along as they would from a terminal, and a command that names one (`echo $OPENAI_API_KEY`) goes to Auto-review. The shell has five seconds, at most three of them interactive before a plain login shell tries; when none answers, commands keep the CLI's own environment. On Windows the CLI keeps the environment it started with, and a bare program name starts the file a terminal would run (`login_shell::find_program`), since `Command` appends only `.exe` and npm installs `npx` as `npx.cmd`: the first `PATH` folder that has the name with a `PATHEXT` extension, tried in `PATHEXT`'s order there, or the name itself when it already ends in one. Only `.com`, `.exe`, `.bat`, and `.cmd` count, the files `Command` can start, so Node's extensionless `npx` shell script and a `.js` or `.ps1` are passed over; relative `PATH` folders are skipped, and a name found in none goes to `Command` as it is. A batch file runs through `cmd.exe` with the standard library's escaping of its arguments (CVE-2024-24576): each arrives as written, `%PATH%` unexpanded and `&` never a second command, and one holding a line break cannot be passed, so the start fails.
+ 
+ On macOS and Linux each `bash` call's command runs in a terminal session of its own, which can outlive the call, take input, and run in the background: [Terminal sessions](terminal-sessions.md) has the terminal, when a call returns, background commands, the command's card, answering and stopping, and Running tasks.
+ 
+-Shell review lives at the loop's `before_tool_call` boundary (`crates/cli/src/local_review.rs`). With Auto-review on, a parser is the fast path: it splits the command into its `&&`, `||`, pipe, semicolon, newline, plain subshell-group, and visible command-substitution stages without executing it, keeping a redirection's `&` (`2>&1`, `>&2`, `&>/dev/null`) inside its stage, and a command whose every stage is a known read-only one (`git status`, `ls`, `rg`, `find … | xargs wc -l`), that writes nothing through redirection in any stage (`>&` writes unless it goes to stdout, stderr, or `/dev/null`), evaluates nothing dynamically, and names no key, token, or password runs at once. So does one that stays in Lorca's own folders (`~/.lorca`, `~/.lorca-dev`, and the CLI's home), which belong to the bots, the account's own files included: it runs from inside one, every path it names lies inside one, it moves with no bare, backward, or variable `cd`, expands no variables, and neither elevates privileges nor sends data to another machine. The `lorca` command never stays: it changes the Runner and the account (MCP servers, sign-ins, Devices), so it goes to Auto-review wherever it runs, except bare `lorca`, its help and version, `lorca mcp list`, and `lorca mcp get`, which only read (a flag after `--` is a server command's). Every other command goes whole to Auto-review before it starts. The command's card is `checking` while the review runs, which the apps do not show. When the review asks, the card itself asks (`local_review::ask_on_card`): why, Allow once, Always allow, and Deny, and a proposed plain-language allow rule for this kind of work wherever the bot does it, which keeps what decides the risk (the service, the repository, the environment, or a folder of the user's data) and leaves out one-off details such as file names, numbers, branches, and the working directory ("comment on pull requests in egoist/lorca", "deploy Railway services to production"), and which Always allow adds to Auto-review. A card with no proposed rule (Auto-review off, or a review that could not run) offers Allow once and Deny. The answer is `chats.permission` naming the card's row, from any Device, as for a permission card (`mcp::await_answer`); an allowed command runs on the same card, and a denial runs none of the stages and ends the card as `denied`. What a bot types into a running command with `bash_input` goes through the same review, the command beside the input, since a shell, a REPL, or `ssh` runs whatever it is given; Ctrl-C alone runs at once.
++Shell review lives at the loop's `before_tool_call` boundary (`crates/cli/src/local_review.rs`). With Auto-review on, a parser is the fast path: it splits the command into its `&&`, `||`, pipe, semicolon, newline, plain subshell-group, and visible command-substitution stages without executing it, keeping a redirection's `&` (`2>&1`, `>&2`, `&>/dev/null`) inside its stage, and a command whose every stage is a known read-only one (`git status`, `ls`, `rg`, `find … | xargs wc -l`), that writes nothing through redirection in any stage (`>&` writes unless it goes to stdout, stderr, or `/dev/null`), evaluates nothing dynamically, and names no key, token, or password runs at once. So does one that stays in Lorca's own folders (`~/.dots`, `~/.dots-dev`, and the CLI's home), which belong to the bots, the account's own files included: it runs from inside one, every path it names lies inside one, it moves with no bare, backward, or variable `cd`, expands no variables, and neither elevates privileges nor sends data to another machine. The `lorca` command never stays: it changes the Runner and the account (MCP servers, sign-ins, Devices), so it goes to Auto-review wherever it runs, except bare `lorca`, its help and version, `lorca mcp list`, and `lorca mcp get`, which only read (a flag after `--` is a server command's). Every other command goes whole to Auto-review before it starts. The command's card is `checking` while the review runs, which the apps do not show. When the review asks, the card itself asks (`local_review::ask_on_card`): why, Allow once, Always allow, and Deny, and a proposed plain-language allow rule for this kind of work wherever the bot does it, which keeps what decides the risk (the service, the repository, the environment, or a folder of the user's data) and leaves out one-off details such as file names, numbers, branches, and the working directory ("comment on pull requests in egoist/lorca", "deploy Railway services to production"), and which Always allow adds to Auto-review. A card with no proposed rule (Auto-review off, or a review that could not run) offers Allow once and Deny. The answer is `chats.permission` naming the card's row, from any Device, as for a permission card (`mcp::await_answer`); an allowed command runs on the same card, and a denial runs none of the stages and ends the card as `denied`. What a bot types into a running command with `bash_input` goes through the same review, the command beside the input, since a shell, a REPL, or `ssh` runs whatever it is given; Ctrl-C alone runs at once.
+ 
+ **Auto-review** (`crates/cli/src/plugins/review.rs`) is shared by shell and plugin actions. Its setting lives in the roster (`AutoReview { is_enabled, rules[{ id, text, behavior: allow | ask, tool? }] }`), so every Device shows and edits the same one. A rule is plain language, written by the user or added by Always allow from the review's proposal. Only a plugin card's Always allow saves a rule for an exact tool (`tool` is `plugin/tool`), which decides that tool's calls without a review. Everything else goes to a small model on the bot's provider, whatever the bot itself runs (`providers::review_model`: DeepSeek V4.1 Flash on DeepSeek and both OpenCode plans, Claude Haiku 4.5, GPT-6 Luna, Grok 4.7), with thinking off and at temperature 0 where the model allows it, so the same action gets the same answer, and at its lowest effort where it does not. The model reads the chat that asked for the work (`plugins::review::request`): the message that started the turn (the user's, a teammate's `message_bot` handoff, or a routine's marker with the task as it stood when the run began, which an edit or a delete during the run does not change), then each step since, its newest 30 (what the bots said, the commands they ran and the tools they used, and how the user answered a command that asked), with the user's latest message repeated after them. Before a user's message it also reads up to ten lines of the two hours of chat ahead of it, so a short reply ("yes", "create a PR") reads as the answer to what the bot proposed; a handoff or a routine starts new work, and nothing before it is read. The user's rules come next, beside the action, and a plugin call or command from a codemode script comes with the script, which says what the whole batch is for. The model weighs what the action could break against what was asked. It allows what is easy to undo or touches only what the bot made: reading, building, testing, and running code, installing a project's dependencies, the processes and files the bot made, using an app the task is about, deleting temporary files and what regenerates, local git work, drafts. It asks before harm that is hard to undo: the user's own files and data, discarding uncommitted work or rewriting pushed history, publishing, deploying, spending, access and system settings, programs the bot did not start, elevated privileges, credentials, uploads, downloaded code, and anything like what the user refused in the chat. It allows such a step too when the user asked for that very thing, in their own words, in a "yes" to what the bot proposed, or in a routine's task; a teammate's message hands over work but cannot ask for harm. It always asks before anything that could wipe a home folder, a disk, or the system. The user's rules decide over all of this: an allow rule covers its kind of work wherever the bot does it, unless the rule names a place, and an ask rule wins over an allow rule. It answers `allow` or `ask` with a reason, plus the proposed `rule` when a shell command asks, both in the language of the user's latest message, or else of the teammate's message or the routine's task (English without one). Adding a rule replaces one with the same words. With Auto-review off, every shell command and effectful plugin action asks, regardless of saved rules. A held shell command asks on its own card; any other held action, a script's command included, posts a `permission` message. Either waits up to ten minutes for `chats.permission { decision: allow | always | deny }` from any Device, and a new message from the user in the chat dismisses it (see [Agent loop](runtime.md#agent-loop)). A routine has nobody waiting, so an action that would ask is refused, and the bot hears the rule that would allow it; with Auto-review on, actions the review allows still run.
 diff --git a/macos/Resources/en.lproj/InfoPlist.strings b/macos/Resources/en.lproj/InfoPlist.strings
-index 235564dc5f3b4dc76aee3b94d6477869db5f54dc..c68fca13ea435c554aecf7f880a367a10eb2ebfb 100644
+index 235564d..c68fca1 100644
 --- a/macos/Resources/en.lproj/InfoPlist.strings
 +++ b/macos/Resources/en.lproj/InfoPlist.strings
 @@ -1,2 +1,2 @@
@@ -1505,7 +1924,7 @@ index 235564dc5f3b4dc76aee3b94d6477869db5f54dc..c68fca13ea435c554aecf7f880a367a1
 +"NSMicrophoneUsageDescription" = "dots listens while you dictate a message.";
 +"NSSpeechRecognitionUsageDescription" = "dots turns what you say into the message text.";
 diff --git a/macos/Resources/zh-Hans.lproj/InfoPlist.strings b/macos/Resources/zh-Hans.lproj/InfoPlist.strings
-index 567dda43f9c874f85712ab8876c2ef56b81fd7d5..8f1094d38c932316f0e0f45c8f4dc03202971070 100644
+index 567dda4..8f1094d 100644
 --- a/macos/Resources/zh-Hans.lproj/InfoPlist.strings
 +++ b/macos/Resources/zh-Hans.lproj/InfoPlist.strings
 @@ -1,2 +1,2 @@
@@ -1514,7 +1933,7 @@ index 567dda43f9c874f85712ab8876c2ef56b81fd7d5..8f1094d38c932316f0e0f45c8f4dc032
 +"NSMicrophoneUsageDescription" = "dots 在你听写消息时收听。";
 +"NSSpeechRecognitionUsageDescription" = "dots 把你说的话转成消息文字。";
 diff --git a/macos/Resources/zh-Hans.lproj/Localizable.strings b/macos/Resources/zh-Hans.lproj/Localizable.strings
-index 77851471a204d367f1ab3e7067852dee72d1f904..3b22ad3bc111fa0ea6b30cd753fe9eac78c54f7f 100644
+index 7785147..3b22ad3 100644
 --- a/macos/Resources/zh-Hans.lproj/Localizable.strings
 +++ b/macos/Resources/zh-Hans.lproj/Localizable.strings
 @@ -6,7 +6,7 @@
@@ -1695,7 +2114,7 @@ index 77851471a204d367f1ab3e7067852dee72d1f904..3b22ad3bc111fa0ea6b30cd753fe9eac
  "update upgrade release sparkle" = "更新 升级 版本 发布 update upgrade release sparkle";
  "Updates" = "更新";
 diff --git a/macos/Sources/Lorca/App/AppDelegate.swift b/macos/Sources/Lorca/App/AppDelegate.swift
-index d4127d55e3c8827d321c8d444274cef70ef7f10b..87608b3b5670b3c0241df788b50698f52a7a2fee 100644
+index d4127d5..87608b3 100644
 --- a/macos/Sources/Lorca/App/AppDelegate.swift
 +++ b/macos/Sources/Lorca/App/AppDelegate.swift
 @@ -263,7 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -1723,10 +2142,10 @@ index d4127d55e3c8827d321c8d444274cef70ef7f10b..87608b3b5670b3c0241df788b50698f5
      }
  
 diff --git a/macos/Sources/Lorca/App/AppInfo.swift b/macos/Sources/Lorca/App/AppInfo.swift
-index 6ff64c8d758182b313cd43c425027dd42035642c..73cda38b3cfd7e2a8f24a8f56a0ca39437bd0444 100644
+index 6ff64c8..82eddfa 100644
 --- a/macos/Sources/Lorca/App/AppInfo.swift
 +++ b/macos/Sources/Lorca/App/AppInfo.swift
-@@ -2,7 +2,7 @@ import Foundation
+@@ -2,15 +2,15 @@ import Foundation
  
  enum AppInfo {
      static let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
@@ -1734,18 +2153,20 @@ index 6ff64c8d758182b313cd43c425027dd42035642c..73cda38b3cfd7e2a8f24a8f56a0ca394
 +        ?? "dots"
      static let isDevelopment = Bundle.main.bundleIdentifier == "app.lorca.dev"
      static let defaultCLIHome = FileManager.default.homeDirectoryForCurrentUser
-         .appendingPathComponent(isDevelopment ? ".lorca-dev" : ".lorca")
-@@ -11,6 +11,6 @@ enum AppInfo {
+-        .appendingPathComponent(isDevelopment ? ".lorca-dev" : ".lorca")
++        .appendingPathComponent(isDevelopment ? ".dots-dev" : ".dots")
+     /// The relay a release build's CLI falls back to. Lorca Dev has none; the dev loop's relay
+     /// on this Mac stands in.
      static let productionRelayURL = "https://relay.lorca.app"
      static let defaultCLIPort = isDevelopment ? 4863 : 4862
      static let cliCommand = isDevelopment
 -        ? "lorca serve --home ~/.lorca-dev --port 4863"
 -        : "lorca serve"
-+        ? "dots serve --home ~/.lorca-dev --port 4863"
++        ? "dots serve --home ~/.dots-dev --port 4863"
 +        : "dots serve"
  }
 diff --git a/macos/Sources/Lorca/App/CLILaunchWorker.swift b/macos/Sources/Lorca/App/CLILaunchWorker.swift
-index 7bb46dc69b0131625d64a63916d7ca99d3a65fb5..c869d150be51cfcdf0ce88b5af37ba0d9e40585f 100644
+index 7bb46dc..c869d15 100644
 --- a/macos/Sources/Lorca/App/CLILaunchWorker.swift
 +++ b/macos/Sources/Lorca/App/CLILaunchWorker.swift
 @@ -20,7 +20,7 @@ final class CLILaunchWorker: @unchecked Sendable {
@@ -1776,7 +2197,7 @@ index 7bb46dc69b0131625d64a63916d7ca99d3a65fb5..c869d150be51cfcdf0ce88b5af37ba0d
          return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
      }
 diff --git a/macos/Sources/Lorca/App/MainMenu.swift b/macos/Sources/Lorca/App/MainMenu.swift
-index f31de0f52027988a1c3e9997b95ed9a517c06b50..a06e98ae9124ed1d3150376f8c8c62dbc620d243 100644
+index f31de0f..a06e98a 100644
 --- a/macos/Sources/Lorca/App/MainMenu.swift
 +++ b/macos/Sources/Lorca/App/MainMenu.swift
 @@ -52,7 +52,7 @@ enum MainMenu {
@@ -1814,7 +2235,7 @@ index f31de0f52027988a1c3e9997b95ed9a517c06b50..a06e98ae9124ed1d3150376f8c8c62db
          return menu
      }
 diff --git a/macos/Sources/Lorca/Chat/ChatViewController.swift b/macos/Sources/Lorca/Chat/ChatViewController.swift
-index d1d06a91262877bff30db3ba2ab66f3fa7cbd624..75c8ee4feaab9f17951d507c9cae5b248af10a43 100644
+index d1d06a9..75c8ee4 100644
 --- a/macos/Sources/Lorca/Chat/ChatViewController.swift
 +++ b/macos/Sources/Lorca/Chat/ChatViewController.swift
 @@ -614,7 +614,7 @@ final class ChatViewController: NSViewController {
@@ -1827,7 +2248,7 @@ index d1d06a91262877bff30db3ba2ab66f3fa7cbd624..75c8ee4feaab9f17951d507c9cae5b24
      }
  
 diff --git a/macos/Sources/Lorca/Chat/Dictation.swift b/macos/Sources/Lorca/Chat/Dictation.swift
-index 51e9872b8a7eed5abd95eeb9f634af218ce10aca..59249493d47188dbed2b6e503de472687740f44e 100644
+index 51e9872..5924949 100644
 --- a/macos/Sources/Lorca/Chat/Dictation.swift
 +++ b/macos/Sources/Lorca/Chat/Dictation.swift
 @@ -16,8 +16,8 @@ final class Dictation {
@@ -1842,7 +2263,7 @@ index 51e9872b8a7eed5abd95eeb9f634af218ce10aca..59249493d47188dbed2b6e503de47268
              case let .engine(error): error.localizedDescription
              }
 diff --git a/macos/Sources/Lorca/Content/StateViewControllers.swift b/macos/Sources/Lorca/Content/StateViewControllers.swift
-index fd788a7e7edd0f203416a13e8a581d7bbf19a826..128263677d4b96f8b355ed3b67b4cb1c4752ced2 100644
+index fd788a7..1282636 100644
 --- a/macos/Sources/Lorca/Content/StateViewControllers.swift
 +++ b/macos/Sources/Lorca/Content/StateViewControllers.swift
 @@ -46,7 +46,7 @@ final class OfflineViewController: NSViewController {
@@ -1855,7 +2276,7 @@ index fd788a7e7edd0f203416a13e8a581d7bbf19a826..128263677d4b96f8b355ed3b67b4cb1c
          let body = Build.label(
              L("Your bots, keys and transcripts live in the CLI on this computer. The app starts it on its own; you can also run it from a terminal, and this window reconnects either way."),
 diff --git a/macos/Sources/Lorca/Model/AppStore.swift b/macos/Sources/Lorca/Model/AppStore.swift
-index 9eb8786736749c168d9ac310544cd6fc4adcb7bb..5dd547eaf59c4b59675dcce678277d031bee2901 100644
+index 9eb8786..4106196 100644
 --- a/macos/Sources/Lorca/Model/AppStore.swift
 +++ b/macos/Sources/Lorca/Model/AppStore.swift
 @@ -812,7 +812,7 @@ final class AppStore {
@@ -1867,8 +2288,17 @@ index 9eb8786736749c168d9ac310544cd6fc4adcb7bb..5dd547eaf59c4b59675dcce678277d03
          return McpFile(json: try await mcpReply("mcp.list", ["runner_id": runnerID]))
      }
  
+@@ -1084,7 +1084,7 @@ final class AppStore {
+     func botMemory(_ id: Bot.ID) async throws -> BotMemory {
+         if isMock {
+             return BotMemory(
+-                botID: id, here: true, runner: "This computer", path: "~/.lorca/workspaces/\(id)",
++                botID: id, here: true, runner: "This computer", path: "~/.dots/workspaces/\(id)",
+                 text: "- 2026-09-10 · from your chat with the user · the user prefers short replies\n- 2026-09-12 · invoices are reconciled on Mondays\n",
+                 hash: "mock", lines: 2, bytes: 128, truncated: false, maxLines: 200, maxBytes: 24_000,
+                 topics: ["clients.md"], logs: ["2026-09-12", "2026-09-15"])
 diff --git a/macos/Sources/Lorca/Model/CLIClient.swift b/macos/Sources/Lorca/Model/CLIClient.swift
-index 9d6ec83c456a846a4d3eb81172c049f325b50742..4c4e0833cdb0c5f483cfcd7c0fd43399c9d206d9 100644
+index 9d6ec83..4c4e083 100644
 --- a/macos/Sources/Lorca/Model/CLIClient.swift
 +++ b/macos/Sources/Lorca/Model/CLIClient.swift
 @@ -170,7 +170,7 @@ final class CLIClient: NSObject {
@@ -1880,8 +2310,21 @@ index 9d6ec83c456a846a4d3eb81172c049f325b50742..4c4e0833cdb0c5f483cfcd7c0fd43399
          }
          let id = nextID
          nextID += 1
+diff --git a/macos/Sources/Lorca/Model/Models.swift b/macos/Sources/Lorca/Model/Models.swift
+index bcaad3c..bbafb47 100644
+--- a/macos/Sources/Lorca/Model/Models.swift
++++ b/macos/Sources/Lorca/Model/Models.swift
+@@ -874,7 +874,7 @@ struct CommandRun: Hashable {
+     }
+ }
+ 
+-/// A file sent with a message. The bytes live under `~/.lorca/files/<id>` once this Device
++/// A file sent with a message. The bytes live under `~/.dots/files/<id>` once this Device
+ /// has them; `width` and `height` size an image's thumbnail before the file arrives.
+ struct Attachment: Hashable, Identifiable {
+     let id: String
 diff --git a/macos/Sources/Lorca/Onboarding/OnboardingWindowController.swift b/macos/Sources/Lorca/Onboarding/OnboardingWindowController.swift
-index 72502bd4f4b42b05078b364c1fe80218e9d2439d..5d5334ea0d508d58bd4016f77692cdfff5143b90 100644
+index 72502bd..5d5334e 100644
 --- a/macos/Sources/Lorca/Onboarding/OnboardingWindowController.swift
 +++ b/macos/Sources/Lorca/Onboarding/OnboardingWindowController.swift
 @@ -280,7 +280,7 @@ final class OnboardingViewController: NSViewController {
@@ -1923,7 +2366,7 @@ index 72502bd4f4b42b05078b364c1fe80218e9d2439d..5d5334ea0d508d58bd4016f77692cdff
          }
          busy = true
 diff --git a/macos/Sources/Lorca/Settings/AutoReviewSettingsViewController.swift b/macos/Sources/Lorca/Settings/AutoReviewSettingsViewController.swift
-index f0164a2f9ffffdc329dca93557bce179541f60b0..7deb784871ceb3a88762f1cf369d17aa3881fca2 100644
+index f0164a2..7deb784 100644
 --- a/macos/Sources/Lorca/Settings/AutoReviewSettingsViewController.swift
 +++ b/macos/Sources/Lorca/Settings/AutoReviewSettingsViewController.swift
 @@ -20,7 +20,7 @@ final class AutoReviewSettingsViewController: SettingsPaneViewController {
@@ -1945,7 +2388,7 @@ index f0164a2f9ffffdc329dca93557bce179541f60b0..7deb784871ceb3a88762f1cf369d17aa
          check.setRows([switchRow, description])
  
 diff --git a/macos/Sources/Lorca/Settings/DeviceSettingsViewControllers.swift b/macos/Sources/Lorca/Settings/DeviceSettingsViewControllers.swift
-index 47f5332971fb480fe2f9c7e1c4625e7a34fd6315..9e89d9ea2b99105c3ab1c4bf860692ba8e240166 100644
+index 47f5332..9e89d9e 100644
 --- a/macos/Sources/Lorca/Settings/DeviceSettingsViewControllers.swift
 +++ b/macos/Sources/Lorca/Settings/DeviceSettingsViewControllers.swift
 @@ -262,7 +262,7 @@ final class PluginsSettingsViewController: DevicePaneViewController {
@@ -1994,7 +2437,7 @@ index 47f5332971fb480fe2f9c7e1c4625e7a34fd6315..9e89d9ea2b99105c3ab1c4bf860692ba
          row.onAction = { [weak self] in
              Task { @MainActor in
 diff --git a/macos/Sources/Lorca/Settings/SettingsWindowController.swift b/macos/Sources/Lorca/Settings/SettingsWindowController.swift
-index 6eac761d876df485216cf6e0c48d6200882739bd..2edac32f2878fc54c378a3c5bacc7f8f9aa998df 100644
+index 6eac761..2edac32 100644
 --- a/macos/Sources/Lorca/Settings/SettingsWindowController.swift
 +++ b/macos/Sources/Lorca/Settings/SettingsWindowController.swift
 @@ -202,7 +202,7 @@ final class GeneralSettingsViewController: SettingsPaneViewController {
@@ -2016,7 +2459,7 @@ index 6eac761d876df485216cf6e0c48d6200882739bd..2edac32f2878fc54c378a3c5bacc7f8f
  
          let onboarding = ActionRow(
 diff --git a/macos/Sources/Lorca/Sheets/CustomProviderViewController.swift b/macos/Sources/Lorca/Sheets/CustomProviderViewController.swift
-index 6876da2eccf9732da36fcbdc4d4d9fe355082bc4..e443b98bff87b1496b3e448c297cf63ac85604fb 100644
+index 6876da2..e443b98 100644
 --- a/macos/Sources/Lorca/Sheets/CustomProviderViewController.swift
 +++ b/macos/Sources/Lorca/Sheets/CustomProviderViewController.swift
 @@ -424,7 +424,7 @@ final class CustomProviderViewController: SheetViewController {
@@ -2029,7 +2472,7 @@ index 6876da2eccf9732da36fcbdc4d4d9fe355082bc4..e443b98bff87b1496b3e448c297cf63a
          if kind == nil, keyField.stringValue.isEmpty {
              keyField.placeholderString = CustomProviderPreset.matching(baseURL)?.keyPlaceholder ?? L("Optional for a server on your network")
 diff --git a/macos/Sources/Lorca/Sheets/McpServerViewController.swift b/macos/Sources/Lorca/Sheets/McpServerViewController.swift
-index 4f143b1b14949394f5544ca62788c45278c46f78..91291705b67ec3963d06ec1cbad5798cb1f70243 100644
+index 4f143b1..9129170 100644
 --- a/macos/Sources/Lorca/Sheets/McpServerViewController.swift
 +++ b/macos/Sources/Lorca/Sheets/McpServerViewController.swift
 @@ -37,7 +37,7 @@ final class McpServerViewController: SheetViewController {
@@ -2042,7 +2485,7 @@ index 4f143b1b14949394f5544ca62788c45278c46f78..91291705b67ec3963d06ec1cbad5798c
      private let headersEditor = PairsEditor(namePlaceholder: "Authorization", valuePlaceholder: "Bearer …", addTitle: L("Add Header"), label: L("Headers"))
      private let aboutField = NSTextField()
 diff --git a/macos/Sources/Lorca/Sheets/NewBotViewController.swift b/macos/Sources/Lorca/Sheets/NewBotViewController.swift
-index 7ffe7a74d14cc4216d48800108cb24a8755e683b..d18d46ddbf831f6b5f85e92eb1b476c1ad8bcc88 100644
+index 7ffe7a7..d18d46d 100644
 --- a/macos/Sources/Lorca/Sheets/NewBotViewController.swift
 +++ b/macos/Sources/Lorca/Sheets/NewBotViewController.swift
 @@ -311,7 +311,7 @@ final class PairingSheetViewController: SheetViewController {
@@ -2055,7 +2498,7 @@ index 7ffe7a74d14cc4216d48800108cb24a8755e683b..d18d46ddbf831f6b5f85e92eb1b476c1
          )
      }
 diff --git a/macos/Sources/Lorca/Sidebar/SidebarViewController.swift b/macos/Sources/Lorca/Sidebar/SidebarViewController.swift
-index 2c99621b319d232a11e21ab0a47070354c88539d..d4cc0e7bdfbdc2ae5d27714d50d5e63b7b3fa786 100644
+index 2c99621..d4cc0e7 100644
 --- a/macos/Sources/Lorca/Sidebar/SidebarViewController.swift
 +++ b/macos/Sources/Lorca/Sidebar/SidebarViewController.swift
 @@ -599,8 +599,8 @@ final class SidebarFooterView: NSView {
@@ -2070,7 +2513,7 @@ index 2c99621b319d232a11e21ab0a47070354c88539d..d4cc0e7bdfbdc2ae5d27714d50d5e63b
                  L("Can’t connect to the relay: %@", relayError)
              } else {
 diff --git a/mobile/app.config.ts b/mobile/app.config.ts
-index 941a141549a4d664732a6a160d7a1c534f0bd381..72e82eccf66ff339ffcf4e84c89e406c00c23f75 100644
+index 941a141..72e82ec 100644
 --- a/mobile/app.config.ts
 +++ b/mobile/app.config.ts
 @@ -9,7 +9,7 @@ export default (): ExpoConfig => {
@@ -2125,7 +2568,7 @@ index 941a141549a4d664732a6a160d7a1c534f0bd381..72e82eccf66ff339ffcf4e84c89e406c
        ],
        "expo-image",
 diff --git a/mobile/app/pair.tsx b/mobile/app/pair.tsx
-index 5726c3cfad6cfb217f6b1cbc219a7f3e23808e94..fb6f918cd1fb8758076b693afbaa22404dc541f5 100644
+index 5726c3c..fb6f918 100644
 --- a/mobile/app/pair.tsx
 +++ b/mobile/app/pair.tsx
 @@ -56,7 +56,7 @@ export default function PairScreen() {
@@ -2156,7 +2599,7 @@ index 5726c3cfad6cfb217f6b1cbc219a7f3e23808e94..fb6f918cd1fb8758076b693afbaa2240
  
            <View style={[styles.card, { backgroundColor: p.cell }]}>
 diff --git a/mobile/app/settings/custom-provider.tsx b/mobile/app/settings/custom-provider.tsx
-index 5944620c2a153b989475b24793974841041f7d7c..663dec4935b76a5e7534cfb1431d92c3f4e5207a 100644
+index 5944620..663dec4 100644
 --- a/mobile/app/settings/custom-provider.tsx
 +++ b/mobile/app/settings/custom-provider.tsx
 @@ -139,7 +139,7 @@ export default function CustomProviderScreen() {
@@ -2169,7 +2612,7 @@ index 5944620c2a153b989475b24793974841041f7d7c..663dec4935b76a5e7534cfb1431d92c3
    ]
      .filter(Boolean)
 diff --git a/mobile/app/settings/device/[id].tsx b/mobile/app/settings/device/[id].tsx
-index e32d159f42b7a842703bcf5c15727b85cb3ca874..60751e0f48c2568a12c2519cac7f421cd261580d 100644
+index e32d159..60751e0 100644
 --- a/mobile/app/settings/device/[id].tsx
 +++ b/mobile/app/settings/device/[id].tsx
 @@ -41,7 +41,7 @@ function cliStatus(version: string, update: UpdateStatus): string {
@@ -2200,7 +2643,7 @@ index e32d159f42b7a842703bcf5c15727b85cb3ca874..60751e0f48c2568a12c2519cac7f421c
  
          {!isThis && (
 diff --git a/mobile/app/settings/index.tsx b/mobile/app/settings/index.tsx
-index 3a02b562c94a24a16296f1032dcc3bd7f1d79929..fb165ed49472b7f7b4f6c63dd57969ff31bc09a6 100644
+index 3a02b56..fb165ed 100644
 --- a/mobile/app/settings/index.tsx
 +++ b/mobile/app/settings/index.tsx
 @@ -222,7 +222,7 @@ export default function SettingsScreen() {
@@ -2231,7 +2674,7 @@ index 3a02b562c94a24a16296f1032dcc3bd7f1d79929..fb165ed49472b7f7b4f6c63dd57969ff
          </Text>
        </ScrollView>
 diff --git a/mobile/locales/en.json b/mobile/locales/en.json
-index 324058e8ddd7e996c09c8b0c9ded34f6da83c169..e6311b9ecc859ce6edfeffa8ed28ae1ea6306d5f 100644
+index 324058e..e6311b9 100644
 --- a/mobile/locales/en.json
 +++ b/mobile/locales/en.json
 @@ -1,8 +1,8 @@
@@ -2248,7 +2691,7 @@ index 324058e8ddd7e996c09c8b0c9ded34f6da83c169..e6311b9ecc859ce6edfeffa8ed28ae1e
    }
  }
 diff --git a/mobile/locales/zh-Hans.json b/mobile/locales/zh-Hans.json
-index bd76e2f1baa39b2219b0efa95187ea4e9b81d717..e625d32bcf0d4d4a6ffaf1ad9ac63aa9fdc3b0bd 100644
+index bd76e2f..e625d32 100644
 --- a/mobile/locales/zh-Hans.json
 +++ b/mobile/locales/zh-Hans.json
 @@ -1,8 +1,8 @@
@@ -2265,7 +2708,7 @@ index bd76e2f1baa39b2219b0efa95187ea4e9b81d717..e625d32bcf0d4d4a6ffaf1ad9ac63aa9
    }
  }
 diff --git a/mobile/src/core/core.test.ts b/mobile/src/core/core.test.ts
-index 4cdc843c65b1d74c3b1317b799ea203d3de88cac..b27d953a8b0f83720e866257934eae7970886268 100644
+index 4cdc843..b27d953 100644
 --- a/mobile/src/core/core.test.ts
 +++ b/mobile/src/core/core.test.ts
 @@ -69,7 +69,7 @@ describe("pairing", () => {
@@ -2278,7 +2721,7 @@ index 4cdc843c65b1d74c3b1317b799ea203d3de88cac..b27d953a8b0f83720e866257934eae79
    });
  });
 diff --git a/mobile/src/core/pairing.ts b/mobile/src/core/pairing.ts
-index eb948851b0bc3652365caf180a82cdac47a17040..5a0415909759800f9ec54bc16feb156369ea8400 100644
+index eb94885..5a04159 100644
 --- a/mobile/src/core/pairing.ts
 +++ b/mobile/src/core/pairing.ts
 @@ -15,7 +15,7 @@ export function parsePairingString(text: string): PairingTarget {
@@ -2291,7 +2734,7 @@ index eb948851b0bc3652365caf180a82cdac47a17040..5a0415909759800f9ec54bc16feb1563
    const query = trimmed.slice(trimmed.indexOf("pair?") + "pair?".length);
    const fields: Record<string, string> = {};
 diff --git a/mobile/src/core/updates.test.ts b/mobile/src/core/updates.test.ts
-index 0871271623add8657680b13450342032d9cc10eb..6b9559142bc86c9317166643fbcbe551b9d5b01c 100644
+index 0871271..6b95591 100644
 --- a/mobile/src/core/updates.test.ts
 +++ b/mobile/src/core/updates.test.ts
 @@ -95,7 +95,7 @@ test("the daily check offers a release once, and Skip This Version keeps it from
@@ -2304,7 +2747,7 @@ index 0871271623add8657680b13450342032d9cc10eb..6b9559142bc86c9317166643fbcbe551
  
    alerts[0]!.buttons[0]!.onPress!();
 diff --git a/mobile/src/core/updates.ts b/mobile/src/core/updates.ts
-index 053e5c860d6365c5fb8165004077847787c01373..ddf29424509a7949f0196f99e8c8d082df0781df 100644
+index 053e5c8..ddf2942 100644
 --- a/mobile/src/core/updates.ts
 +++ b/mobile/src/core/updates.ts
 @@ -127,7 +127,7 @@ function checkIfDue() {
@@ -2317,7 +2760,7 @@ index 053e5c860d6365c5fb8165004077847787c01373..ddf29424509a7949f0196f99e8c8d082
      [
        { text: t("Skip This Version"), onPress: () => savePrefs({ ...loadPrefs(), update_skipped: release.version }) },
 diff --git a/mobile/src/i18n/zh.ts b/mobile/src/i18n/zh.ts
-index 86cbffd7416e136e46c6b31277749dcfd77c3926..ac789ec1e767dda3d93ef40bf337781f5d60a30a 100644
+index 86cbffd..ac789ec 100644
 --- a/mobile/src/i18n/zh.ts
 +++ b/mobile/src/i18n/zh.ts
 @@ -14,10 +14,10 @@ export const zh: Record<string, string> = {
@@ -2405,7 +2848,7 @@ index 86cbffd7416e136e46c6b31277749dcfd77c3926..ac789ec1e767dda3d93ef40bf337781f
    "Your browser opens a {name} sign-in. The tokens are shared with your paired Devices, encrypted with your account key; the relay cannot read them.": "浏览器会打开 {name} 登录页面。令牌会使用你的账户密钥加密并同步到已配对的设备；中继无法读取。",
  };
 diff --git a/mobile/src/ui/ChatsScreen.tsx b/mobile/src/ui/ChatsScreen.tsx
-index 0e3195f23c1d803e03544cfd581726bee4292ca9..3c55f483298a2436596897cbc22e774f4dbc9c94 100644
+index 0e3195f..3c55f48 100644
 --- a/mobile/src/ui/ChatsScreen.tsx
 +++ b/mobile/src/ui/ChatsScreen.tsx
 @@ -190,9 +190,9 @@ export function ChatsScreen({ sidebar = false }: { sidebar?: boolean }) {
@@ -2421,7 +2864,7 @@ index 0e3195f23c1d803e03544cfd581726bee4292ca9..3c55f483298a2436596897cbc22e774f
            </View>
          </Stack.Title>
 diff --git a/mobile/src/ui/Composer.tsx b/mobile/src/ui/Composer.tsx
-index 66f71c0e477d4f4cd7457e5d7ecf37c871433786..20dfb0bc9a509fb425f91be8d994206512245d67 100644
+index 66f71c0..20dfb0b 100644
 --- a/mobile/src/ui/Composer.tsx
 +++ b/mobile/src/ui/Composer.tsx
 @@ -211,7 +211,7 @@ export function Composer({
@@ -2443,7 +2886,7 @@ index 66f71c0e477d4f4cd7457e5d7ecf37c871433786..20dfb0bc9a509fb425f91be8d9942065
          { text: t("OK"), style: "cancel" },
        ]);
 diff --git a/mobile/src/ui/transcript.tsx b/mobile/src/ui/transcript.tsx
-index 8af98f78f78886918cb0a9150662199c5439d74c..f0209643b9c71ad860604533aac2ddf498c604cb 100644
+index 8af98f7..f020964 100644
 --- a/mobile/src/ui/transcript.tsx
 +++ b/mobile/src/ui/transcript.tsx
 @@ -131,7 +131,7 @@ const REPLY_SWIPE = 56;
@@ -2456,7 +2899,7 @@ index 8af98f78f78886918cb0a9150662199c5439d74c..f0209643b9c71ad860604533aac2ddf4
  
  /// A message that follows a leftward swipe, with a reply arrow fading in behind it; let go past
 diff --git a/scripts/app.ts b/scripts/app.ts
-index 2d87280e4b96801a8d671cdc3576184e3df10998..72a95269850a65aa0d08cb84c3f428304c49c29d 100644
+index 2d87280..72a9526 100644
 --- a/scripts/app.ts
 +++ b/scripts/app.ts
 @@ -8,10 +8,10 @@ export const RESOURCES_DIR = join(PACKAGE_DIR, "Resources")
@@ -2522,7 +2965,7 @@ index 2d87280e4b96801a8d671cdc3576184e3df10998..72a95269850a65aa0d08cb84c3f42830
    const bundle = bundlePath(config)
    const macos = join(bundle, "Contents", "MacOS")
 diff --git a/scripts/desktop.ts b/scripts/desktop.ts
-index 8ca21141254443831b7d68fbc371c29070027eb7..b2d77b89c7bccff1fd8d00d0a622151ee3899df1 100644
+index 8ca2114..b2d77b8 100644
 --- a/scripts/desktop.ts
 +++ b/scripts/desktop.ts
 @@ -83,7 +83,7 @@ async function placeCLI(platform: string): Promise<boolean> {
@@ -2535,7 +2978,7 @@ index 8ca21141254443831b7d68fbc371c29070027eb7..b2d77b89c7bccff1fd8d00d0a622151e
    }
    const directory = join(DESKTOP, "resources", `${goos}-${goarch}`, "bin")
 diff --git a/scripts/dev.ts b/scripts/dev.ts
-index 7bddcbeea866f855b645533834a15754d86cf211..efd4cc40a7d5ef4919706a505de78f1c8fa2ba1c 100644
+index 7bddcbe..efd4cc4 100644
 --- a/scripts/dev.ts
 +++ b/scripts/dev.ts
 @@ -102,7 +102,7 @@ async function strayRelayPid(): Promise<number | null> {
@@ -2557,7 +3000,7 @@ index 7bddcbeea866f855b645533834a15754d86cf211..efd4cc40a7d5ef4919706a505de78f1c
        cwd: ROOT,
        stdin: "ignore",
 diff --git a/scripts/release-ios.ts b/scripts/release-ios.ts
-index 3251285b1964f2c5720fb7e31d244462603ba150..80455a52f5b3214b677eb13552eec4853e3c9d25 100644
+index 3251285..80455a5 100644
 --- a/scripts/release-ios.ts
 +++ b/scripts/release-ios.ts
 @@ -114,7 +114,7 @@ for (const name of KEEP) {
@@ -2583,9 +3026,18 @@ index 3251285b1964f2c5720fb7e31d244462603ba150..80455a52f5b3214b677eb13552eec485
  const built = (await $`plutil -extract CFBundleVersion raw ${plist}`.text()).trim()
  if (built !== buildNumber) die(`the app carries build ${built}, expected ${buildNumber}`)
 diff --git a/scripts/reset.ts b/scripts/reset.ts
-index 3c2ed833873704bcf6eec6307f037737b870954c..b456a9c55335c6829670a4c7a09ffaffb19d103d 100644
+index 3c2ed83..fea3991 100644
 --- a/scripts/reset.ts
 +++ b/scripts/reset.ts
+@@ -16,7 +16,7 @@ const development = args.includes("--dev")
+ const appName = development ? DEBUG_APP_NAME : APP_NAME
+ const bundleID = development ? DEBUG_BUNDLE_ID : BUNDLE_ID
+ const port = development ? 4863 : 4862
+-const home = process.env.LORCA_HOME ?? join(homedir(), development ? ".lorca-dev" : ".lorca")
++const home = process.env.LORCA_HOME ?? join(homedir(), development ? ".dots-dev" : ".dots")
+ const logs = join(homedir(), "Library", "Logs", appName)
+ 
+ const targets: { path: string; what: string; on: boolean }[] = [
 @@ -41,7 +41,7 @@ async function pids(pattern: string): Promise<number[]> {
  }
  
@@ -2595,8 +3047,78 @@ index 3c2ed833873704bcf6eec6307f037737b870954c..b456a9c55335c6829670a4c7a09ffaff
    let found: number[] = []
    for (const pattern of patterns) found = found.concat(await pids(pattern))
    found = [...new Set(found)]
+diff --git a/web/content/docs/auto-review.mdx b/web/content/docs/auto-review.mdx
+index 97b1cd1..9ceac5a 100644
+--- a/web/content/docs/auto-review.mdx
++++ b/web/content/docs/auto-review.mdx
+@@ -39,7 +39,7 @@ With Auto-review **on**, each action is judged against your rules, your latest m
+ 
+ With Auto-review **off**, every shell command and every effectful plugin action asks.
+ 
+-Read-only plugin actions never ask, and neither do read-only shell commands: Lorca parses every stage of a command, and one that only reads, such as `git status`, `ls`, or `rg TODO src | wc -l`, runs at once. A command that writes, deletes, installs, runs code, or reads keys and tokens goes to a small, fast model on the bot's provider, such as GPT-6 Luna on ChatGPT or Claude Haiku 4.5 on Anthropic, which applies the built-in checks, your rules, and your latest request. Lorca's own folders, `~/.lorca` and `~/.lorca-dev`, belong to the bots: a command that stays inside them runs without a review, whatever it does there. Temporary folders such as `/tmp` count as scratch space, so cleaning up there doesn't ask.
++Read-only plugin actions never ask, and neither do read-only shell commands: Lorca parses every stage of a command, and one that only reads, such as `git status`, `ls`, or `rg TODO src | wc -l`, runs at once. A command that writes, deletes, installs, runs code, or reads keys and tokens goes to a small, fast model on the bot's provider, such as GPT-6 Luna on ChatGPT or Claude Haiku 4.5 on Anthropic, which applies the built-in checks, your rules, and your latest request. Lorca's own folders, `~/.dots` and `~/.dots-dev`, belong to the bots: a command that stays inside them runs without a review, whatever it does there. Temporary folders such as `/tmp` count as scratch space, so cleaning up there doesn't ask.
+ 
+ ## Shell access
+ 
+diff --git a/web/content/docs/auto-review.zh.mdx b/web/content/docs/auto-review.zh.mdx
+index ba9b1e9..65b7e34 100644
+--- a/web/content/docs/auto-review.zh.mdx
++++ b/web/content/docs/auto-review.zh.mdx
+@@ -39,7 +39,7 @@ icon: ShieldCheck
+ 
+ 自动审查 **关闭**时，每个 shell 命令和每个会产生影响的插件操作都会询问。
+ 
+-只读的插件操作从不询问，只读的 shell 命令也一样：Lorca 会解析命令的每个阶段，只读取内容的命令（如 `git status`、`ls` 或 `rg TODO src | wc -l`）会直接运行。会写入、删除、安装、运行代码或读取密钥和令牌的命令会交给智能体所用服务商的一款小型快速模型（如 ChatGPT 的 GPT-6 Luna、Anthropic 的 Claude Haiku 4.5），由它根据内置检查、你的规则和你最近的请求作出判断。Lorca 自己的文件夹 `~/.lorca` 和 `~/.lorca-dev` 属于智能体：只在其中操作的命令无论做什么都不用审查。`/tmp` 这样的临时目录算作草稿空间，在里面清理不会询问。
++只读的插件操作从不询问，只读的 shell 命令也一样：Lorca 会解析命令的每个阶段，只读取内容的命令（如 `git status`、`ls` 或 `rg TODO src | wc -l`）会直接运行。会写入、删除、安装、运行代码或读取密钥和令牌的命令会交给智能体所用服务商的一款小型快速模型（如 ChatGPT 的 GPT-6 Luna、Anthropic 的 Claude Haiku 4.5），由它根据内置检查、你的规则和你最近的请求作出判断。Lorca 自己的文件夹 `~/.dots` 和 `~/.dots-dev` 属于智能体：只在其中操作的命令无论做什么都不用审查。`/tmp` 这样的临时目录算作草稿空间，在里面清理不会询问。
+ 
+ ## Shell 访问
+ 
+diff --git a/web/content/docs/cli.mdx b/web/content/docs/cli.mdx
+index 226b9e2..a75a4fd 100644
+--- a/web/content/docs/cli.mdx
++++ b/web/content/docs/cli.mdx
+@@ -103,7 +103,7 @@ Restarting into a new release on Windows takes `lorca service`; without it, `lor
+ 
+ | Variable | What it sets |
+ | --- | --- |
+-| `LORCA_HOME` | Where keys, credentials, and chats live. Default `~/.lorca`. |
++| `LORCA_HOME` | Where keys, credentials, and chats live. Default `~/.dots`. |
+ | `LORCA_PORT` | The local port the app connects to. Default `4862`. |
+ | `LORCA_RELAY_URL` | The relay. |
+ | `LORCA_SHELL` | The shell bots run commands in. Default `/bin/bash`; on Windows, Git for Windows' bash. On macOS and Linux, commands get your login shell's `PATH` and variables either way. |
+@@ -113,6 +113,6 @@ Restarting into a new release on Windows takes `lorca service`; without it, `lor
+ 
+ ## Files
+ 
+-Everything is under `~/.lorca/`, readable only by your user: your identity and machine keys, provider credentials, settings, chats, attachments, plugins, your MCP servers in `mcp.json`, the last model catalog fetched in `catalog.json`, the last marketplace fetched in `marketplace.json`, the last update check in `update.json`, and one workspace folder per bot with its memory.
++Everything is under `~/.dots/`, readable only by your user: your identity and machine keys, provider credentials, settings, chats, attachments, plugins, your MCP servers in `mcp.json`, the last model catalog fetched in `catalog.json`, the last marketplace fetched in `marketplace.json`, the last update check in `update.json`, and one workspace folder per bot with its memory.
+ 
+-The macOS app logs the service to `~/Library/Logs/Lorca/cli.log`. Under `lorca service` the log is `~/Library/Logs/Lorca/serve.log` on macOS, `journalctl --user -u lorca` on Linux, and `serve.log` in `~/.lorca` on Windows.
++The macOS app logs the service to `~/Library/Logs/dots/cli.log`. Under `lorca service` the log is `~/Library/Logs/dots/serve.log` on macOS, `journalctl --user -u lorca` on Linux, and `serve.log` in `~/.dots` on Windows.
+diff --git a/web/content/docs/cli.zh.mdx b/web/content/docs/cli.zh.mdx
+index 7ea36e8..96823d6 100644
+--- a/web/content/docs/cli.zh.mdx
++++ b/web/content/docs/cli.zh.mdx
+@@ -103,7 +103,7 @@ lorca service install
+ 
+ | 变量 | 设置什么 |
+ | --- | --- |
+-| `LORCA_HOME` | 密钥、凭据和聊天的存放位置。默认 `~/.lorca`。 |
++| `LORCA_HOME` | 密钥、凭据和聊天的存放位置。默认 `~/.dots`。 |
+ | `LORCA_PORT` | 应用连接的本地端口。默认 `4862`。 |
+ | `LORCA_RELAY_URL` | 中继地址。 |
+ | `LORCA_SHELL` | 智能体运行命令所用的 shell。默认 `/bin/bash`；在 Windows 上是 Git for Windows 的 bash。在 macOS 和 Linux 上，无论用哪个 shell，命令都会得到你的登录 shell 的 `PATH` 和环境变量。 |
+@@ -113,6 +113,6 @@ lorca service install
+ 
+ ## 文件
+ 
+-一切都在 `~/.lorca/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json` 里你自己的 MCP 服务器、`catalog.json` 里最近一次获取的模型目录、`marketplace.json` 里最近一次获取的市场、`update.json` 里最近一次的更新检查，以及每个智能体一个的工作区文件夹（里面有它的记忆）。
++一切都在 `~/.dots/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json` 里你自己的 MCP 服务器、`catalog.json` 里最近一次获取的模型目录、`marketplace.json` 里最近一次获取的市场、`update.json` 里最近一次的更新检查，以及每个智能体一个的工作区文件夹（里面有它的记忆）。
+ 
+-macOS 应用把服务的日志写到 `~/Library/Logs/Lorca/cli.log`。使用 `lorca service` 时，日志在 macOS 上是 `~/Library/Logs/Lorca/serve.log`，在 Linux 上用 `journalctl --user -u lorca` 查看，在 Windows 上是 `~/.lorca` 里的 `serve.log`。
++macOS 应用把服务的日志写到 `~/Library/Logs/dots/cli.log`。使用 `lorca service` 时，日志在 macOS 上是 `~/Library/Logs/dots/serve.log`，在 Linux 上用 `journalctl --user -u lorca` 查看，在 Windows 上是 `~/.dots` 里的 `serve.log`。
 diff --git a/web/content/docs/plugins.mdx b/web/content/docs/plugins.mdx
-index 36d0dece5c85334b5584f4b6bb3f12fbe11652e6..2b84fd5cbef4c797be2abd0ac2e9c50c6abaa980 100644
+index 36d0dec..2b84fd5 100644
 --- a/web/content/docs/plugins.mdx
 +++ b/web/content/docs/plugins.mdx
 @@ -64,7 +64,7 @@ Any [MCP](https://modelcontextprotocol.io) server can be a plugin: a command the
@@ -2609,7 +3131,7 @@ index 36d0dece5c85334b5584f4b6bb3f12fbe11652e6..2b84fd5cbef4c797be2abd0ac2e9c50c
  ```json
  {
 diff --git a/web/content/docs/plugins.zh.mdx b/web/content/docs/plugins.zh.mdx
-index bf1b134afabb685914aa4a39084d3ad287856669..81bcee5e2f0bfaaba8c247cedf748e246679b0d2 100644
+index bf1b134..81bcee5 100644
 --- a/web/content/docs/plugins.zh.mdx
 +++ b/web/content/docs/plugins.zh.mdx
 @@ -64,7 +64,7 @@ Browser、Context7、DeepWiki、Exa 和 Hugging Face 不需要账号。这里没
@@ -2621,8 +3143,34 @@ index bf1b134afabb685914aa4a39084d3ad287856669..81bcee5e2f0bfaaba8c247cedf748e24
  
  ```json
  {
+diff --git a/web/content/docs/security.mdx b/web/content/docs/security.mdx
+index c0b6f51..9890b60 100644
+--- a/web/content/docs/security.mdx
++++ b/web/content/docs/security.mdx
+@@ -47,7 +47,7 @@ A relay also lets go of an account nothing has touched for a year: no device con
+ 
+ ## On your computer
+ 
+-- Keys, credentials, and chats are files under `~/.lorca/`, readable only by your user.
++- Keys, credentials, and chats are files under `~/.dots/`, readable only by your user.
+ - Bots run as your user and shell commands retain that user's full computer access after Auto-review allows them. See [Tools](/docs/tools).
+ - Plugin secrets and sign-ins stay on the Runner where the plugin is installed.
+ - Bot memory is scrubbed of anything that looks like a credential before it is written.
+diff --git a/web/content/docs/security.zh.mdx b/web/content/docs/security.zh.mdx
+index c986447..723ad97 100644
+--- a/web/content/docs/security.zh.mdx
++++ b/web/content/docs/security.zh.mdx
+@@ -47,7 +47,7 @@ Lorca 用本地密钥对作为身份，已配对设备之间的数据同步采
+ 
+ ## 在你的电脑上
+ 
+-- 密钥、凭据和聊天是 `~/.lorca/` 下的文件，只有你的用户可读。
++- 密钥、凭据和聊天是 `~/.dots/` 下的文件，只有你的用户可读。
+ - 智能体以你的用户身份运行，shell 命令经过自动审查允许后，保留这个用户对整台电脑的访问权限。参见[工具](/zh/docs/tools)。
+ - 插件的密钥和登录状态留在安装它的那个 Runner 上。
+ - 智能体的记忆在写入之前会抹掉任何看起来像凭据的东西。
 diff --git a/web/public/install-cli.ps1 b/web/public/install-cli.ps1
-index 0e9101f39e82486484932f134283a9c329264253..876098f571f7e00e4b04cc4b27d0be57866ae413 100644
+index 0e9101f..4320706 100644
 --- a/web/public/install-cli.ps1
 +++ b/web/public/install-cli.ps1
 @@ -1,4 +1,4 @@
@@ -2670,9 +3218,12 @@ index 0e9101f39e82486484932f134283a9c329264253..876098f571f7e00e4b04cc4b27d0be57
          Unblock-File -Path $exe
          $installed = & $exe --version
          if ($LASTEXITCODE -ne 0) { throw "$exe does not start on this computer." }
-@@ -106,11 +106,11 @@
+@@ -104,13 +104,13 @@
+ 
+     Write-Host ''
      $lorcaHome = $env:LORCA_HOME
-     if (-not $lorcaHome) { $lorcaHome = Join-Path $HOME '.lorca' }
+-    if (-not $lorcaHome) { $lorcaHome = Join-Path $HOME '.lorca' }
++    if (-not $lorcaHome) { $lorcaHome = Join-Path $HOME '.dots' }
      if (Test-Path (Join-Path $lorcaHome 'machine.json')) {
 -        Write-Host 'If lorca serve is running, restart it to run the new version. From now on lorca updates itself.'
 +        Write-Host 'If dots serve is running, restart it to run the new version. From now on dots updates itself.'
@@ -2686,7 +3237,7 @@ index 0e9101f39e82486484932f134283a9c329264253..876098f571f7e00e4b04cc4b27d0be57
      Write-Host 'Docs: https://lorca.app/docs/cli'
  }
 diff --git a/web/public/install-cli.sh b/web/public/install-cli.sh
-index 86a52b24611c2db7f8f5b591dc95f5cfe5f07206..8d6d8b95d2fa8b337c416a89646f13d094846a6c 100755
+index 86a52b2..88091f3 100755
 --- a/web/public/install-cli.sh
 +++ b/web/public/install-cli.sh
 @@ -1,5 +1,5 @@
@@ -2792,11 +3343,13 @@ index 86a52b24611c2db7f8f5b591dc95f5cfe5f07206..8d6d8b95d2fa8b337c416a89646f13d0
  	case ":$PATH:" in
  		*":$install_dir:"*) ;;
  		*)
-@@ -174,11 +174,11 @@ main() {
+@@ -173,12 +173,12 @@ main() {
+ 	esac
  
  	say ""
- 	if [ -f "${LORCA_HOME:-$HOME/.lorca}/machine.json" ]; then
+-	if [ -f "${LORCA_HOME:-$HOME/.lorca}/machine.json" ]; then
 -		say "If lorca serve is running, restart it to run the new version. From now on lorca updates itself."
++	if [ -f "${LORCA_HOME:-$HOME/.dots}/machine.json" ]; then
 +		say "If dots serve is running, restart it to run the new version. From now on dots updates itself."
  	else
  		say "To make this computer a Runner, pair it with your account and start the service:"
