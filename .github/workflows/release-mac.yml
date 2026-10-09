@@ -184,11 +184,14 @@ jobs:
           codesign --verify --deep --strict "$app"
           codesign -dv "$app" 2>&1 | grep -F "Signature=adhoc"
           codesign -dv "$cli" 2>&1 | grep -F "Signature=adhoc"
-          test "$("$cli" --version)" = "dots ${{ steps.package.outputs.version }}"
+          cli_version=$(bun -e 'console.log(Bun.TOML.parse(await Bun.file("Cargo.toml").text()).workspace.package.version)')
+          test "$("$cli" --version)" = "dots $cli_version"
           export HOME="$RUNNER_TEMP/dots-smoke-home"
-          mkdir -p "$HOME"
+          mkdir -p "$HOME/.dots"
           unset LORCA_HOME
-          "$cli" mcp add-json build-smoke '{"command":"/usr/bin/true","enabled":false}'
+          printf '%s\n' '{"mcpServers":{"build-smoke":{"command":"/usr/bin/true"}}}' > "$HOME/.dots/mcp.json"
+          "$cli" mcp disable build-smoke
+          grep -F '"disabled": true' "$HOME/.dots/mcp.json"
           test -f "$HOME/.dots/mcp.json"
           grep -F build-smoke "$HOME/.dots/mcp.json"
           "$cli" mcp list | grep -F build-smoke
