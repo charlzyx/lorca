@@ -186,17 +186,25 @@ jobs:
           codesign -dv "$cli" 2>&1 | grep -F "Signature=adhoc"
           cli_version=$(bun -e 'console.log(Bun.TOML.parse(await Bun.file("Cargo.toml").text()).workspace.package.version)')
           test "$("$cli" --version)" = "dots $cli_version"
-          export HOME="$RUNNER_TEMP/dots-smoke-home"
-          mkdir -p "$HOME/.dots"
-          unset LORCA_HOME
-          printf '%s\n' '{"mcpServers":{"build-smoke":{"command":"/usr/bin/true"}}}' > "$HOME/.dots/mcp.json"
-          "$cli" mcp disable build-smoke
-          grep -F '"disabled": true' "$HOME/.dots/mcp.json"
-          test -f "$HOME/.dots/mcp.json"
-          grep -F build-smoke "$HOME/.dots/mcp.json"
-          "$cli" mcp list | grep -F build-smoke
-          "$cli" mcp remove build-smoke
-          if grep -q build-smoke "$HOME/.dots/mcp.json"; then exit 1; fi
+          for mode in default production development; do
+            export HOME="$RUNNER_TEMP/dots-smoke-$mode"
+            root="$HOME/.dots"
+            unset LORCA_HOME
+            if [[ $mode == development ]]; then root="$HOME/.dots-dev"; fi
+            if [[ $mode != default ]]; then export LORCA_HOME="$root"; fi
+            mkdir -p "$root"
+            printf '%s\n' '{"mcpServers":{"build-smoke":{"command":"/usr/bin/true"}}}' > "$root/mcp.json"
+            "$cli" mcp disable build-smoke
+            grep -F '"disabled": true' "$root/mcp.json"
+            test -f "$root/lorca.sqlite3"
+            "$cli" mcp list | grep -F build-smoke
+            "$cli" mcp remove build-smoke
+            if grep -q build-smoke "$root/mcp.json"; then exit 1; fi
+            test ! -e "$HOME/.lorca"
+            test ! -e "$HOME/.lorca-dev"
+            if [[ $mode == development ]]; then test ! -e "$HOME/.dots"; fi
+            echo "Verified $mode configuration root: $root"
+          done
       - name: Keep the build-only ZIP
         if: env.BUILD_ONLY == 'true'
         uses: actions/upload-artifact@v7
