@@ -47,6 +47,8 @@ jobs:
       RCLONE_CONFIG_R2_NO_CHECK_BUCKET: "true"
     steps:
       - uses: actions/checkout@v7
+      - name: Apply dots branding
+        run: git apply --check brand.patch && git apply brand.patch
       - uses: oven-sh/setup-bun@v2
       - id: package
         name: Name the release after package.json
@@ -159,8 +161,8 @@ jobs:
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: Lorca-${{ steps.package.outputs.version }}
-          path: dist/mac/Lorca-${{ steps.package.outputs.version }}.dmg
+          name: dots-${{ steps.package.outputs.version }}
+          path: dist/mac/dots-${{ steps.package.outputs.version }}.dmg
           if-no-files-found: error
       - name: Remove the keys and the keychain
         if: always()

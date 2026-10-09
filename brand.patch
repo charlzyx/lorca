@@ -10,7 +10,8 @@ Apply only when building dots, preferably in a separate checkout:
 
 Undo with: git apply --reverse brand.patch
 After syncing upstream, run --check again; review conflicts rather than forcing application.
-No workflow applies this patch automatically. All unpatched files follow upstream.
+The Mac release workflow applies this patch automatically before building dots.
+Other workflows do not apply it. All other unpatched files follow upstream.
 The patch changes display names, executable names/lookup, and the default MCP path
 (~/.dots/mcp.json). Explicit alternate data homes retain their own mcp.json.
 Other identity/data paths, protocols, dependencies, architectures, access policies,
@@ -71,10 +72,10 @@ index 7334e82d266e9cf9add919f52a50b975b4cdcd75..874afb615e29ebe3160ecd8ea90c2842
            $userPath = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment').GetValue('Path')
            if ($userPath -notlike "*$HOME\.local\bin*") { throw "the user PATH lacks .local\bin: $userPath" }
 diff --git a/.github/workflows/release-mac.yml b/.github/workflows/release-mac.yml
-index 614e9c3c8d49ca0d4d1bd26a8c39c1a145db7546..f41e8054db078dd8fe152986d6979e8f5cbc7a5f 100644
+index d43a242175c7cfe2e74b0574f6e5be02ab9e1d1c..6a92d5b8e0404d0767743054bd2e4658401cc8e2 100644
 --- a/.github/workflows/release-mac.yml
 +++ b/.github/workflows/release-mac.yml
-@@ -85,8 +85,8 @@ jobs:
+@@ -87,8 +87,8 @@
            done
            # Before the build, so wrong credentials or a released version cost seconds, not the build.
            published=$(rclone lsf r2:lorca-mac-releases --s3-no-check-bucket --files-only --include "*.zip")
@@ -85,17 +86,6 @@ index 614e9c3c8d49ca0d4d1bd26a8c39c1a145db7546..f41e8054db078dd8fe152986d6979e8f
              exit 1
            fi
        - uses: dtolnay/rust-toolchain@stable
-@@ -159,8 +159,8 @@ jobs:
-         if: env.PUBLISH != 'true'
-         uses: actions/upload-artifact@v7
-         with:
--          name: Lorca-${{ steps.package.outputs.version }}
--          path: dist/mac/Lorca-${{ steps.package.outputs.version }}.dmg
-+          name: dots-${{ steps.package.outputs.version }}
-+          path: dist/mac/dots-${{ steps.package.outputs.version }}.dmg
-           if-no-files-found: error
-       - name: Remove the keys and the keychain
-         if: always()
 diff --git a/crates/cli/Cargo.toml b/crates/cli/Cargo.toml
 index 17f0a924e1433d762853058d4a7820291c81d76f..7ec5c6b5c3f0a7d473fcd36e317cd8b972995ac1 100644
 --- a/crates/cli/Cargo.toml
