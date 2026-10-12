@@ -1,6 +1,6 @@
-//! Files a relay on a LAN can hand out at `/static` and `/dots-static`, with no token.
-//! The dots client fetches `/dots-static/`. Ciphertext never lives in this directory.
-//! A request whose real path leaves the directory is not a file here.
+//! Files a relay on a LAN can hand out at `/sites`, with no token. `/static` and
+//! `/dots-static` are the same directory. Ciphertext never lives here. A request
+//! whose real path leaves the directory is not a file here.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -15,8 +15,8 @@ use crate::AppState;
 
 const LIST_LIMIT: usize = 200;
 
-/// `GET /static` and `GET /dots-static`: the files under the directory, relative and
-/// sorted. 404 when unset.
+/// `GET /sites` (also `/static` and `/dots-static`): the files under the directory,
+/// relative and sorted. 404 when unset.
 pub async fn index(State(state): State<AppState>) -> Response {
     let Some(root) = state.static_dir.as_deref() else {
         return missing();
@@ -27,8 +27,8 @@ pub async fn index(State(state): State<AppState>) -> Response {
     }
 }
 
-/// `GET /static/{path}` and `GET /dots-static/{path}`: one file's bytes. 404 when the
-/// directory is unset, the name leaves it, or the path is not a file.
+/// `GET /sites/{path}` (also `/static/{path}` and `/dots-static/{path}`): one file's
+/// bytes. 404 when the directory is unset, the name leaves it, or the path is not a file.
 pub async fn file(State(state): State<AppState>, UrlPath(path): UrlPath<String>) -> Response {
     let Some(root) = state.static_dir.as_deref() else {
         return missing();
