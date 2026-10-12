@@ -246,7 +246,7 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
             app: app.clone(),
             bot: bot.clone(),
             chat_id: chat.meta.id.clone(),
-            workdir: workdir.clone(),
+            workdir: tool_dir.clone(),
             trigger_message_id: trigger.message_id.clone(),
             event: trigger.event.clone(),
         }));

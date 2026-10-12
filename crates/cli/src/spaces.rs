@@ -10,6 +10,8 @@
 //! already has. On a Runner, [`confine`] applies [`isolation`] to `read`, `write`,
 //! `edit`, `bash`, and the same path check on `grep`, `find`, and `ls`. Open,
 //! including approval `never` with no sandbox, leaves those tools unchanged.
+//! A coding agent uses the same root: its folder stays inside, and its worktree
+//! is created there.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

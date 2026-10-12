@@ -171,7 +171,11 @@ impl CodingAgentTool {
         }
         let folder = args["folder"].as_str();
         let worktree = args["worktree"].as_str().map(str::trim).filter(|name| !name.is_empty());
-        let place = workspace::prepare(&app.config.home, &self.workdir, folder, worktree, prompt).await?;
+        let boundary = match crate::spaces::isolation_for(app, &self.bot) {
+            crate::spaces::Isolation::Boundary { root, .. } => Some(root),
+            crate::spaces::Isolation::Open => None,
+        };
+        let place = workspace::prepare(&app.config.home, &self.workdir, folder, worktree, prompt, boundary.as_deref()).await?;
         // A pane's command line and screen would show its secrets.
         let host = if secrets.is_empty() { hosts::detect().await } else { None };
         let task: String = prompt.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(prompt).chars().take(TASK_CHARS).collect();
