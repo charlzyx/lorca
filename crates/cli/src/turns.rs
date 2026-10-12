@@ -3854,6 +3854,130 @@ mod tests {
         assert!(!app.message("chat", &late.id).unwrap().queued);
     }
 
+    /// A steer that lands while a tool runs holds the next tool in that step. The tool already
+    /// running finishes. The queued message is the chip on a Device, and the next provider call
+    /// reads it. Send now is the path that cuts the running tool short.
+    #[tokio::test]
+    async fn a_steer_holds_the_next_tool_and_the_following_call_reads_it() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let chef = bot("b1", "Chef");
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(chef.clone());
+            state.chats.push(chat("chat", "dm", None, &["b1"]));
+        }
+        let queue = AgentMessageQueue::new(QueueMode::All);
+        app.register_steering_queue("chat", "job", queue.clone());
+
+        struct Marks(Arc<App>);
+        #[async_trait]
+        impl Tool for Marks {
+            fn name(&self) -> &str { "mark" }
+            fn description(&self) -> &str { "marks" }
+            fn parameters(&self) -> Value { json!({ "type": "object", "properties": {} }) }
+            async fn execute(&self, _id: &str, _args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+                let steer = said("chat", Author::You, "skip the slow suite", 2.0);
+                self.0.upsert_message(steer.clone(), false);
+                assert!(steer_message(&self.0, &steer));
+                Ok(ToolResult::text("marked"))
+            }
+        }
+        struct Next(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait]
+        impl Tool for Next {
+            fn name(&self) -> &str { "next" }
+            fn description(&self) -> &str { "next" }
+            fn parameters(&self) -> Value { json!({ "type": "object", "properties": {} }) }
+            async fn execute(&self, _id: &str, _args: Value, _cancel: CancellationToken, _on_update: ToolUpdateFn) -> Result<ToolResult, ToolError> {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolResult::text("ran"))
+            }
+        }
+
+        struct BatchThenText {
+            calls: std::sync::Mutex<u32>,
+            requests: std::sync::Mutex<Vec<lorca_agent::ModelRequest>>,
+        }
+        #[async_trait]
+        impl Provider for BatchThenText {
+            fn provider_id(&self) -> &str { "scripted" }
+            fn model_id(&self) -> &str { "s1" }
+            async fn stream(&self, request: lorca_agent::ModelRequest, _cancel: CancellationToken) -> lorca_agent::AssistantEventStream {
+                self.requests.lock().unwrap().push(request);
+                let first = {
+                    let mut calls = self.calls.lock().unwrap();
+                    *calls += 1;
+                    *calls == 1
+                };
+                let events = if first {
+                    vec![
+                        AssistantEvent::ToolCallStart { index: 0, id: "c1".into(), name: "mark".into() },
+                        AssistantEvent::ToolCallDelta { index: 0, delta: "{}".into() },
+                        AssistantEvent::ToolCallEnd { index: 0 },
+                        AssistantEvent::ToolCallStart { index: 1, id: "c2".into(), name: "next".into() },
+                        AssistantEvent::ToolCallDelta { index: 1, delta: "{}".into() },
+                        AssistantEvent::ToolCallEnd { index: 1 },
+                        AssistantEvent::Done { stop_reason: StopReason::ToolUse, usage: Default::default() },
+                    ]
+                } else {
+                    vec![
+                        AssistantEvent::TextStart { index: 0 },
+                        AssistantEvent::TextDelta { index: 0, delta: "skipping it".into() },
+                        AssistantEvent::TextEnd { index: 0 },
+                        AssistantEvent::Done { stop_reason: StopReason::Stop, usage: Default::default() },
+                    ]
+                };
+                Box::pin(futures::stream::iter(std::iter::once(AssistantEvent::Start).chain(events)))
+            }
+        }
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(BatchThenText { calls: std::sync::Mutex::new(0), requests: std::sync::Mutex::new(Vec::new()) });
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(Marks(app.clone())), Arc::new(Next(ran.clone()))];
+        let hooks = Arc::new(TurnHooks {
+            app: app.clone(),
+            chat_id: "chat".into(),
+            trigger: Trigger { message_id: "m1".into(), routine: None, event: None },
+            bot: chef,
+            provider: provider.clone(),
+            window: 0,
+            settings: CompactionSettings::default(),
+            workdir: scratch.1.clone(),
+            unattended: false,
+            plugin_tools: crate::plugins::mcp::turn_catalog(app, Vec::new()),
+            steering: Some(queue),
+            cancel: CancellationToken::new(),
+        });
+        let config = AgentLoopConfig {
+            provider: provider.clone(),
+            hooks,
+            tool_execution: ToolExecutionMode::Sequential,
+            sink: None,
+            retry: None,
+            request: lorca_agent::RequestOptions::default(),
+            interrupt: None,
+            stop_grace: lorca_agent::STOP_GRACE,
+        };
+        let context = AgentContext { system_prompt: "You are Chef.".into(), messages: Vec::new(), tools, cache_points: Vec::new() };
+        let (tx, _rx) = mpsc::channel(8);
+        drop(_rx);
+        let messages = lorca_agent::agent_loop::run_agent_loop(vec![AgentMessage::user("run the checks")], context, &config, &tx, CancellationToken::new()).await;
+
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst), "the next tool in the step does not start");
+        let results: Vec<String> = messages.iter().filter_map(|message| match message {
+            AgentMessage::ToolResult(result) => Some(result.text()),
+            _ => None,
+        }).collect();
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert_eq!(results[0], "marked");
+        assert!(results[1].contains("user sent a message"), "{results:?}");
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let heard = format!("{:?}", requests[1].messages);
+        assert!(heard.contains("skip the slow suite"), "{heard}");
+    }
+
     #[tokio::test]
     async fn a_new_user_message_joins_the_active_turn_as_steering() {
         let scratch = scratch_app();
