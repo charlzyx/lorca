@@ -48,6 +48,7 @@ Plaintext lives **on Devices**:
 ```
 Identity 1──* Device
 Device   1──* Bot          (only a Runner: os is macos, linux, or windows)
+Space    1──* Bot          (optional; no space_id is solo, on that Space's Runner)
 Identity 1──* Chat
 Chat     *──* Bot          (kind dm: exactly 1 bot, fixed · kind group: 1–6 bots, members change)
 Chat     1──* Message
@@ -95,6 +96,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Bot templates](docs/architecture/templates.md) | A bot shared as a link or a file and a new bot made from one: what a template holds, redaction and flags, encrypted links and their keys, the Runner's own connections, the apps' sheets |
 | [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in when a server asks, the `mcp.*` methods and `lorca mcp`, the apps' MCP Servers section and server sheet |
 | [Bots and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, who answers, handoffs between bots, a bot's memory |
+| [Spaces](docs/architecture/spaces.md) | A Space on a Runner, `spaces.*`, `Bot.space_id`, approval Never |
 | [Routines](docs/architecture/routines.md) | A bot's scheduled tasks: schedules and their timezones, runs and read-only checks, missed runs, health and recovery, and the apps' routine sheet and service row |
 | [One-time routines, routines on events, and calendar events](docs/architecture/routine-triggers.md) | Routines that run once at a date and time, run for each event about one subject (a pull request until it merges or closes, a webhook's requests), or run around a Calendar account's events |
 | [Event triggers](docs/architecture/event-triggers.md) | Runner event subscriptions, the gateways users run to sign and seal a service's events, the encrypted inbox, ordering and recovery |

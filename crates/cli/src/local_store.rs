@@ -73,6 +73,11 @@ impl LocalStore {
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS spaces (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS chats (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL,
@@ -256,6 +261,7 @@ impl LocalStore {
         Ok(State {
             devices: load_json_table(&connection, "devices")?,
             bots: load_json_table(&connection, "bots")?,
+            spaces: load_json_table(&connection, "spaces")?,
             chats: load_json_table(&connection, "chats")?,
             sections: load_json_table(&connection, "sidebar_sections")?,
             routines: load_json_table(&connection, "routines")?,
@@ -1304,6 +1310,7 @@ impl LocalStore {
             "attention",
             "devices",
             "bots",
+            "spaces",
             "chats",
             "routines",
             "workflow_setups",
@@ -1462,6 +1469,15 @@ fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             .bots
             .iter()
             .map(|bot| (bot.id.clone(), serde_json::to_string(bot)))
+            .collect::<Vec<_>>(),
+    )?;
+    sync_json_table(
+        tx,
+        "spaces",
+        state
+            .spaces
+            .iter()
+            .map(|space| (space.id.clone(), serde_json::to_string(space)))
             .collect::<Vec<_>>(),
     )?;
     sync_chats(tx, state)?;

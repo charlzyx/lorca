@@ -1172,6 +1172,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     let kept_checks;
     let kept_workflows;
     let kept_permissions;
+    let kept_spaces;
     let kept_unpaired;
     let unpaired_grew;
     let removed_bots: Vec<String>;
@@ -1189,6 +1190,9 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         kept_workflows = crate::workflows::merge(&mut state.workflows, roster.workflows);
         kept_permissions = crate::permissions::keep_policies(&state.bots, &mut roster.bots);
+        let mut spaces = std::mem::take(&mut state.spaces);
+        kept_spaces = crate::spaces::take_roster(&mut spaces, &state.bots, roster.spaces.take(), &mut roster.bots);
+        state.spaces = spaces;
         removed_bots = state.bots.iter().filter(|bot| !roster.bots.iter().any(|kept| kept.id == bot.id)).map(|bot| bot.id.clone()).collect();
         state.bots = roster.bots;
         state.routines = roster.routines;
@@ -1228,7 +1232,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     app.shell_sessions.close_orphans(app);
     #[cfg(feature = "runner")]
     app.coding_agents.close_orphans(app);
-    app.roster_changed(normalized_descriptions || kept_checks || kept_permissions || kept_workflows || kept_unpaired);
+    app.roster_changed(normalized_descriptions || kept_checks || kept_permissions || kept_workflows || kept_spaces || kept_unpaired);
     if unpaired_grew {
         app.rotation_due.store(true, Ordering::Relaxed);
     }

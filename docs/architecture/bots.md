@@ -8,6 +8,8 @@ A bot's look is an SF Symbol (`symbol_name`) on an accent gradient (`accent`), o
 
 Creating a bot for Runner B from Device A: A writes an encrypted bot profile into the roster (paired Devices can read it) and pins B’s machine id. Bot create rejects a target whose `os` is not desktop. Turns are job envelopes addressed to B. B decrypts the job, runs the loop with the account’s provider credentials, and uploads encrypted replies.
 
+A bot may belong to a [Space](spaces.md) on that Runner. `space_id` is set with `bots.create` and `bots.update`; without one the bot is solo. `approval` is `ask` or `never`, and `never` does not require the Space's sandbox. A teammate made with `create_bot` joins the caller's Space.
+
 If B is offline, the envelope waits on the relay until B fetches it. The UI infers that from decrypted roster state. A turn for a provider the account has not connected ends with a notice in the chat that says to connect it in Settings.
 
 ## The lead bot

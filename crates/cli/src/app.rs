@@ -75,6 +75,8 @@ pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 pub struct State {
     pub devices: Vec<Device>,
     pub bots: Vec<Bot>,
+    /// Spaces in the roster. Empty when the account has none.
+    pub spaces: Vec<crate::model::Space>,
     pub chats: Vec<Chat>,
     /// The sidebar's sections, in order.
     pub sections: Vec<Section>,
@@ -776,6 +778,7 @@ impl App {
             let state = self.state.lock().unwrap();
             RosterBlob {
                 workflows: Some(state.workflows.clone()),
+                spaces: Some(state.spaces.clone()),
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
                 sections: state.sections.clone(),
@@ -1176,6 +1179,7 @@ impl App {
             providers: self.credentials.lock().unwrap().statuses(),
             models: models_out(),
             playbooks: crate::playbooks::summaries(self),
+            spaces: state.spaces.clone(),
         }
     }
 
@@ -1253,10 +1257,16 @@ impl App {
     pub fn update_bot(&self, id: &str, update: impl FnOnce(&mut Bot)) -> anyhow::Result<Bot> {
         let bot = {
             let mut state = self.state.lock().unwrap();
+            let spaces = state.spaces.clone();
             let bot = state.bots.iter_mut().find(|b| b.id == id).ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
             let old_avatar = bot.avatar.as_ref().map(|avatar| avatar.id.clone());
+            let previous = bot.clone();
             update(bot);
             bot.normalize_description();
+            if let Err(error) = crate::spaces::assignment_ok(&spaces, bot) {
+                *bot = previous;
+                anyhow::bail!(error);
+            }
             let bot = bot.clone();
             if let Some(old) = old_avatar.filter(|old| bot.avatar.as_ref().map(|avatar| &avatar.id) != Some(old)) {
                 self.drop_avatar(&mut state, &old);
@@ -1362,6 +1372,7 @@ impl App {
             if state.bots.iter().any(|b| b.id == bot.id) {
                 anyhow::bail!("Bot id already exists");
             }
+            crate::spaces::assignment_ok(&state.spaces, &bot).map_err(anyhow::Error::msg)?;
             state.bots.push(bot.clone());
         }
         Ok(bot)
@@ -2207,6 +2218,7 @@ impl App {
             "relay_error": self.relay_problem.lock().unwrap().clone(),
             "devices": self.devices_out(&state),
             "bots": state.bots,
+            "spaces": state.spaces,
             "chats": state.chats.iter().map(|chat| self.chat_for_app(chat)).collect::<Vec<_>>(),
             "sections": state.sections,
             "routines": self.routines_out(&state),
@@ -2339,6 +2351,8 @@ mod tests {
             legacy_instructions: String::new(),
             workdir: None,
             permissions: None,
+            space_id: None,
+            approval: None,
             created_at: 1.0,
         }
     }

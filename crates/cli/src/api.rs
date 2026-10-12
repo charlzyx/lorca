@@ -249,6 +249,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         method if method.starts_with("workflows.") => crate::workflows::handle(app, method, &params).await,
+        method if method.starts_with("spaces.") => crate::spaces::dispatch(app, method, &params),
 
         "bots.create" => {
             // A bot from the marketplace starts from its template's profile, with the routines
@@ -258,6 +259,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 None => None,
             };
             let from_template = |pick: fn(&crate::marketplace::BotTemplate) -> &String| template.as_ref().map(|(t, _)| pick(t).clone());
+            let (space_id, approval) = crate::spaces::profile_patch(&params)?;
             let bot = Bot {
                 id: opt_string(&params, "id").unwrap_or_default(),
                 name: opt_string(&params, "name").or_else(|| from_template(|t| &t.name)).ok_or("missing name")?,
@@ -274,6 +276,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 legacy_instructions: opt_string(&params, "instructions").unwrap_or_default(),
                 workdir: opt_string(&params, "workdir"),
                 permissions: parse_permissions(&params)?,
+                space_id: space_id.flatten(),
+                approval: approval.flatten(),
                 created_at: 0.0,
             };
             // Every bot has one direct chat; both land in a single roster change.
@@ -287,6 +291,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let id = string(&params, "id")?;
             let permissions = parse_permissions(&params)?;
             let access_changed = permissions.is_some();
+            let (space_id, approval) = crate::spaces::profile_patch(&params)?;
             // The image is copied and queued before the roster names it, so every Device can
             // fetch the blob by the time it reads the profile.
             let avatar = store_avatar(app, &params)?;
@@ -308,6 +313,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 if let Some(v) = opt_string(&params, "runner_id") { bot.runner_id = v; }
                 if let Some(v) = params["workdir"].as_str() { bot.workdir = Some(v.to_string()).filter(|w| !w.trim().is_empty()); }
                 if let Some(v) = permissions { bot.permissions = Some(v); }
+                if let Some(v) = space_id { bot.space_id = v; }
+                if let Some(v) = approval { bot.approval = v; }
                 // A draft card's Send Directly changes only this, whatever else the policy says.
                 if let Some(v) = params["drafts"].as_bool() {
                     bot.permissions.get_or_insert_with(Default::default).drafts = v;

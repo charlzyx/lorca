@@ -2813,6 +2813,7 @@ impl Tool for CreateBot {
         let runs = Runs { provider, model: None, thinking: None }.change(&self.app, None, model, thinking)?;
         let runs_with = (args["provider"].is_string() || model.is_some() || thinking.is_some()).then(|| runs.describe(&self.app));
         let (symbol_name, accent) = look_for(&name);
+        let caller = self.app.bot(&self.bot.id).ok_or("The calling bot is gone")?;
         let bot = Bot {
             id: String::new(),
             name: name.clone(),
@@ -2826,7 +2827,9 @@ impl Tool for CreateBot {
             thinking: runs.thinking,
             legacy_instructions: String::new(),
             workdir: args["workdir"].as_str().map(|w| w.trim().to_string()).filter(|w| !w.is_empty()),
-            permissions: self.app.bot(&self.bot.id).ok_or("The calling bot is gone")?.permissions,
+            permissions: caller.permissions,
+            space_id: caller.space_id,
+            approval: None,
             created_at: 0.0,
         };
         let (created, _dm) = self.app.create_bot_with_dm(bot, None).map_err(|e| ToolError(e.to_string()))?;
@@ -3685,6 +3688,8 @@ mod tests {
             legacy_instructions: String::new(),
             workdir: None,
             permissions: None,
+            space_id: None,
+            approval: None,
             created_at: 0.0,
         }
     }

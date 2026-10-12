@@ -60,6 +60,7 @@ pub mod routine_health;
 pub mod routine_triggers;
 pub mod runtime;
 pub mod schedule;
+pub mod spaces;
 #[cfg(feature = "runner")]
 pub mod secrets;
 #[cfg(feature = "runner")]

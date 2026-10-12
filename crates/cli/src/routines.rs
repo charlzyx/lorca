@@ -1050,6 +1050,8 @@ mod tests {
                 legacy_instructions: String::new(),
                 workdir: None,
                 permissions: None,
+                space_id: None,
+                approval: None,
                 created_at: 0.0,
             });
         }

@@ -149,6 +149,57 @@ pub struct Bot {
     /// existing access; an explicit policy can only be changed through the user's API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<crate::permissions::BotPermissions>,
+    /// The Space this bot belongs to. Absent means a solo bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_id: Option<String>,
+    /// `ask` (the default when absent) or `never`. `never` does not require a Space
+    /// sandbox, for a member or a solo bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<Approval>,
+    pub created_at: f64,
+}
+
+/// How a bot treats an action that would otherwise wait for approval.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Approval {
+    /// Ask, the way a bot does when the field is absent.
+    #[default]
+    Ask,
+    /// Do not ask. Valid with or without a Space, and with or without that Space's sandbox.
+    Never,
+}
+
+impl Approval {
+    pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        match value.as_str() {
+            Some("ask") => Ok(Self::Ask),
+            Some("never") => Ok(Self::Never),
+            _ => Err("approval is ask or never".into()),
+        }
+    }
+}
+
+/// A file boundary for one Space on its Runner. [`crate::spaces::isolation`] reports
+/// the root; file tools still use the bot's working directory.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Sandbox {
+    /// An absolute path on the Runner. Absent means `<LORCA_HOME>/spaces/<space id>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+}
+
+/// A Space in the roster: bots on one Runner that share a name and, optionally, a file boundary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Space {
+    pub id: String,
+    pub name: String,
+    /// The Runner whose bots may join. A Space does not move.
+    pub runner_id: String,
+    /// Set when this Space confines files to a boundary. Off, members use the Runner
+    /// as a solo bot does. Approval `never` does not require it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<Sandbox>,
     pub created_at: f64,
 }
 
@@ -218,6 +269,11 @@ impl Bot {
         }
         self.legacy_instructions.clear();
         true
+    }
+
+    /// `ask` when the profile leaves approval unset.
+    pub fn approval_mode(&self) -> Approval {
+        self.approval.unwrap_or_default()
     }
 
     /// Where this bot's tools run, keyed by id so renames never move files. Created on first use.
@@ -1026,7 +1082,7 @@ pub struct CheckReport {
 
 // MARK: - Blob payloads
 
-/// `kind = roster`: bots, chat metadata, routines, and the names the account gives its Devices.
+/// `kind = roster`: bots, chat metadata, routines, Spaces, and the names the account gives its Devices.
 /// Latest wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RosterBlob {
@@ -1034,6 +1090,11 @@ pub struct RosterBlob {
     /// workflows leaves the field out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflows: Option<Vec<crate::workflows::Setup>>,
+    /// Spaces. A Device that knows them always sends the array, empty included. A roster
+    /// that leaves the field out was written without Spaces (`spaces::take_roster` keeps
+    /// the ones this Device has).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spaces: Option<Vec<Space>>,
     pub bots: Vec<Bot>,
     pub chats: Vec<ChatMeta>,
     /// The sidebar's sections, in order.

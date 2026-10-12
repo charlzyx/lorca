@@ -608,6 +608,8 @@ fn materialize(app: &Arc<App>, setup: &mut Setup, answers: BTreeMap<String, Stri
                 legacy_instructions: String::new(),
                 workdir: None,
                 permissions: None,
+                space_id: None,
+                approval: None,
                 created_at: 0.0,
             };
             app.create_bot_with_dm(bot, Some(stable_id("chat-workflow", &[&stable]))).map_err(|e| e.to_string())?.0
@@ -1043,6 +1045,8 @@ mod tests {
             legacy_instructions: String::new(),
             workdir: None,
             permissions: None,
+            space_id: None,
+            approval: None,
             created_at: 1.0,
         };
         fixture.app.create_bot_with_dm(bot.clone(), None).unwrap();
