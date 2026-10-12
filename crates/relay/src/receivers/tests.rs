@@ -86,6 +86,7 @@ async fn relay(github: Option<&str>) -> Relay {
         pusher: Arc::new(crate::push::Pusher::new(None, None)),
         pushes: tokio_util::task::TaskTracker::new(),
         receivers: Arc::new(receivers),
+        static_dir: None,
     };
     let app = crate::routes::router(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
