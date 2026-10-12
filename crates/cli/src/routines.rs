@@ -885,8 +885,19 @@ async fn run_budgeted_check(app: &Arc<App>, routine: &Routine, cancel: &Cancella
         return crate::routine_triggers::read_calendar(app, routine, &catalog, &runner, cancel).await;
     }
     let Some(code) = routine.check.as_deref() else { return CheckRun { found: None, error: None, result: String::new() } };
-    let files: Vec<Arc<dyn Tool>> =
-        lorca_agent::tools::coding_tools(bot.working_directory(&app.config.home)).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect();
+    let workdir = bot.working_directory(&app.config.home);
+    let space = crate::spaces::isolation_for(app, &bot);
+    let tool_dir = crate::spaces::tool_directory(&space, &workdir);
+    if tool_dir != workdir {
+        if let Err(error) = std::fs::create_dir_all(&tool_dir) {
+            return failed(format!("The Space sandbox could not be created: {error}"));
+        }
+    }
+    let files: Vec<Arc<dyn Tool>> = crate::spaces::confine(
+        &space,
+        &tool_dir,
+        lorca_agent::tools::coding_tools(&tool_dir).into_iter().filter(|tool| CHECK_FILE_TOOLS.contains(&tool.name())).collect(),
+    );
     let catalog = crate::plugins::mcp::bot_catalog(app, &bot, &dm.meta.id, files);
     let store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: dm.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =

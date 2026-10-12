@@ -339,6 +339,100 @@ fn paths_inside(word: &str, workdir: &Path, home: Option<&Path>, moves: bool, in
         })
 }
 
+/// Whether a shell command stays inside a Space sandbox root. Paths are found with the same
+/// parser as Auto-review. A command that parser cannot prove — a substitution, a variable, a
+/// glob, or a bare `cd` — does not stay inside. Review policy (the `lorca` binary, privilege
+/// elevation, sending data out) is not applied: this is only the file boundary.
+pub(crate) fn command_paths_inside(command: &str, workdir: &Path, root: &Path) -> bool {
+    if command.trim().is_empty() || !crate::spaces::allow_path(root, workdir) {
+        return false;
+    }
+    let (stages, dynamic) = parsed_shell(command);
+    if dynamic {
+        return false;
+    }
+    let home = dirs::home_dir();
+    let moves = stages.iter().any(|stage| command_and_args(stage).is_some_and(|(name, _)| matches!(name.as_str(), "cd" | "pushd" | "popd")));
+    let inside = |path: &Path| crate::spaces::allow_path(root, path);
+    stages.iter().all(|stage| {
+        if let Some((name, args)) = command_and_args(stage) {
+            let bare_move = matches!(name.as_str(), "cd" | "pushd") && !matches!(args.as_slice(), [dir] if dir != "-");
+            if bare_move || name == "popd" {
+                return false;
+            }
+        }
+        shell_words(stage).iter().all(|word| paths_inside(word, workdir, home.as_deref(), moves, &inside) && shell_word_stays(word, workdir, root))
+    })
+}
+
+/// Drive-letter paths, globs, brace-wrapped paths, and relative paths that already exist. A
+/// relative word is a path when it names something on disk, so a symlink called `escape` cannot
+/// stand in for a file outside the root. URLs stay with [`paths_inside`], which strips them.
+fn shell_word_stays(word: &str, workdir: &Path, root: &Path) -> bool {
+    if !drive_paths_inside(word, root) {
+        return false;
+    }
+    if word.contains("://") {
+        return true;
+    }
+    if shell_pieces(word).any(|piece| piece.contains(['*', '?', '['])) {
+        return false;
+    }
+    shell_pieces(word).all(|piece| shell_piece_stays(piece, workdir, root))
+}
+
+fn shell_pieces(word: &str) -> impl Iterator<Item = &str> {
+    word.split(|c: char| c.is_whitespace() || matches!(c, '=' | ',' | ':' | '<' | '>' | '(' | ')' | '{' | '}' | '\'' | '"' | ';' | '|' | '&' | '@'))
+        .filter(|piece| !piece.is_empty())
+}
+
+fn shell_piece_stays(piece: &str, workdir: &Path, root: &Path) -> bool {
+    let piece = match piece.strip_prefix('-') {
+        Some(flag) => match flag.find(['/', '~', '\\']) {
+            Some(at) => &flag[at..],
+            None => return true,
+        },
+        None => piece,
+    };
+    if piece.starts_with('~') || piece.contains('$') {
+        return true;
+    }
+    let unified = piece.replace('\\', "/");
+    if unified.split('/').any(|part| part == "..") {
+        return crate::spaces::allow_path(root, &workdir.join(piece));
+    }
+    if piece.starts_with('/') {
+        return crate::spaces::allow_path(root, Path::new(piece));
+    }
+    let joined = workdir.join(piece);
+    if joined.exists() {
+        return crate::spaces::allow_path(root, &joined);
+    }
+    true
+}
+
+fn drive_paths_inside(word: &str, root: &Path) -> bool {
+    let chars: Vec<char> = word.chars().collect();
+    let mut i = 0;
+    while i + 2 < chars.len() {
+        let boundary = i == 0 || !chars[i - 1].is_ascii_alphanumeric();
+        if boundary && chars[i].is_ascii_alphabetic() && chars[i + 1] == ':' && matches!(chars[i + 2], '\\' | '/') {
+            let start = i;
+            i += 3;
+            while i < chars.len() && !chars[i].is_whitespace() && !matches!(chars[i], '\'' | '"' | ';' | '|' | '&' | '<' | '>' | '(' | ')') {
+                i += 1;
+            }
+            let path: String = chars[start..i].iter().collect();
+            if !crate::spaces::allow_path(root, Path::new(&path)) {
+                return false;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    true
+}
+
 /// `path` with `.` and `..` resolved by its text alone.
 fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();

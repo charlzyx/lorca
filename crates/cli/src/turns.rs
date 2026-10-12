@@ -159,8 +159,15 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
     let _typing = event.as_ref().filter(|event| event.message_id.is_some()).and_then(|_| crate::channels::typing(app, &chat, &job.id, &cancel));
 
     let workdir = bot.working_directory(&app.config.home);
+    let space = crate::spaces::isolation_for(app, &bot);
+    let tool_dir = crate::spaces::tool_directory(&space, &workdir);
     if let Err(error) = std::fs::create_dir_all(&workdir) {
         tracing::warn!(%error, dir = %workdir.display(), "creating the bot's working directory");
+    }
+    if tool_dir != workdir {
+        if let Err(error) = std::fs::create_dir_all(&tool_dir) {
+            tracing::warn!(%error, dir = %tool_dir.display(), "creating the Space sandbox");
+        }
     }
     // Attachments another Device sent are fetched before the transcript names them.
     let recent_messages = app.store.page(&chat.meta.id, None, MAX_CONTEXT_MESSAGES).map(|(messages, _)| messages).unwrap_or_default();
@@ -258,13 +265,14 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
     // wait for input.
     let sessions = Arc::new(crate::shell::TurnSessions::new(app, &chat.meta.id, &bot.id));
     let secrets = Arc::new(crate::secrets::CommandSecrets { app: app.clone(), bot_id: bot.id.clone() });
-    tools.extend(lorca_agent::tools::coding_tools_with_sessions(workdir.clone(), sessions, crate::shell::bot_shell_extras(app), Some(secrets)));
+    tools.extend(lorca_agent::tools::coding_tools_with_sessions(tool_dir.clone(), sessions, crate::shell::bot_shell_extras(app), Some(secrets)));
     let mut tools = crate::permissions::guarded::tools(app, &bot, &chat.meta.id, tools);
+    tools = crate::spaces::confine(&space, &tool_dir, tools);
     // Plugin tools are called from codemode scripts, with the bot's own file and memory tools
     // and a bash of the scripts' own, on pipes. The tool list stays the same for the whole
     // turn, and so does its prompt cache.
     let mut scriptable: Vec<Arc<dyn Tool>> = tools.iter().filter(|tool| SCRIPTABLE_TOOLS.contains(&tool.name())).cloned().collect();
-    scriptable.extend(crate::permissions::guarded::tools(app, &bot, &chat.meta.id, vec![crate::shell::script_bash(app, &bot.id, &workdir)]));
+    scriptable.extend(crate::permissions::guarded::tools(app, &bot, &chat.meta.id, crate::spaces::confine(&space, &tool_dir, vec![crate::shell::script_bash(app, &bot.id, &tool_dir)])));
     let plugin_tools = crate::plugins::mcp::bot_catalog(app, &bot, &chat.meta.id, scriptable);
     let script_store = Arc::new(crate::scripts::ScriptStore { app: app.clone(), chat_id: chat.meta.id.clone(), bot_id: bot.id.clone() });
     let functions: Vec<Arc<dyn HostFunction>> =

@@ -7,8 +7,9 @@
 //!
 //! The relay sees Spaces only inside the encrypted roster. A build that does not
 //! know the field leaves it out, and [`take_roster`] keeps the Spaces this Device
-//! already has. File tools do not read [`isolation`] yet: it is the Runner hook
-//! the boundary is enforced through.
+//! already has. On a Runner, [`confine`] applies [`isolation`] to `read`, `write`,
+//! `edit`, `bash`, and the same path check on `grep`, `find`, and `ls`. Open,
+//! including approval `never` with no sandbox, leaves those tools unchanged.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -337,6 +338,68 @@ fn expand_path(path: &str) -> PathBuf {
     }
 }
 
+/// The directory file tools use. Open keeps `workdir`. A boundary keeps it when
+/// it already lies inside the sandbox root, and otherwise uses the root.
+pub fn tool_directory(isolation: &Isolation, workdir: &Path) -> PathBuf {
+    match isolation {
+        Isolation::Open => workdir.to_path_buf(),
+        Isolation::Boundary { root, .. } => {
+            if allow_path(root, workdir) {
+                workdir.to_path_buf()
+            } else {
+                root.clone()
+            }
+        }
+    }
+}
+
+/// Whether `path` stays inside `root` once `.`, `..`, and existing symlinks are
+/// resolved. A missing path uses its nearest existing ancestor, then the rest.
+pub fn allow_path(root: &Path, path: &Path) -> bool {
+    realized(path).starts_with(realized(root))
+}
+
+fn realized(path: &Path) -> PathBuf {
+    let lexical = lexical_path(path);
+    if let Ok(real) = std::fs::canonicalize(&lexical) {
+        return real;
+    }
+    let mut pending = Vec::new();
+    let mut cursor = lexical.clone();
+    loop {
+        if cursor.exists() {
+            if let Ok(real) = std::fs::canonicalize(&cursor) {
+                let mut out = real;
+                for part in pending.iter().rev() {
+                    out.push(part);
+                }
+                return lexical_path(&out);
+            }
+        }
+        let Some(name) = cursor.file_name().map(|name| name.to_os_string()) else {
+            return lexical;
+        };
+        pending.push(name);
+        if !cursor.pop() {
+            return lexical;
+        }
+    }
+}
+
+fn lexical_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// `space_id` and `approval` from a `bots.create` or `bots.update` params object.
 /// `None` leaves the field alone. `Some(None)` clears it.
 pub fn profile_patch(
@@ -355,6 +418,117 @@ pub fn profile_patch(
         Some(value) => Some(Some(Approval::parse(value)?)),
     };
     Ok((space_id, approval))
+}
+
+/// File tools a boundary wraps. `grep`, `find`, and `ls` take the same `path` as `read`.
+/// `bash_input` can type another command into a shell that is still running.
+#[cfg(feature = "runner")]
+const BOUNDARY_TOOLS: &[&str] = &["read", "write", "edit", "bash", "bash_input", "grep", "find", "ls"];
+
+/// Wraps file tools so a [`Isolation::Boundary`] refuses paths outside its root. [`Isolation::Open`]
+/// returns `tools` unchanged, which is a solo bot and a Space with no sandbox, including when
+/// approval is `never`. The wrapper does not read approval.
+#[cfg(feature = "runner")]
+pub(crate) fn confine(isolation: &Isolation, cwd: &Path, tools: Vec<Arc<dyn lorca_agent::Tool>>) -> Vec<Arc<dyn lorca_agent::Tool>> {
+    let Isolation::Boundary { root, .. } = isolation else {
+        return tools;
+    };
+    let root = root.clone();
+    let cwd = cwd.to_path_buf();
+    tools
+        .into_iter()
+        .map(|tool| {
+            if BOUNDARY_TOOLS.contains(&tool.name()) {
+                Arc::new(BoundaryTool { root: root.clone(), cwd: cwd.clone(), tool }) as Arc<dyn lorca_agent::Tool>
+            } else {
+                tool
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "runner")]
+struct BoundaryTool {
+    root: PathBuf,
+    cwd: PathBuf,
+    tool: Arc<dyn lorca_agent::Tool>,
+}
+
+#[cfg(feature = "runner")]
+impl BoundaryTool {
+    fn check(&self, args: &Value) -> Result<(), lorca_agent::ToolError> {
+        let name = self.tool.name();
+        if name == "bash" || name == "bash_input" {
+            let key = if name == "bash" { "command" } else { "text" };
+            let Some(command) = args.get(key).and_then(|value| value.as_str()) else {
+                return Ok(());
+            };
+            if command.trim().is_empty() {
+                return Ok(());
+            }
+            if !crate::local_review::command_paths_inside(command, &self.cwd, &self.root) {
+                return Err(lorca_agent::ToolError(format!("The command is outside this Space's sandbox ({})", self.root.display())));
+            }
+            return Ok(());
+        }
+        let path = match args.get("path").and_then(|value| value.as_str()) {
+            Some(path) => path,
+            None if matches!(name, "grep" | "find" | "ls") => ".",
+            None => return Ok(()),
+        };
+        let resolved = lorca_agent::tools::resolve_to_cwd(path, &self.cwd);
+        if !allow_path(&self.root, &resolved) {
+            return Err(lorca_agent::ToolError(format!("{path} is outside this Space's sandbox ({})", self.root.display())));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "runner")]
+#[async_trait::async_trait]
+impl lorca_agent::Tool for BoundaryTool {
+    fn name(&self) -> &str {
+        self.tool.name()
+    }
+    fn label(&self) -> &str {
+        self.tool.label()
+    }
+    fn description(&self) -> &str {
+        self.tool.description()
+    }
+    fn parameters(&self) -> Value {
+        self.tool.parameters()
+    }
+    fn output_schema(&self) -> Option<Value> {
+        self.tool.output_schema()
+    }
+    fn execution_mode(&self) -> Option<lorca_agent::ToolExecutionMode> {
+        self.tool.execution_mode()
+    }
+    fn prepare_arguments(&self, args: Value) -> Value {
+        self.tool.prepare_arguments(args)
+    }
+    async fn execute(
+        &self,
+        id: &str,
+        args: Value,
+        cancel: tokio_util::sync::CancellationToken,
+        update: lorca_agent::ToolUpdateFn,
+    ) -> Result<lorca_agent::ToolResult, lorca_agent::ToolError> {
+        self.check(&args)?;
+        self.tool.execute(id, args, cancel, update).await
+    }
+    async fn execute_with(
+        &self,
+        id: &str,
+        args: Value,
+        cancel: tokio_util::sync::CancellationToken,
+        update: lorca_agent::ToolUpdateFn,
+        runner: &dyn lorca_agent::ToolRunner,
+    ) -> Result<lorca_agent::ToolResult, lorca_agent::ToolError> {
+        self.check(&args)?;
+        self.tool.execute_with(id, args, cancel, update, runner).await
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +640,24 @@ mod tests {
         );
         space.sandbox = None;
         assert_eq!(isolation(home, &[space], &member), Isolation::Open);
+    }
+
+    #[test]
+    fn tool_directory_keeps_an_open_workdir_and_one_already_inside() {
+        let base = std::env::temp_dir().join(format!("lorca-space-dir-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let inside = root.join("work");
+        let outside = base.join("other");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let boundary = Isolation::Boundary {
+            space_id: "s".into(),
+            root: root.clone(),
+        };
+        assert_eq!(tool_directory(&Isolation::Open, &outside), outside);
+        assert_eq!(tool_directory(&boundary, &inside), inside);
+        assert_eq!(tool_directory(&boundary, &outside), root);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -696,6 +888,119 @@ mod tests {
             .spaces
             .iter()
             .all(|space| space.id != "space-lab"));
+    }
+
+    /// Approval `never` does not require a sandbox, and it does not confine tools.
+    /// A sandbox still confines, whether or not approval is `never`.
+    #[cfg(feature = "runner")]
+    #[tokio::test]
+    async fn a_boundary_confines_file_tools_and_never_stays_open() {
+        let base = std::env::temp_dir().join(format!("lorca-space-files-{}", uuid::Uuid::new_v4()));
+        let root = base.join("root");
+        let cwd = root.join("in");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("note.txt"), "inside").unwrap();
+        let secret = base.join("secret.txt");
+        std::fs::write(&secret, "sandbox-secret-token").unwrap();
+        let secret_text = secret.display().to_string();
+        assert!(!approval_requires_sandbox(Approval::Never, None));
+        assert!(!approval_requires_sandbox(
+            Approval::Never,
+            Some(&Sandbox {
+                root: Some(secret_text.clone()),
+            })
+        ));
+
+        let boundary = Isolation::Boundary {
+            space_id: "space-lab".into(),
+            root: root.clone(),
+        };
+        let tools = confine(&boundary, &cwd, lorca_agent::tools::coding_tools(&cwd));
+        let inside = call(&tools, "read", json!({"path": "note.txt"})).await.unwrap();
+        assert!(shown(&inside).contains("inside"), "{}", shown(&inside));
+        let climbed = call(&tools, "read", json!({"path": "../../secret.txt"}))
+            .await
+            .unwrap_err();
+        assert!(climbed.0.contains("outside"), "{}", climbed.0);
+        assert!(!climbed.0.contains("sandbox-secret-token"));
+        let absolute = call(&tools, "read", json!({"path": &secret_text})).await.unwrap_err();
+        assert!(absolute.0.contains("outside"), "{}", absolute.0);
+        let listed = call(&tools, "ls", json!({"path": ".."})).await.unwrap();
+        assert!(shown(&listed).contains("in"), "{}", shown(&listed));
+        let above = call(&tools, "ls", json!({"path": "../.."})).await.unwrap_err();
+        assert!(above.0.contains("outside"), "{}", above.0);
+        call(&tools, "write", json!({"path": "made.txt", "content": "ok"}))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(cwd.join("made.txt")).unwrap(), "ok");
+        let blocked_write = call(
+            &tools,
+            "write",
+            json!({"path": &secret_text, "content": "no"}),
+        )
+        .await
+        .unwrap_err();
+        assert!(blocked_write.0.contains("outside"), "{}", blocked_write.0);
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "sandbox-secret-token");
+        let blocked_edit = call(
+            &tools,
+            "edit",
+            json!({"path": &secret_text, "edits": [{"oldText": "a", "newText": "b"}]}),
+        )
+        .await
+        .unwrap_err();
+        assert!(blocked_edit.0.contains("outside"), "{}", blocked_edit.0);
+
+        let echoed = call(&tools, "bash", json!({"command": "echo hi"})).await.unwrap();
+        assert!(shown(&echoed).contains("hi"), "{}", shown(&echoed));
+        let marker = cwd.join("marker.txt");
+        let leaked = format!("echo pwned > {} && cat {}", marker.display(), secret.display());
+        let refused = call(&tools, "bash", json!({"command": leaked})).await.unwrap_err();
+        assert!(refused.0.contains("outside"), "{}", refused.0);
+        assert!(!refused.0.contains("sandbox-secret-token"));
+        assert!(!marker.exists(), "a refused command does not run");
+        assert!(!crate::local_review::command_paths_inside("cd", &cwd, &root));
+        assert!(!crate::local_review::command_paths_inside("echo $(cat note.txt)", &cwd, &root));
+        assert!(!crate::local_review::command_paths_inside("echo *", &cwd, &root));
+        assert!(!crate::local_review::command_paths_inside("cat ../../secret.txt", &cwd, &root));
+        assert!(crate::local_review::command_paths_inside("echo hi", &cwd, &root));
+        assert!(crate::local_review::command_paths_inside("curl https://example.com", &cwd, &root));
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, root.join("escape")).unwrap();
+            let via_link = call(&tools, "read", json!({"path": "../escape"}))
+                .await
+                .unwrap_err();
+            assert!(via_link.0.contains("outside"), "{}", via_link.0);
+            assert!(!crate::local_review::command_paths_inside("cat ../escape", &cwd, &root));
+        }
+
+        let open = confine(&Isolation::Open, &base, lorca_agent::tools::coding_tools(&base));
+        let seen = call(&open, "read", json!({"path": &secret_text})).await.unwrap();
+        assert!(shown(&seen).contains("sandbox-secret-token"), "{}", shown(&seen));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(feature = "runner")]
+    async fn call(
+        tools: &[Arc<dyn lorca_agent::Tool>],
+        name: &str,
+        args: Value,
+    ) -> Result<lorca_agent::ToolResult, lorca_agent::ToolError> {
+        let tool = tools.iter().find(|tool| tool.name() == name).unwrap();
+        tool.execute(
+            "t",
+            args,
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(|_| {}),
+        )
+        .await
+    }
+
+    #[cfg(feature = "runner")]
+    fn shown(result: &lorca_agent::ToolResult) -> String {
+        result.content.iter().filter_map(|part| part.as_text()).collect()
     }
 
     fn roster_ciphertext(app: &App) -> Vec<u8> {
