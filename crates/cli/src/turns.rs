@@ -220,7 +220,7 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
         Arc::new(crate::feedback::FeedbackTool { app: app.clone(), bot_id: bot.id.clone() }),
         Arc::new(crate::review_execution::StageReview { app: app.clone(), bot: bot.clone(), chat_id: chat.meta.id.clone(), trigger: trigger.clone() }),
         Arc::new(crate::tasks::TasksTool { app: app.clone(), bot_id: bot.id.clone(), chat_id: chat.meta.id.clone(), job_id: job.id.clone() }),
-        Arc::new(crate::outputs::PublishOutputTool { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), workdir: workdir.clone() }),
+        Arc::new(crate::outputs::PublishOutputTool { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), workdir: tool_dir.clone() }),
         Arc::new(SearchPlugins { app: app.clone() }),
         Arc::new(InstallPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone(), unattended }),
         Arc::new(ConnectPlugin { app: app.clone(), chat_id: chat.meta.id.clone(), bot: bot.clone() }),
@@ -681,6 +681,21 @@ pub(crate) fn steer_message(app: &App, message: &Message) -> bool {
     true
 }
 
+/// Whether a tool that has not started should wait for a queued steer. A call inside a tool
+/// already running (`nested`) is not a new boundary. The queue stays put: the loop drains it
+/// after this batch, before the next provider call. Empty when nothing is queued.
+pub(crate) fn steer_at_tool_boundary(steering: Option<&AgentMessageQueue>, nested: bool) -> Option<BeforeToolCallResult> {
+    if nested || steering.is_none_or(|queue| queue.is_empty()) {
+        return None;
+    }
+    Some(BeforeToolCallResult {
+        block: true,
+        reason: Some("Not run: the user sent a message. Read it before using more tools.".into()),
+        args: None,
+        terminate: false,
+    })
+}
+
 async fn materialize_steering_messages(
     app: &Arc<App>,
     bot: &Bot,
@@ -761,6 +776,12 @@ impl LoopHooks for TurnHooks {
     async fn before_tool_call(&self, ctx: BeforeToolCallContext<'_>) -> Option<BeforeToolCallResult> {
         if let Some(refused) = over_limits() {
             return Some(refused);
+        }
+        // A message queued while this step runs holds the next tool that has not started.
+        // The tool already inside a call finishes; the loop reads the queue before the next
+        // provider call. Send now is the separate path that cuts the step short.
+        if let Some(held) = steer_at_tool_boundary(self.steering.as_ref(), ctx.parent.is_some()) {
+            return Some(held);
         }
         if self.unattended && self.trigger.routine.as_ref().is_some_and(|r| r.feedback_authorization_prompt.is_some())
             && crate::feedback::changes_controls(&ctx.tool_call.name, &ctx.tool_call.arguments) {
@@ -3812,6 +3833,10 @@ mod tests {
 
         assert!(steer_message(app, &steer));
         assert!(app.message("chat", &steer.id).unwrap().queued, "held for the next step");
+        let held = steer_at_tool_boundary(Some(&queue), false).unwrap();
+        assert!(held.block && held.reason.unwrap().contains("user sent a message"));
+        assert!(steer_at_tool_boundary(Some(&queue), true).is_none(), "a tool already running finishes");
+        assert!(!queue.is_empty(), "the loop still reads the message before the next provider call");
         assert_eq!(send_now(app, "chat", &steer.id), Ok(true));
         // The loop reads it: the promotion lets go of it.
         assert!(app.claim_steering_message("chat", &steer.id));

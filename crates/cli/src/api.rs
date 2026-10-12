@@ -396,7 +396,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let chat_id = string(&params, "chat_id")?;
             let bot_id = string(&params, "bot_id")?;
             let bot = app.bot(&bot_id).ok_or("Unknown producing bot")?;
-            let workdir = bot.working_directory(&app.config.home);
+            let space = crate::spaces::isolation_for(app, &bot);
+            let workdir = crate::spaces::tool_directory(&space, &bot.working_directory(&app.config.home));
             let mut payload = params;
             payload.as_object_mut().ok_or("Output parameters must be an object")?.remove("chat_id");
             payload.as_object_mut().unwrap().remove("bot_id");
