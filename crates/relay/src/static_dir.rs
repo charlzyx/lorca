@@ -1,6 +1,6 @@
-//! Files a relay on a LAN can hand out at `/static`, with no token. Ciphertext never
-//! lives in this directory. A request whose real path leaves the directory is not a file
-//! here.
+//! Files a relay on a LAN can hand out at `/static` and `/dots-static`, with no token.
+//! The dots client fetches `/dots-static/`. Ciphertext never lives in this directory.
+//! A request whose real path leaves the directory is not a file here.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -15,36 +15,48 @@ use crate::AppState;
 
 const LIST_LIMIT: usize = 200;
 
-/// `GET /static`: the files under the directory, relative and sorted. 404 when unset.
+/// `GET /static` and `GET /dots-static`: the files under the directory, relative and
+/// sorted. 404 when unset.
 pub async fn index(State(state): State<AppState>) -> Response {
     let Some(root) = state.static_dir.as_deref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return missing();
     };
     match list(root) {
-        Ok(files) => Json(json!({ "files": files })).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
+        Ok(files) => cors(Json(json!({ "files": files })).into_response()),
+        Err(_) => missing(),
     }
 }
 
-/// `GET /static/{path}`: one file's bytes. 404 when the directory is unset, the name
-/// leaves it, or the path is not a file.
+/// `GET /static/{path}` and `GET /dots-static/{path}`: one file's bytes. 404 when the
+/// directory is unset, the name leaves it, or the path is not a file.
 pub async fn file(State(state): State<AppState>, UrlPath(path): UrlPath<String>) -> Response {
     let Some(root) = state.static_dir.as_deref() else {
-        return StatusCode::NOT_FOUND.into_response();
+        return missing();
     };
     let Some(file) = resolve(root, &path) else {
-        return StatusCode::NOT_FOUND.into_response();
+        return missing();
     };
     let bytes = match tokio::fs::read(&file).await {
         Ok(bytes) => bytes,
-        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return missing(),
     };
     let mime = mime_of(&file);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    cors(
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, mime)
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    )
+}
+
+fn missing() -> Response {
+    cors(StatusCode::NOT_FOUND.into_response())
+}
+
+fn cors(mut response: Response) -> Response {
+    response.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static("*"));
+    response
 }
 
 /// The file `request` names inside `root`, after `..` and symlinks resolve. `None` when
@@ -109,7 +121,14 @@ fn push_relative(root: &Path, path: &Path, files: &mut Vec<String>) {
 
 fn mime_of(path: &Path) -> &'static str {
     match path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_ascii_lowercase().as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
         "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "wasm" => "application/wasm",
         "txt" | "md" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }

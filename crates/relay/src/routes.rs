@@ -133,6 +133,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pair/{nonce}/reply", get(get_pair_reply))
         .route("/static", get(crate::static_dir::index))
         .route("/static/{*path}", get(crate::static_dir::file))
+        .route("/dots-static", get(crate::static_dir::index))
+        .route("/dots-static/", get(crate::static_dir::index))
+        .route("/dots-static/{*path}", get(crate::static_dir::file))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::limit::per_ip));
     Router::new()
         .route("/", get(root))

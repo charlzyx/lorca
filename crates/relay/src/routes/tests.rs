@@ -70,6 +70,10 @@ impl Relay {
     }
 
     async fn start_with(quota_bytes: u64, pusher: crate::push::Pusher) -> Self {
+        Self::open(quota_bytes, pusher, None).await
+    }
+
+    async fn open(quota_bytes: u64, pusher: crate::push::Pusher, static_dir: Option<std::path::PathBuf>) -> Self {
         let home = std::env::temp_dir().join(format!("lorca-binary-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let local = Arc::new(db::Local::default());
@@ -93,7 +97,7 @@ impl Relay {
             pusher: Arc::new(pusher),
             pushes: tokio_util::task::TaskTracker::new(),
             receivers: Arc::new(crate::receivers::Receivers::default()),
-            static_dir: None,
+            static_dir,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -662,4 +666,37 @@ async fn project_context_sync_is_encrypted_separate_from_transcript_paging_and_g
     assert!(relay.client.list_blobs(&relay.url, &relay.token, 0, "project_context").await.unwrap().0.is_empty());
     let late = OutboxItem { id: "late-context".into(), kind: "project_context".into(), recipient: None, ciphertext, slot: None, group: Some("project-a".into()) };
     assert_eq!(relay.client.put_blob(&relay.url, &relay.token, late).await.unwrap_err().status, Some(409));
+}
+
+/// The dots client fetches `/dots-static/`. The same directory is also at `/static`.
+/// Unset, both answer 404. A path that leaves the directory is not a file.
+#[tokio::test]
+async fn dots_static_serves_the_client_path() {
+    let unset = Relay::start(0).await;
+    let missing = unset.http.get(format!("{}/dots-static/app/index.html", unset.url)).send().await.unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let root = std::env::temp_dir().join(format!("lorca-dots-static-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(root.join("app/index.html"), b"<p>dots</p>").unwrap();
+    let relay = Relay::open(0, crate::push::Pusher::new(None, None), Some(root.clone())).await;
+
+    let index = relay.http.get(format!("{}/dots-static/", relay.url)).send().await.unwrap();
+    assert_eq!(index.status(), StatusCode::OK);
+    let listed = index.text().await.unwrap();
+    assert!(listed.contains("app/index.html"), "{listed}");
+
+    let file = relay.http.get(format!("{}/dots-static/app/index.html", relay.url)).send().await.unwrap();
+    assert_eq!(file.status(), StatusCode::OK);
+    assert_eq!(file.headers().get(header::CONTENT_TYPE).unwrap(), "text/html; charset=utf-8");
+    assert_eq!(file.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
+    assert_eq!(file.bytes().await.unwrap().as_ref(), b"<p>dots</p>");
+
+    let alias = relay.http.get(format!("{}/static/app/index.html", relay.url)).send().await.unwrap();
+    assert_eq!(alias.status(), StatusCode::OK);
+    assert_eq!(alias.bytes().await.unwrap().as_ref(), b"<p>dots</p>");
+
+    let leave = relay.http.get(format!("{}/dots-static/%2e%2e/secret", relay.url)).send().await.unwrap();
+    assert_eq!(leave.status(), StatusCode::NOT_FOUND);
+    let _ = std::fs::remove_dir_all(&root);
 }

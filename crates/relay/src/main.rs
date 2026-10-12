@@ -86,8 +86,9 @@ struct Args {
     #[usage(long, env = "LORCA_RELAY_FILES_DIR", conflicts("--s3-bucket"))]
     files_dir: Option<std::path::PathBuf>,
 
-    /// Directory served at `/static` with no token, so a relay on a LAN can hand out
-    /// binaries. Unset, that route answers 404. A request that leaves the directory is 404.
+    /// Directory served at `/static` and `/dots-static` with no token, so a relay on a
+    /// LAN can hand out binaries. The dots client fetches `/dots-static/`. Unset, those
+    /// routes answer 404. A request that leaves the directory is 404.
     #[usage(long, env = "LORCA_RELAY_STATIC_DIR")]
     static_dir: Option<std::path::PathBuf>,
 
@@ -279,7 +280,7 @@ pub struct AppState {
     pub pushes: tokio_util::task::TaskTracker,
     /// The services' webhooks this relay takes for routines.
     pub receivers: Arc<receivers::Receivers>,
-    /// Files served at `/static` when set. Ciphertext never goes here.
+    /// Files served at `/static` and `/dots-static` when set. Ciphertext never goes here.
     pub static_dir: Option<std::path::PathBuf>,
 }
 

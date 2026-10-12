@@ -6,7 +6,7 @@ Every flag has an environment variable, listed by `lorca-relay --help`.
 
 ## Binaries
 
-This fork builds a shippable `lorca-relay` for Linux x86_64 as a static musl binary (`.github/workflows/build-relay.yml`, run by hand). The artifact is the binary. macOS and Windows relay binaries, and attaching this artifact to a GitHub release, are not part of that workflow. Point a relay on the LAN at a directory of those files with `--static-dir` / `LORCA_RELAY_STATIC_DIR`: `GET /static` lists them and `GET /static/<path>` returns one. A path that leaves the directory is 404.
+This fork builds a shippable `lorca-relay` for Linux x86_64 as a static musl binary (`.github/workflows/build-relay.yml`, run by hand). The artifact is the binary. macOS and Windows relay binaries, and attaching this artifact to a GitHub release, are not part of that workflow. Point a relay on the LAN at a directory of those files with `--static-dir` / `LORCA_RELAY_STATIC_DIR`. `GET /static` and `GET /dots-static` list them; `GET /static/<path>` and `GET /dots-static/<path>` return one. The dots client uses `/dots-static/`. A path that leaves the directory is 404.
 
 ## Deploy on Railway
 
