@@ -668,8 +668,8 @@ async fn project_context_sync_is_encrypted_separate_from_transcript_paging_and_g
     assert_eq!(relay.client.put_blob(&relay.url, &relay.token, late).await.unwrap_err().status, Some(409));
 }
 
-/// GPT Sites fetch `/sites/`. `/static` and `/dots-static` serve the same directory.
-/// Unset, the path answers 404. A path that leaves the directory is not a file.
+/// GPT Sites fetch `/sites/`. Unset, the path answers 404. A path that leaves
+/// the directory is not a file.
 #[tokio::test]
 async fn sites_serves_the_static_directory() {
     let unset = Relay::start(0).await;
@@ -693,9 +693,8 @@ async fn sites_serves_the_static_directory() {
     assert_eq!(file.bytes().await.unwrap().as_ref(), b"<p>sites</p>");
 
     for prefix in ["/static", "/dots-static"] {
-        let alias = relay.http.get(format!("{}{prefix}/app/index.html", relay.url)).send().await.unwrap();
-        assert_eq!(alias.status(), StatusCode::OK, "{prefix}");
-        assert_eq!(alias.bytes().await.unwrap().as_ref(), b"<p>sites</p>");
+        let gone = relay.http.get(format!("{}{prefix}/app/index.html", relay.url)).send().await.unwrap();
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND, "{prefix}");
     }
 
     let leave = relay.http.get(format!("{}/sites/%2e%2e/secret", relay.url)).send().await.unwrap();
