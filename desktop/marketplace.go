@@ -10,8 +10,9 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// The marketplace, after the macOS app's MarketplaceViewController and its pages: featured plugins
-// and bots, everything else by category, one search over both, and a page for each plugin and bot.
+// The marketplace, after the macOS app's MarketplaceViewController and its pages: workflows,
+// featured plugins and bots, everything else by category, one search over all of them, and a page
+// for each workflow, plugin, and bot.
 // A sheet with a way back: the home page leads to a plugin, a bot, a full list, or the plugins the
 // Runner has. Plugins install on the Runner picked in the top bar, for every bot there; a bot is
 // added to that Runner, and the sheet closes on the new bot's chat, where the bot sets itself up.
@@ -192,6 +193,8 @@ const (
 	marketBotPage
 	marketListPage
 	marketInstalledPage
+	marketWorkflowListPage
+	marketWorkflowPage
 )
 
 // marketPage is one page of the sheet and what it keeps while pages above it come and go: its
@@ -211,6 +214,8 @@ type marketPage struct {
 	scroll ui.ScrollState
 	// focusSearch puts the keyboard in the home page's search as the sheet opens.
 	focusSearch bool
+	// workflow is a workflow page's setup.
+	workflow *workflowPage
 }
 
 // marketNotice is the line at the foot of the sheet for what an install did, gone after a few
@@ -223,10 +228,12 @@ type marketNotice struct {
 }
 
 type marketplace struct {
-	m       *mainWindow
-	sheet   *sheet
-	catalog model.Marketplace
-	loading marketLoading
+	w *appWindow
+	// openChat takes the window to a chat once the sheet closes on one.
+	openChat func(chatID string)
+	sheet    *sheet
+	catalog  model.Marketplace
+	loading  marketLoading
 	// installing are the plugins being installed, by id.
 	installing map[string]bool
 	// installed is what an install answered, by Runner and plugin, until the Runner's own list has
@@ -239,6 +246,8 @@ type marketplace struct {
 	notice   marketNotice
 	// width and height are the sheet's, sized to the window as it opens.
 	width, height float32
+	// stopWatch ends the workflow pages' following of the store.
+	stopWatch func()
 }
 
 // marketplaceSheet is the marketplace up over the main window, which opens one at a time.
@@ -248,11 +257,22 @@ var marketplaceSheet *sheet
 // it opens on that bot's Runner, from Settings on the picked Device; a bot added there lands in its
 // chat.
 func (m *mainWindow) presentMarketplace(runnerID string) {
-	if marketplaceSheet != nil && marketplaceSheet.window == &m.appWindow {
-		return
+	m.appWindow.presentMarketplace(runnerID, &marketPage{kind: marketHomePage, focusSearch: true}, m.open)
+}
+
+// presentWorkflowChooser opens the marketplace on its workflows alone, for onboarding's Choose a
+// Workflow. Setting one up closes the sheet on its chat.
+func (w *appWindow) presentWorkflowChooser(runnerID string, openChat func(chatID string)) *marketplace {
+	return w.presentMarketplace(runnerID, &marketPage{kind: marketWorkflowListPage}, openChat)
+}
+
+func (w *appWindow) presentMarketplace(runnerID string, first *marketPage, openChat func(chatID string)) *marketplace {
+	if marketplaceSheet != nil && marketplaceSheet.window == w {
+		return nil
 	}
 	mk := &marketplace{
-		m:          m,
+		w:          w,
+		openChat:   openChat,
 		installing: map[string]bool{},
 		installed:  map[string]map[string]model.InstalledPlugin{},
 	}
@@ -264,10 +284,21 @@ func (m *mainWindow) presentMarketplace(runnerID string) {
 	if picked < len(runners) {
 		mk.runnerID = runners[picked].ID
 	}
-	mk.show(&marketPage{kind: marketHomePage, focusSearch: true})
-	mk.sheet = m.present(mk.view, func() { marketplaceSheet = nil })
+	mk.show(first)
+	mk.sheet = w.present(mk.view, func() {
+		marketplaceSheet = nil
+		if mk.stopWatch != nil {
+			mk.stopWatch()
+		}
+		for _, page := range mk.pages {
+			if page.workflow != nil {
+				page.workflow.closed = true
+			}
+		}
+	})
 	marketplaceSheet = mk.sheet
 	mk.load()
+	return mk
 }
 
 func (mk *marketplace) load() {
@@ -316,19 +347,42 @@ func (mk *marketplace) template(id string) *model.BotTemplate {
 }
 
 // installedPlugin is the plugin as the picked Runner has it; false when it is not installed there.
+// Of a service's named accounts, one that is ready stands for them all; each says how it stands on
+// the service's page.
 func (mk *marketplace) installedPlugin(id string) (model.InstalledPlugin, bool) {
-	on := mk.runner()
-	if on == nil {
-		return model.InstalledPlugin{}, false
-	}
-	// A server of the Runner's mcp.json that shares the id is not this plugin.
-	for _, plugin := range on.Plugins {
-		if plugin.ID == id && !plugin.IsMcpServer() {
-			return plugin, true
+	accounts := mk.installedAccounts(id)
+	for _, account := range accounts {
+		if account.State == model.PluginReady {
+			return account, true
 		}
 	}
-	plugin, ok := mk.installed[on.ID][id]
-	return plugin, ok
+	if len(accounts) > 0 {
+		return accounts[0], true
+	}
+	return model.InstalledPlugin{}, false
+}
+
+// installedAccounts is each install of a marketplace plugin on the picked Runner: one, or a
+// service's accounts, in the Runner's order.
+func (mk *marketplace) installedAccounts(id string) []model.InstalledPlugin {
+	on := mk.runner()
+	if on == nil {
+		return nil
+	}
+	var accounts, replied []model.InstalledPlugin
+	// A server of the Runner's mcp.json that shares the id is not this plugin.
+	for _, plugin := range on.Plugins {
+		if plugin.MarketplaceID() == id && !plugin.IsMcpServer() {
+			accounts = append(accounts, plugin)
+		}
+	}
+	for _, plugin := range mk.installed[on.ID] {
+		if plugin.MarketplaceID() == id && !slices.ContainsFunc(accounts, func(each model.InstalledPlugin) bool { return each.ID == plugin.ID }) {
+			replied = append(replied, plugin)
+		}
+	}
+	sort.Slice(replied, func(a, b int) bool { return replied[a].Name < replied[b].Name })
+	return append(accounts, replied...)
 }
 
 // installedPlugins is everything the picked Runner has, the marketplace's and the rest, in its own
@@ -369,7 +423,7 @@ func marketNextStep(plugin model.InstalledPlugin, on *model.Device) string {
 	switch plugin.State {
 	case model.PluginReady:
 		return L("Added %@. Every bot on %@ can use it.", plugin.Name, on.Name)
-	case model.PluginNeedsAuth:
+	case model.PluginNeedsAuth, model.PluginInsufficientAccess:
 		return L("Added %@. It needs a sign-in: click Connect.", plugin.Name)
 	case model.PluginNeedsSetup:
 		return L("Added %@. It needs setup: click Set Up.", plugin.Name)
@@ -383,6 +437,10 @@ func (mk *marketplace) install(plugin *model.MarketplacePlugin) {
 	if on == nil || mk.installing[plugin.ID] {
 		return
 	}
+	if plugin.NamedAccounts {
+		mk.addAccount(plugin)
+		return
+	}
 	id, name := plugin.ID, plugin.Name
 	mk.installing[id] = true
 	store.InstallPlugin(id, on.ID, func(status model.InstalledPlugin, err error) {
@@ -391,18 +449,58 @@ func (mk *marketplace) install(plugin *model.MarketplacePlugin) {
 			mk.showNotice(L("Couldn't install %@: %@", name, model.ErrorText(err)), true)
 			return
 		}
-		if mk.installed[on.ID] == nil {
-			mk.installed[on.ID] = map[string]model.InstalledPlugin{}
-		}
-		mk.installed[on.ID][id] = status
+		mk.remember(on.ID, status)
 		mk.showNotice(marketNextStep(status, on), false)
 	})
 }
 
-// manage opens the plugin's own sheet on the picked Runner: its sign-in, its setup, and Remove.
+// addAccount adds another account of a service with named accounts, such as a work Gmail beside a
+// personal one, and opens it for its setup and sign-in.
+func (mk *marketplace) addAccount(plugin *model.MarketplacePlugin) {
+	on := mk.runner()
+	if on == nil || mk.installing[plugin.ID] {
+		return
+	}
+	id, name, runnerID := plugin.ID, plugin.Name, on.ID
+	value := ""
+	mk.w.showAlert(alertOptions{
+		Message:     L("New %@ Account", name),
+		Informative: L("A name such as Work or Personal tells your bots which account to use."),
+		Buttons:     []alertButton{{Title: L("Add")}, {Title: L("Cancel")}},
+		Accessory: func(c *ui.Context) {
+			textField(c, &value, fieldOptions{Placeholder: L("Work"), AutoFocus: true})
+		},
+	}, func(answer int) {
+		if answer != 0 {
+			return
+		}
+		mk.installing[id] = true
+		// A blank name becomes the next free "Account 1" on the Runner.
+		store.InstallPluginAccount(id, runnerID, strings.TrimSpace(value), func(status model.InstalledPlugin, err error) {
+			delete(mk.installing, id)
+			if err != nil {
+				mk.showNotice(L("Couldn't install %@: %@", name, model.ErrorText(err)), true)
+				return
+			}
+			mk.remember(runnerID, status)
+			mk.manage(status.ID)
+		})
+	})
+}
+
+// remember keeps what an install answered until the Runner's roster lists it.
+func (mk *marketplace) remember(runnerID string, status model.InstalledPlugin) {
+	if mk.installed[runnerID] == nil {
+		mk.installed[runnerID] = map[string]model.InstalledPlugin{}
+	}
+	mk.installed[runnerID][status.ID] = status
+}
+
+// manage opens an installed plugin's own sheet on the picked Runner, by the id the Runner gave it (a
+// named account's own): its sign-in, its setup, and Remove.
 func (mk *marketplace) manage(pluginID string) {
 	if on := mk.runner(); on != nil {
-		mk.m.presentPlugin(pluginID, on)
+		mk.w.presentPlugin(pluginID, on, "", "")
 	}
 }
 
@@ -412,9 +510,15 @@ func (mk *marketplace) add(template *model.BotTemplate) {
 	if on == nil {
 		return
 	}
-	chatID := store.AddBotFromTemplate(*template, on.ID)
+	mk.finish(store.AddBotFromTemplate(*template, on.ID))
+}
+
+// finish closes the sheet on a chat: a new bot's, or a workflow's, where its sample is.
+func (mk *marketplace) finish(chatID string) {
 	mk.sheet.dismiss()
-	mk.m.open(chatID)
+	if chatID != "" && mk.openChat != nil {
+		mk.openChat(chatID)
+	}
 }
 
 func (mk *marketplace) view(c *ui.Context, s *sheet) {
@@ -515,6 +619,10 @@ func (mk *marketplace) pageView(c *ui.Context, page *marketPage) {
 		mk.listPage(c, page)
 	case marketInstalledPage:
 		mk.installedPage(c)
+	case marketWorkflowListPage:
+		mk.workflowListPage(c)
+	case marketWorkflowPage:
+		mk.workflowPage(c, page)
 	}
 }
 
@@ -589,7 +697,7 @@ func (mk *marketplace) pluginAccessory(c *ui.Context, plugin *model.MarketplaceP
 		return
 	}
 	if current, ok := mk.installedPlugin(plugin.ID); ok {
-		mk.installedAccessory(c, current, plugin.ID)
+		mk.installedAccessory(c, current)
 		return
 	}
 	on := mk.runner()
@@ -602,7 +710,7 @@ func (mk *marketplace) pluginAccessory(c *ui.Context, plugin *model.MarketplaceP
 	}
 }
 
-func (mk *marketplace) installedAccessory(c *ui.Context, current model.InstalledPlugin, pluginID string) {
+func (mk *marketplace) installedAccessory(c *ui.Context, current model.InstalledPlugin) {
 	p := colors(c)
 	switch current.State {
 	case model.PluginReady:
@@ -610,16 +718,18 @@ func (mk *marketplace) installedAccessory(c *ui.Context, current model.Installed
 			symbol(c, "checkmark", 12, 2.6).TextColor(p.Green)
 			ui.Text(c, L("Added")).FontSize(12.5).TextColor(p.Label2).SingleLine()
 		})
-	case model.PluginNeedsAuth:
+	case model.PluginNeedsAuth, model.PluginInsufficientAccess:
 		if pushButton(c, L("Connect"), pushOptions{}).Clicked() {
-			mk.manage(pluginID)
+			mk.manage(current.ID)
 		}
 	case model.PluginNeedsSetup:
 		if pushButton(c, L("Set Up"), pushOptions{}).Clicked() {
-			mk.manage(pluginID)
+			mk.manage(current.ID)
 		}
 	default:
-		ui.Text(c, current.Detail).FontSize(12).TextColor(p.tone(current.State.Tone())).SingleLine()
+		// What went wrong, in full, is the tooltip and in the plugin's sheet.
+		text, tone := current.ShortStatus()
+		ui.Text(c, text).FontSize(12.5).TextColor(p.tone(tone)).SingleLine().Tooltip(current.Detail)
 	}
 }
 

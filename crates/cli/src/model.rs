@@ -10,6 +10,9 @@ pub struct ProviderStatus {
     pub kind: String,
     pub is_connected: bool,
     pub detail: String,
+    /// The model Auto-review runs on it unless the user picks another.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_model: Option<String>,
     /// A custom API base URL, when the credential has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -44,6 +47,9 @@ pub struct Device {
     /// Plugins installed on that Runner, with their setup state. Secrets stay on the Runner.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugins: Vec<PluginStatus>,
+    /// The channels this Runner's bots listen on, with their state. Tokens stay on the Runner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<crate::channels::ChannelStatus>,
     /// The `lorca` this Device runs, as `lorca --version` says it.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
@@ -95,6 +101,11 @@ pub struct PluginStatus {
     /// a plugin from the marketplace or its own manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+    /// Marketplace service and user label of a named connection. `id` selects the instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_name: Option<String>,
 }
 
 impl Device {
@@ -134,6 +145,10 @@ pub struct Bot {
     /// `<LORCA_HOME>/workspaces/<bot id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// User-controlled capabilities, synced in the encrypted roster. Missing means full
+    /// existing access; an explicit policy can only be changed through the user's API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<crate::permissions::BotPermissions>,
     pub created_at: f64,
 }
 
@@ -160,11 +175,19 @@ pub struct AutoReview {
     pub is_enabled: bool,
     #[serde(default)]
     pub rules: Vec<AutoReviewRule>,
+    /// The provider that reviews, any the account has connected; unset for the bot's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Each provider's review model the user picked, by kind: a chat model or a decision model.
+    /// A provider without one reviews with its default
+    /// ([`Credentials::review_model`](crate::credentials::Credentials::review_model)).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub models: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AutoReview {
     fn default() -> Self {
-        AutoReview { is_enabled: true, rules: Vec::new() }
+        AutoReview { is_enabled: true, rules: Vec::new(), provider: None, models: Default::default() }
     }
 }
 
@@ -214,6 +237,9 @@ pub enum Author {
     You,
     Bot { bot_id: String },
     System,
+    /// Someone outside Lorca writing in a channel's conversation (a Telegram group, a Slack
+    /// thread). Their words are data for the bot, never the user's instructions or approval.
+    Contact { name: String },
 }
 
 /// A file sent with a message. Its bytes travel as a `file` blob whose id is this id,
@@ -228,6 +254,10 @@ pub struct Attachment {
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub height: Option<u32>,
+    /// SHA-256 of the bytes, hex. The message carries it under the newest account key, so a
+    /// download that does not match it is refused (`files::ensure_local`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 impl Attachment {
@@ -281,6 +311,10 @@ pub enum Body {
         /// `bash` row has one; the apps show it in place of the row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run: Option<CommandRun>,
+        /// The card of the coding agent a `coding_agent` call started, for as long as the agent
+        /// runs and after: the apps show it in place of the row.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentRun>,
     },
     Handoff {
         from: String,
@@ -321,7 +355,83 @@ pub enum Body {
         link: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+        /// A secret request (`tool` = `secret`): the values the bot asks for and where they go.
+        /// The answer never comes back into the card: it is sealed to the bot's Runner.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secret: Option<SecretAsk>,
     },
+    /// An email or Slack message the bot wrote in the chat, waiting for the user to send it: the
+    /// chat's view of its review item (`review-status-<review id>`), rewritten as it changes.
+    Draft {
+        review_id: String,
+        /// The item's version, which an edit, Send, and Discard name.
+        version: u64,
+        /// The item's state: `pending`, `approved`, `executing`, `succeeded`, `failed`,
+        /// `rejected`, `cancelled`, or `uncertain`.
+        state: String,
+        plugin_id: String,
+        /// The account it goes out from: "Gmail · Work".
+        account: String,
+        draft: MessageDraft,
+        /// Why it was not sent, or why it needs another look.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+        /// Whether, with drafts off, the bot sends such a message itself: false for a mail
+        /// server that only makes drafts, which keeps them in the account's Drafts.
+        #[serde(default)]
+        direct: bool,
+    },
+}
+
+/// A message a bot wrote to people, as its draft card shows and edits it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MessageDraft {
+    /// `email` or `slack`.
+    #[serde(default)]
+    pub kind: String,
+    /// Email addresses, or the Slack channel or person's id.
+    #[serde(default)]
+    pub to: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cc: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bcc: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subject: String,
+    #[serde(default)]
+    pub body: String,
+    /// The files it carries, by name; an edit keeps the ones it still names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<DraftAttachment>,
+    /// What it answers: the email's id, or the Slack thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct DraftAttachment {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+/// What a secret request asks for: one or more named values, and where the Runner uses them.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SecretAsk {
+    /// `browser` (typed into a sign-in page of `site` in the bot's Browser), `command` (an
+    /// environment variable of the bot's commands), or `plugin` (a setting of the card's plugin).
+    #[serde(rename = "use")]
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    pub fields: Vec<SecretField>,
+}
+
+/// One value a secret request asks for: the name the bot uses it by, and what the card calls it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SecretField {
+    pub name: String,
+    pub label: String,
 }
 
 /// A message quoted by the user's reply: who wrote it and how it opens, kept with the reply, so
@@ -368,6 +478,99 @@ impl ReplyTo {
     }
 }
 
+/// A coding agent (Claude Code or Codex) a bot runs on its Runner, as the card on the
+/// `coding_agent` row that started it shows it (`crate::coding`): Auto-review's question before
+/// it starts, what it works on and where, how it stands, its last lines, and what it asks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentRun {
+    /// The bot's handle for it, across turns: `agent-3f9a2c1d`.
+    pub id: String,
+    /// `claude` (Claude Code) or `codex`.
+    pub kind: String,
+    /// `herdr` or `luvus` when it runs in a pane of that terminal host on the Runner, where the
+    /// user can watch it and type into it; none when Lorca runs it on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// What it was asked: the prompt's first line.
+    pub task: String,
+    /// Where it works, from the home folder: the worktree Lorca made for it, or a folder that
+    /// is not a repository.
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// `checking` (Auto-review is judging the start), `asking` (a `question` waits for the
+    /// user), `starting`, `working`, `idle` (done with what it was asked; it takes a follow-up).
+    /// Once it ended: `exited`, `failed`, `stopped`, `denied` (not allowed to start), `expired`
+    /// (nobody answered in time), or `dismissed` (the user wrote instead of answering).
+    pub state: String,
+    /// It is working, and has shown nothing new for a while.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stalled: bool,
+    /// Auto-review held its start and told the bot why, without asking the user: the card is
+    /// `denied`, and the apps read it as "Held by Auto-review".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question: Option<AgentQuestion>,
+    /// Its last lines, as its transcript shows them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// How it ended, in words: "Stopped", "Claude Code exited".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The pull request it opened, when its transcript names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<String>,
+    /// The Runner it runs on, by name: "Workbench".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// When it started, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<f64>,
+}
+
+impl AgentRun {
+    /// It has not ended: it may still ask, work, or take a follow-up.
+    pub fn is_open(&self) -> bool {
+        matches!(self.state.as_str(), "checking" | "asking" | "starting" | "working" | "idle")
+    }
+}
+
+/// What a coding agent's card asks the user.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct AgentQuestion {
+    /// `start`: Auto-review asks before the agent starts. `command`: the agent wants to run
+    /// `command`. `choices`: its screen asks, with a menu of `choices`. `text`: its screen asks
+    /// for an answer to type. The first two are answered with `chats.permission`, the others
+    /// with `coding.answer`.
+    pub kind: String,
+    /// The question, as the agent's screen shows it (`choices`, `text`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+    /// Why Auto-review asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The plain-language rule Always allow adds, which Auto-review proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+/// One line about what a coding agent's card asks, for a notification: "Claude Code: $ git push".
+pub fn agent_question_summary(agent: &AgentRun, question: &AgentQuestion) -> String {
+    let name = if agent.kind == "codex" { "Codex" } else { "Claude Code" };
+    let what = match question.kind.as_str() {
+        "start" => format!("start in {}", agent.folder),
+        "command" => format!("$ {}", question.command.as_deref().unwrap_or("").lines().next().unwrap_or("").trim()),
+        _ => question.text.lines().map(str::trim).filter(|line| !line.is_empty()).next_back().unwrap_or("").to_string(),
+    };
+    format!("{name}: {}", what.chars().take(180).collect::<String>())
+}
+
 /// A `bash` call as its card shows it: Auto-review checking it, the question it asks, the
 /// command running in its terminal (`lorca_agent::tools::BashSession`), what the command asks,
 /// and how it ended.
@@ -384,7 +587,8 @@ pub struct CommandRun {
     pub command: String,
     /// `checking` (Auto-review is judging it), `asking` (for the user's permission), `running`
     /// (printing, or silent), `waiting` (at a question the user can read). Once it ended:
-    /// `exited`, `failed` (a nonzero code), `stopped`, `denied` (not allowed, so never run),
+    /// `exited`, `failed` (a nonzero code), `stopped`, `denied` (not allowed, or held by
+    /// Auto-review, so never run),
     /// `expired` (nobody answered in time), or `dismissed` (the user sent a new message instead
     /// of answering, so never run).
     pub state: String,
@@ -410,9 +614,13 @@ pub struct CommandRun {
     /// The Runner it runs on, by name, for Auto-review's question: "Workbench".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
-    /// Why Auto-review asked.
+    /// Why Auto-review asked, or held it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Auto-review held it and told the bot why, without asking the user: the card is
+    /// `denied`, and the apps read it as "Held by Auto-review".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub held: bool,
     /// The plain-language rule Always allow adds, which Auto-review proposed. Without one the
     /// question offers only Allow once and Deny.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -467,6 +675,31 @@ pub struct Message {
     /// step's reply and tools are done, or at once when the user asks (`chats.send_now`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queued: bool,
+    /// A published deliverable or verification artifact; each version is a separate message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::outputs::Output>,
+    /// Coordinator summaries, urgent escalations, and quiet specialist reports have their
+    /// own notification policy, shared by the Runner and the apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification: Option<crate::attention::Notification>,
+    /// The message's id on the channel a conversation mirrors: a Telegram message id or a
+    /// Slack `ts`. Set on a contact's message and on what the bot sent there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    /// The browser recording the user sent a bot with this message. The steps and screenshots
+    /// stay encrypted on the Runner that recorded them; that Runner shows them to the bot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording: Option<RecordingRef>,
+}
+
+/// A recording of what the user did in one of a bot's browser profiles.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecordingRef {
+    pub id: String,
+    pub bot_id: String,
+    /// The profile's name.
+    pub profile: String,
+    pub steps: usize,
 }
 
 /// How much of a tool call's detail the apps get: enough for the "Messaged ◉ X" marker.
@@ -510,9 +743,13 @@ impl Message {
             author,
             body,
             state: MessageState::Complete,
+            notification: None,
             created_at: crate::config::now_secs(),
             promoted_at: None,
             queued: false,
+            output: None,
+            external_id: None,
+            recording: None,
         }
     }
 
@@ -524,7 +761,7 @@ impl Message {
     /// A reply, failure, or pending confirmation the user has not seen. Tool activity and
     /// updates to an answered question do not add to the count.
     pub fn counts_unread(&self) -> bool {
-        if !matches!(self.author, Author::Bot { .. }) {
+        if !matches!(self.author, Author::Bot { .. }) || self.notification == Some(crate::attention::Notification::Quiet) {
             return false;
         }
         match &self.body {
@@ -544,6 +781,7 @@ impl Message {
                 let line = run.command.lines().next().unwrap_or("").trim();
                 Some(format!("$ {}", line.chars().take(180).collect::<String>()))
             }
+            Body::Tool { agent: Some(agent), .. } if agent.state == "asking" => agent.question.as_ref().map(|question| crate::model::agent_question_summary(agent, question)),
             _ => None,
         }
     }
@@ -569,12 +807,63 @@ pub struct ChatMeta {
     pub description: Option<String>,
     #[serde(default)]
     pub is_pinned: bool,
+    /// The sidebar section the chat is listed under; none lists it with the chats in no section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_id: Option<String>,
+    /// Out of the sidebar but kept: search finds it, and the sidebar's Hidden group lists it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_hidden: bool,
+    /// No alerts for the chat on any Device while set; its unread count is kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute: Option<Mute>,
     pub created_at: f64,
+    /// A conversation a channel opened: a direct chat with its bot that mirrors one thread on
+    /// Telegram or Slack, named by `title`. The bot's own DM has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChatChannel>,
+}
+
+/// Where a channel's conversation happens outside Lorca.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ChatChannel {
+    /// The channel (its event subscription) that opened the conversation.
+    pub channel_id: String,
+    /// `telegram` or `slack`.
+    pub service: String,
+    /// The plugin instance of the account the bot speaks through.
+    pub account_id: String,
+    /// The chat on the service: a Telegram chat id, a Slack channel id.
+    pub chat_id: String,
+    /// A Telegram forum topic or a Slack thread's `ts`, when the conversation is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// A chat's notifications are off until `until` (unix seconds), or until unmuted without one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct Mute {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<f64>,
+}
+
+/// A named group of chats in the sidebar, in the order the roster lists them. Every Device
+/// shows the same sections, folded the same way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Section {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub collapsed: bool,
 }
 
 impl ChatMeta {
     pub fn is_group(&self) -> bool {
         self.kind == "group"
+    }
+
+    /// Whether the chat's alerts are off at `now` (unix seconds).
+    pub fn is_muted(&self, now: f64) -> bool {
+        self.mute.as_ref().is_some_and(|mute| mute.until.is_none_or(|until| now < until))
     }
 
     /// A group's owner: the one set while it is a member, else the first member.
@@ -615,6 +904,14 @@ pub struct ChatUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub api_cost_usd: f64,
+    #[serde(default)]
+    pub subscription_estimate_usd: f64,
+    #[serde(default)]
+    pub unknown_price_calls: u64,
+    #[serde(default)]
+    pub pricing_kinds: Vec<crate::budgets::Pricing>,
     pub turns: u64,
     /// The model of the last turn.
     pub model: String,
@@ -643,8 +940,24 @@ pub struct Routine {
     pub name: String,
     /// The task, written to the bot, handed to it on every run.
     pub prompt: String,
-    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time.
+    /// Original task authority retained when feedback revises the workflow text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_authorization_prompt: Option<String>,
+    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`.
     pub schedule: String,
+    /// The IANA timezone a cron schedule reads in: the Runner's when the routine was made,
+    /// unless the bot named another.
+    #[serde(default = "crate::schedule::local_timezone")]
+    pub timezone: String,
+    /// What a Runner that was off at a due time does when it is back: one run, or none.
+    #[serde(default)]
+    pub missed_run_policy: crate::routine_health::MissedRunPolicy,
+    /// The last due time the Runner took or skipped, so a restart neither repeats nor drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scheduled_at: Option<f64>,
+    /// How the routine's checks and runs have gone, as its Runner records them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::routine_health::CheckHealth>,
     pub is_enabled: bool,
     /// When the schedule started counting: creation, or the last resume.
     pub enabled_at: f64,
@@ -653,7 +966,7 @@ pub struct Routine {
     /// How the last run ended: `sent`, `pass`, or `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_outcome: Option<String>,
-    /// Why Lorca paused it, when it did: `away`.
+    /// Why Lorca paused it, when it did: `away` or `authentication`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
     /// JavaScript the Runner runs at each due time before the bot does, without a model: a
@@ -661,13 +974,25 @@ pub struct Routine {
     /// skips it. `last_run_at` and `last_outcome` count the runs, not the checks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<String>,
+    /// What the routine listens to when it runs on events: each event about its subject starts
+    /// a run, and the routine ends after one that says it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<crate::routine_events::RoutineEvents>,
+    /// The Calendar account whose events place the runs of a schedule around events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<crate::routine_triggers::CalendarTrigger>,
     pub created_at: f64,
 }
 
 impl Routine {
-    /// The time the next run counts from: the last run, else when the routine was armed.
+    /// The time the next run counts from: the last run, due time taken, or check, else when the
+    /// routine was armed.
     pub fn anchor(&self) -> i64 {
-        self.last_run_at.unwrap_or(0.0).max(self.enabled_at) as i64
+        self.last_run_at
+            .unwrap_or(0.0)
+            .max(self.last_scheduled_at.unwrap_or(0.0))
+            .max(self.health.as_ref().and_then(|health| health.last_check_at).unwrap_or(0.0))
+            .max(self.enabled_at) as i64
     }
 
     /// When the next run is due, or `None` when paused or the schedule is unreadable.
@@ -681,7 +1006,19 @@ impl Routine {
         if !self.is_enabled {
             return None;
         }
-        crate::schedule::parse(&self.schedule).ok()?.next_after(since.max(self.anchor()))
+        let schedule = crate::schedule::parse(&self.schedule).ok()?;
+        match &schedule {
+            // A one-time routine is due at its time until a run at or after it, by schedule or by hand.
+            crate::schedule::Schedule::Once(_) => return schedule.once_instant(&self.timezone).filter(|at| !crate::routine_triggers::once_taken(self, *at)),
+            crate::schedule::Schedule::Events(offset) => return crate::routine_triggers::next_event_run(self, *offset).map(|(due, _)| due),
+            // A routine on events runs when they come, never on a clock.
+            crate::schedule::Schedule::OnEvents => return None,
+            _ => {}
+        }
+        let next = schedule.next_after(since.max(self.anchor()), &self.timezone)?;
+        // After a failure that backs off, no sooner than the retry.
+        let retry = self.health.as_ref().and_then(|health| health.retry_at()).unwrap_or(0.0);
+        Some(next.max(retry as i64))
     }
 }
 
@@ -698,15 +1035,34 @@ pub struct CheckReport {
 
 // MARK: - Blob payloads
 
-/// `kind = roster`: bots, chat metadata, and routines. Latest wins.
+/// `kind = roster`: bots, chat metadata, routines, and the names the account gives its Devices.
+/// Latest wins.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct RosterBlob {
+    /// Workflow setups, merged one by one (`workflows::merge`); a build that does not know
+    /// workflows leaves the field out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflows: Option<Vec<crate::workflows::Setup>>,
     pub bots: Vec<Bot>,
     pub chats: Vec<ChatMeta>,
+    /// The sidebar's sections, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<Section>,
     #[serde(default)]
     pub routines: Vec<Routine>,
     #[serde(default)]
     pub auto_review: AutoReview,
+    /// The bots the account shares as links, with their keys.
+    #[serde(default)]
+    pub shared_links: Vec<crate::templates::links::SharedLink>,
+    /// The names Devices show as, by machine pubkey, given on any Device for any Device. A Device
+    /// without one shows the name its own `machine` blob carries.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub device_names: std::collections::BTreeMap<String, String>,
+    /// The machine pubkeys of the Devices unpaired from the account. A Device keeps every key it
+    /// reads here, and puts the ones a roster left out back in its own.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unpaired: std::collections::BTreeSet<String>,
     pub updated_at: f64,
 }
 
@@ -729,7 +1085,7 @@ impl ChatBlob {
         match self {
             // A command's card shows in the transcript, so like a message it keeps the place it
             // first took in the log however often it changes.
-            ChatBlob::Upsert { message } if matches!(message.body, Body::Tool { run: None, .. }) => crate::app::Slot::latest(relay_name(&message.id)),
+            ChatBlob::Upsert { message } if matches!(message.body, Body::Tool { run: None, agent: None, .. }) => crate::app::Slot::latest(relay_name(&message.id)),
             ChatBlob::Upsert { message } => crate::app::Slot::first_and_latest(relay_name(&message.id)),
             ChatBlob::Remove { message_id, .. } => crate::app::Slot::latest(relay_name(message_id)),
             ChatBlob::ClearUnread { chat_id } => crate::app::Slot::latest(relay_name(&format!("read-{chat_id}"))),
@@ -766,6 +1122,11 @@ pub struct MachineBlob {
     /// The turns in flight on this Device, so every other Device shows the bots at work.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub turns: Vec<LiveTurn>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub budgets: Vec<crate::budgets::BudgetSnapshot>,
+    /// The chat the desktop app shows in front of the user, so no Runner pushes it to a phone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watching: Option<String>,
 }
 
 /// `kind = job`, sealed to the Runner's box key: run one bot turn in one chat.
@@ -774,11 +1135,22 @@ pub struct Job {
     pub id: String,
     pub chat_id: String,
     pub bot_id: String,
+    /// Canonical durable task context. Child/handoff Jobs may reference it without owning
+    /// the task's execution claim; only `kind = task` is a durable task run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The authority's immutable dispatch snapshot, so a Job can arrive before task sync.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_context: Option<crate::tasks::Task>,
     /// `turn` for a user message in a DM, `room_turn` for one member's turn in a group,
     /// `message` for a teammate's message_bot, `routine` for a run of a routine, `command` for
-    /// a command the bot left running that ended.
+    /// a command the bot left running that ended, `agent` for what a coding agent the bot runs
+    /// did, `event` for a service event an event subscription's inbox admitted.
     pub kind: String,
     pub trigger_message_id: String,
+    /// A durable delegated request or the continuation that reads its report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::handoffs::HandoffJob>,
     /// `routine`: which routine is running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routine_id: Option<String>,
@@ -896,21 +1268,19 @@ pub struct JobCancel {
     pub job_id: String,
 }
 
-/// `kind = request`: a question for one Runner from another Device, sealed to the Runner's box
-/// key. The verbs read and write a bot's memory, which lives on its Runner.
+/// `kind = request`: a question for one Runner from another Device, in an envelope the asking
+/// Device signs (`envelope.rs`); the answer goes back to the signer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Request {
     pub id: String,
-    /// `memory.read` or `memory.write`.
+    /// `memory.read`, `mcp.save`, and the rest that `requests::answer` takes.
     pub verb: String,
-    /// The Device asking; the answer is sealed to it.
-    pub requested_by: String,
     #[serde(default)]
     pub body: serde_json::Value,
-    pub created_at: f64,
 }
 
-/// `kind = response`: the Runner's answer to a `Request`, sealed to the Device that asked.
+/// `kind = response`: the Runner's answer to a `Request`, signed by it and sealed to the Device
+/// that asked.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Response {
     pub request_id: String,
@@ -920,20 +1290,28 @@ pub struct Response {
     pub error: Option<String>,
 }
 
-/// Pairing handshake payloads (sealed boxes).
+/// Pairing handshake payloads. The request is sealed to the pairing string's `ek`, which the
+/// relay never sees; the reply is encrypted with the request's `reply_key`, so only the Device
+/// that holds the pairing string could have written it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairRequest {
     pub machine_pubkey: String,
     pub box_pubkey: String,
     pub device: Device,
+    /// A random key, base64url, that the reply is encrypted with.
+    pub reply_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PairReply {
     pub identity_pubkey: String,
     pub content_pubkey: String,
+    /// Generation 0 of the account key.
     pub account_dek: String,
     pub relay_url: String,
+    /// The account key's later generations, as the identity signed them.
+    #[serde(default)]
+    pub keyrings: Vec<crate::keys::SignedKeyring>,
 }
 
 /// Facts a host passes in when they cannot be probed: a phone names itself through the app.
@@ -1089,6 +1467,7 @@ mod app_view_tests {
             name: "read".into(), summary: "Read a file".into(), detail: "x".repeat(5000), is_running: false,
             call_id: "call".into(), arguments: serde_json::json!({ "path": "big" }), result: Some("y".repeat(100_000)), is_error: false, description: None, target_bot_id: None, script_command: None,
             run: None,
+            agent: None,
         });
         let Body::Tool { detail, arguments, result, summary, .. } = tool.for_app().body else { panic!() };
         assert_eq!((detail.len(), arguments.is_null(), result, summary.as_str()), (400, true, None, "Read a file"));
@@ -1098,7 +1477,7 @@ mod app_view_tests {
     fn permission_cards_drop_the_reviewed_payload() {
         let permission = Message::new("c", Author::Bot { bot_id: "b".into() }, Body::Permission {
             plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(), summary: "Run a command".into(),
-            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, link: None, code: None,
+            arguments: serde_json::json!({ "command": "secret" }), decision: "pending".into(), reason: None, rule: None, command: None, link: None, code: None, secret: None,
         });
         let app = permission.for_app();
         let Body::Permission { arguments, summary, command, .. } = &app.body else { panic!() };

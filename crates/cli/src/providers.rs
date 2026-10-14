@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::App;
 use crate::credentials::{is_custom, CustomApi, CustomProvider};
+use crate::decisions::{Decider, Shape};
 
 pub const OPENCODE_BASE_URL: &str = "https://opencode.ai/zen";
 pub const OPENCODE_GO_BASE_URL: &str = "https://opencode.ai/zen/go";
@@ -31,6 +32,9 @@ struct OpenCodeHeaders {
 
 #[async_trait]
 impl Provider for OpenCodeHeaders {
+    fn default_max_output_tokens(&self) -> Option<u64> {
+        self.inner.default_max_output_tokens()
+    }
     fn provider_id(&self) -> &str {
         self.inner.provider_id()
     }
@@ -130,24 +134,100 @@ pub fn default_model(kind: &str) -> &'static str {
     models::default_model(kind).unwrap_or_default()
 }
 
-/// The model Auto-review runs on for bots of `kind`, and how much it thinks: the catalog's
-/// `review` model for the provider, a small, fast one on the same account whatever the bot
-/// itself runs, with thinking off where the model allows it and at its lowest effort where it
-/// does not. A custom provider's is its first
-/// model, the one the user put at the top, at the catalog's lowest level for a model the
-/// catalog knows and the server's default for any other. Empty when `kind` has none.
-pub fn review_model(app: &App, kind: &str) -> (String, Option<ThinkingLevel>) {
+/// The small, fast model of `kind` that `models.ask()` runs, and Auto-review unless the user
+/// picked another, and how much it thinks: the catalog's `review` model for a built-in
+/// provider, whatever the bot itself runs, and a custom provider's first model, the one the user
+/// put at the top ([`Credentials::review_model`](crate::credentials::Credentials::review_model)),
+/// at [`lowest_level`]. Empty when `kind` has none.
+pub fn small_model(app: &App, kind: &str) -> (String, Option<ThinkingLevel>) {
+    let model = app.credentials.lock().unwrap().review_model(kind).unwrap_or_default();
+    let thinking = if model.is_empty() { None } else { lowest_level(app, kind, &model) };
+    (model, thinking)
+}
+
+/// The least a model can think, for a quick answer: thinking off where the model allows it and
+/// its lowest effort where it does not. A custom provider's model takes the lowest level its
+/// server's list declares, else the catalog's lowest for a model the catalog knows, else the
+/// server's default.
+fn lowest_level(app: &App, kind: &str, model: &str) -> Option<ThinkingLevel> {
     if is_custom(kind) {
         let credentials = app.credentials.lock().unwrap();
-        let Some(model) = credentials.custom.get(kind).and_then(|p| p.models.first().map(|m| m.id.clone())) else {
-            return (String::new(), None);
+        let listed = credentials.custom.get(kind).and_then(|provider| provider.models.iter().find(|m| m.id == model));
+        return match listed.and_then(|m| m.levels.as_ref()) {
+            Some(levels) => levels.first().copied(),
+            None => models::find_any(model).and_then(|known| known.levels.first().copied()),
         };
-        let thinking = models::find_any(&model).and_then(|known| known.levels.first().copied());
-        return (model, thinking);
     }
-    let model = models::review_model(kind).unwrap_or_default();
-    let thinking = models::find(kind, model).and_then(|info| info.levels.first().copied()).unwrap_or(ThinkingLevel::Off);
-    (model.to_string(), Some(thinking))
+    Some(models::find(kind, model).and_then(|info| info.levels.first().copied()).unwrap_or(ThinkingLevel::Off))
+}
+
+/// How Auto-review asks its model.
+pub enum Reviewer {
+    /// A chat model, at the level it thinks.
+    Chat { provider: Arc<dyn Provider>, thinking: Option<ThinkingLevel> },
+    /// A decision model, which picks among typed choices and writes nothing.
+    Decides(Decider),
+}
+
+/// The model Auto-review runs for a bot on `kind`: the review model of the provider the user
+/// picked in Auto-review's settings while it is connected, else of the bot's own provider. A
+/// provider's review model is the one picked for it in Providers, else its [`small_model`]. A
+/// chat model thinks the least it can.
+pub fn reviewer(app: &Arc<App>, kind: &str) -> Result<Reviewer, String> {
+    let review = app.auto_review();
+    let connected = app.credentials.lock().unwrap().connected_kinds();
+    let kind = review.provider.filter(|picked| connected.contains(picked)).unwrap_or_else(|| kind.to_string());
+    let model = review.models.get(&kind).cloned().unwrap_or_else(|| small_model(app, &kind).0);
+    if let Some(decider) = decider(app, &kind, &model)? {
+        return Ok(Reviewer::Decides(decider));
+    }
+    let thinking = lowest_level(app, &kind, &model);
+    Ok(Reviewer::Chat { provider: provider_for(app, &kind, Some(&model), thinking)?, thinking })
+}
+
+/// A chat model for Auto-review's second pass when the review model is a decision model or does
+/// not answer: the small model of the bot's own provider, `kind`, at the least it thinks.
+pub fn chat_reviewer(app: &Arc<App>, kind: &str) -> Result<(Arc<dyn Provider>, Option<ThinkingLevel>), String> {
+    let (model, thinking) = small_model(app, kind);
+    if decider(app, kind, &model)?.is_some() {
+        return Err(format!("{kind} reviews with a decision model"));
+    }
+    Ok((provider_for(app, kind, Some(&model), thinking)?, thinking))
+}
+
+/// Where a decision model of `kind` is asked, or `None` for a model that chats: a custom
+/// provider's decision API at its endpoint, or a decision model the catalog lists for OpenCode,
+/// at the gateway's `/v1/systemone`.
+fn decider(app: &App, kind: &str, model: &str) -> Result<Option<Decider>, String> {
+    let credentials = app.credentials.lock().unwrap();
+    if let Some(provider) = credentials.custom.get(kind) {
+        let shape = match provider.api {
+            CustomApi::SystemOne => Shape::SystemOne,
+            CustomApi::Decisions => Shape::OpenAi,
+            _ => return Ok(None),
+        };
+        let model = Some(model).filter(|m| !m.is_empty()).map(str::to_string).or_else(|| provider.models.first().map(|m| m.id.clone()));
+        let model = model.ok_or_else(|| format!("{} has no models", provider.name))?;
+        let decider = Decider { shape, url: provider.base_url.clone(), api_key: provider.api_key.clone(), model, headers: Vec::new(), session_header: None };
+        return Ok(Some(decider));
+    }
+    if !matches!(kind, "opencode" | "opencode-go") || !models::find(kind, model).is_some_and(|info| info.decides()) {
+        return Ok(None);
+    }
+    let (key, env, default) = match kind {
+        "opencode" => (credentials.opencode.clone(), "LORCA_OPENCODE_BASE_URL", OPENCODE_BASE_URL),
+        _ => (credentials.opencode_go.clone(), "LORCA_OPENCODE_GO_BASE_URL", OPENCODE_GO_BASE_URL),
+    };
+    let key = key.ok_or_else(|| format!("{} is not connected", credentials.label(kind)))?;
+    let root = key.base_url.clone().or_else(|| env_url(env)).unwrap_or_else(|| default.into());
+    Ok(Some(Decider {
+        shape: Shape::SystemOne,
+        url: format!("{}/v1/systemone", opencode_root(&root)),
+        api_key: key.api_key,
+        model: model.to_string(),
+        headers: vec![("User-Agent".into(), USER_AGENT.into())],
+        session_header: Some("x-opencode-session"),
+    }))
 }
 
 /// A bot's thinking level as stored, or nothing for the provider's default.
@@ -156,13 +236,17 @@ pub fn thinking_level(bot: &crate::model::Bot) -> Option<ThinkingLevel> {
 }
 
 pub fn provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
+    unmetered_provider_for(app, kind, model, thinking).map(|provider| crate::budgets::wrap_provider(app, provider))
+}
+
+fn unmetered_provider_for(app: &Arc<App>, kind: &str, model: Option<&str>, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
     let model = model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
     match kind {
         kind if is_custom(kind) => {
             let credentials = app.credentials.lock().unwrap();
             let provider = credentials.custom.get(kind).ok_or_else(|| format!("{} is not connected", credentials.label(kind)))?;
             let model = model.or_else(|| provider.models.first().map(|m| m.id.clone())).ok_or_else(|| format!("{} has no models", provider.name))?;
-            Ok(custom_provider(kind, provider, &model, thinking))
+            custom_provider(kind, provider, &model, thinking)
         }
         "deepseek" => {
             let key = app
@@ -247,6 +331,8 @@ enum OpenCodeWire {
     ChatCompletions,
     Messages,
     Responses,
+    /// A decision model, which Auto-review asks and no bot runs.
+    Decides,
     Unsupported,
 }
 
@@ -259,10 +345,14 @@ fn opencode_wire(kind: &str, model: &str) -> OpenCodeWire {
         Some(Wire::ChatCompletions) => return OpenCodeWire::ChatCompletions,
         Some(Wire::Messages) => return OpenCodeWire::Messages,
         Some(Wire::Responses) => return OpenCodeWire::Responses,
+        Some(Wire::SystemOne) => return OpenCodeWire::Decides,
         None => {}
     }
     let model = model.to_ascii_lowercase();
-    if (kind == "opencode" && model.starts_with("gemini-")) || model.starts_with("jev-") {
+    if model.starts_with("jev-") {
+        return OpenCodeWire::Decides;
+    }
+    if kind == "opencode" && model.starts_with("gemini-") {
         return OpenCodeWire::Unsupported;
     }
     if model.starts_with("gpt-") || model.starts_with("grok-") || model.starts_with("muse-spark-") {
@@ -307,6 +397,9 @@ fn opencode_provider(
             provider.supports_images = built_in_vision(kind, Some(model));
             Arc::new(provider)
         }
+        OpenCodeWire::Decides => {
+            return Err(format!("{model} is a decision model: it can review actions, not chat"));
+        }
         OpenCodeWire::Unsupported => {
             return Err(format!("{model} uses an OpenCode endpoint Lorca does not support"));
         }
@@ -315,10 +408,13 @@ fn opencode_provider(
 }
 
 /// A bot's adapter for a custom provider: the wire protocol the user picked, at the root they
-/// gave, with what is known about the model.
-fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking: Option<ThinkingLevel>) -> Arc<dyn Provider> {
+/// gave, with what is known about the model. A decision API's models do not chat.
+fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking: Option<ThinkingLevel>) -> Result<Arc<dyn Provider>, String> {
+    if provider.api.decides() {
+        return Err(format!("{} serves decision models: they can review actions, not chat", provider.name));
+    }
     let info = custom_model_info(kind, provider, model);
-    match provider.api {
+    Ok(match provider.api {
         CustomApi::ChatCompletions => {
             let mut adapter = OpenAiCompatProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
             adapter.info = Some(info);
@@ -334,7 +430,8 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
             Arc::new(adapter)
         }
         CustomApi::Messages => {
-            let mut adapter = AnthropicProvider::new(kind, &provider.base_url, &provider.api_key, model).with_thinking(thinking);
+            let root = crate::provider_auth::messages_root(&provider.base_url);
+            let mut adapter = AnthropicProvider::new(kind, root, &provider.api_key, model).with_thinking(thinking);
             adapter.info = Some(info);
             adapter.supports_images = info.images;
             // Arguments streamed as they are generated are Anthropic's own extension.
@@ -343,12 +440,13 @@ fn custom_provider(kind: &str, provider: &CustomProvider, model: &str, thinking:
             adapter.max_tokens = if info.max_output > 0 { 32_000 } else { 16_384 };
             Arc::new(adapter)
         }
-    }
+        CustomApi::SystemOne | CustomApi::Decisions => unreachable!("refused above"),
+    })
 }
 
-/// What a custom provider's model takes: the window, output cap, and inputs its server's list
-/// gave, else the catalog's for that model id, else nothing known, which means no window to
-/// compact by, text only, and the common thinking levels. Its cost is zero, since Lorca does
+/// What a custom provider's model takes: the window, output cap, inputs, and thinking levels its
+/// server's list gave, else the catalog's for that model id, else nothing known, which means no
+/// window to compact by, text only, and the common thinking levels. Its cost is zero, since Lorca does
 /// not know what the server charges. Kept per kind and model, so a turn reuses the entry
 /// until the provider changes.
 fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> &'static ModelInfo {
@@ -361,32 +459,37 @@ fn custom_model_info(kind: &str, provider: &CustomProvider, model: &str) -> &'st
         None if provider.api == CustomApi::Messages => ThinkingMode::Budget,
         None => ThinkingMode::Effort,
     };
-    let levels = crate::credentials::custom_levels(model);
+    let levels = crate::credentials::custom_levels(model, listed);
     let wanted = ModelInfo {
         id: "",
         name: "",
         provider: "",
         context_window: listed.and_then(|m| m.context_window).or(known.map(|k| k.context_window)).unwrap_or(0),
         max_output: listed.and_then(|m| m.max_output).or(known.map(|k| k.max_output)).unwrap_or(0),
-        reasoning: known.is_some_and(|k| k.reasoning),
+        reasoning: match listed.and_then(|m| m.levels.as_ref()) {
+            Some(declared) => !declared.is_empty(),
+            None => known.is_some_and(|k| k.reasoning),
+        },
         images: listed.and_then(|m| m.images).or(known.map(|k| k.images)).unwrap_or(false),
         rates: Rates { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: 0.0 },
         tiers: &[],
         thinking,
-        levels,
+        // Set below, from `levels`, when the entry is new.
+        levels: &[],
         // The user picked the protocol for the whole provider.
         wire: None,
     };
     let mut cache = INFO.lock().unwrap();
     let key = (kind.to_string(), model.to_string());
     if let Some(info) = cache.get(&key) {
-        if (ModelInfo { id: "", name: "", provider: "", ..**info }) == wanted {
+        if (ModelInfo { id: "", name: "", provider: "", levels: &[], ..**info }) == wanted && info.levels == levels {
             return info;
         }
     }
     let name = listed.and_then(|m| m.name.clone()).or(known.map(|k| k.name.to_string())).unwrap_or_else(|| model.to_string());
     let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
-    let info: &'static ModelInfo = Box::leak(Box::new(ModelInfo { id: leak(model.to_string()), name: leak(name), provider: leak(kind.to_string()), ..wanted }));
+    let levels: &'static [ThinkingLevel] = Box::leak(levels.into_boxed_slice());
+    let info: &'static ModelInfo = Box::leak(Box::new(ModelInfo { id: leak(model.to_string()), name: leak(name), provider: leak(kind.to_string()), levels, ..wanted }));
     cache.insert(key, info);
     info
 }
@@ -498,7 +601,7 @@ mod tests {
     }
 
     fn model(id: &str) -> CustomModel {
-        CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None }
+        CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None, levels: None }
     }
 
     fn add_custom(app: &App, kind: &str, api: CustomApi, models: Vec<CustomModel>) {
@@ -511,20 +614,75 @@ mod tests {
         let scratch = scratch_app();
         let app = &scratch.0;
         for kind in ["deepseek", "anthropic", "chatgpt", "grok", "opencode", "opencode-go"] {
-            assert!(models::find(kind, &review_model(app, kind).0).is_some(), "{kind}");
+            assert!(models::find(kind, &small_model(app, kind).0).is_some(), "{kind}");
         }
-        assert_eq!(review_model(app, "deepseek"), ("deepseek-flash".into(), Some(ThinkingLevel::Off)));
-        assert_eq!(review_model(app, "anthropic"), ("claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
-        assert_eq!(review_model(app, "chatgpt"), ("gpt-6-luna".into(), Some(ThinkingLevel::Low)));
-        assert_eq!(review_model(app, "grok"), ("grok-4.7".into(), Some(ThinkingLevel::Low)));
-        assert_eq!(review_model(app, "opencode-go"), ("deepseek-v4.1-flash".into(), Some(ThinkingLevel::Low)));
+        assert_eq!(small_model(app, "deepseek"), ("deepseek-flash".into(), Some(ThinkingLevel::Off)));
+        assert_eq!(small_model(app, "anthropic"), ("claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
+        assert_eq!(small_model(app, "chatgpt"), ("gpt-6-luna".into(), Some(ThinkingLevel::Low)));
+        assert_eq!(small_model(app, "grok"), ("grok-4.7".into(), Some(ThinkingLevel::Low)));
+        assert_eq!(small_model(app, "opencode-go"), ("deepseek-v4.1-flash".into(), Some(ThinkingLevel::Low)));
         // A custom provider reviews with its first model, at the server's default unless the
         // catalog knows the model.
         add_custom(app, "custom:lab", CustomApi::ChatCompletions, vec![model("qwen3:8b"), model("llama4")]);
-        assert_eq!(review_model(app, "custom:lab"), ("qwen3:8b".into(), None));
+        assert_eq!(small_model(app, "custom:lab"), ("qwen3:8b".into(), None));
         add_custom(app, "custom:proxy", CustomApi::Messages, vec![model("anthropic/claude-haiku-4-5")]);
-        assert_eq!(review_model(app, "custom:proxy"), ("anthropic/claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
-        assert_eq!(review_model(app, "custom:gone"), (String::new(), None));
+        assert_eq!(small_model(app, "custom:proxy"), ("anthropic/claude-haiku-4-5".into(), Some(ThinkingLevel::Off)));
+        assert_eq!(small_model(app, "custom:gone"), (String::new(), None));
+    }
+
+    #[test]
+    fn auto_review_runs_the_model_the_user_picked_while_its_provider_is_connected() {
+        use crate::credentials::ApiKeyCredential;
+        use crate::model::AutoReview;
+
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let key = || Some(ApiKeyCredential { api_key: "key".into(), base_url: None, connected_at: 0 });
+        app.credentials.lock().unwrap().deepseek = key();
+        // Reviews with `provider`, at the review model picked for it, if any.
+        let pick = |provider: &str, model: Option<&str>| {
+            let models = model.map(|model| [(provider.to_string(), model.to_string())].into()).unwrap_or_default();
+            app.set_auto_review(AutoReview { provider: Some(provider.into()), models, ..AutoReview::default() })
+        };
+        let chat = |reviewer: Reviewer| match reviewer {
+            Reviewer::Chat { provider, thinking } => (provider.provider_id().to_string(), provider.model_id().to_string(), thinking),
+            Reviewer::Decides(decider) => panic!("{} decides", decider.model),
+        };
+        let decides = |reviewer: Reviewer| match reviewer {
+            Reviewer::Decides(decider) => decider,
+            Reviewer::Chat { provider, .. } => panic!("{} chats", provider.model_id()),
+        };
+
+        // Nothing picked: the bot's own provider's small model, or the review model picked for it.
+        assert_eq!(chat(reviewer(app, "deepseek").unwrap()), ("deepseek".into(), "deepseek-flash".into(), Some(ThinkingLevel::Off)));
+        app.set_auto_review(AutoReview { models: [("deepseek".to_string(), "deepseek-v4-pro".to_string())].into(), ..AutoReview::default() });
+        assert_eq!(chat(reviewer(app, "deepseek").unwrap()).1, "deepseek-v4-pro");
+        // Another provider's chat model.
+        add_custom(app, "custom:lab", CustomApi::ChatCompletions, vec![model("qwen3:8b"), model("llama4")]);
+        pick("custom:lab", Some("llama4"));
+        assert_eq!(chat(reviewer(app, "deepseek").unwrap()), ("custom:lab".into(), "llama4".into(), None));
+        // A decision API the user added, at its endpoint.
+        add_custom(app, "custom:typesafe", CustomApi::SystemOne, vec![model("jev-latest")]);
+        app.credentials.lock().unwrap().custom.get_mut("custom:typesafe").unwrap().base_url = "https://api.typesafe.ai/v1/systemone".into();
+        pick("custom:typesafe", None);
+        let decider = decides(reviewer(app, "deepseek").unwrap());
+        assert_eq!((decider.shape, decider.url.as_str(), decider.model.as_str()), (Shape::SystemOne, "https://api.typesafe.ai/v1/systemone", "jev-latest"));
+        add_custom(app, "custom:openai", CustomApi::Decisions, vec![model("gpt-6-luna")]);
+        pick("custom:openai", Some("gpt-6-luna"));
+        assert_eq!(decides(reviewer(app, "deepseek").unwrap()).shape, Shape::OpenAi);
+        // Zen's decision models, at its System One endpoint.
+        app.credentials.lock().unwrap().opencode = key();
+        pick("opencode", Some("jev-1.13-free"));
+        let decider = decides(reviewer(app, "deepseek").unwrap());
+        assert_eq!((decider.url.as_str(), decider.session_header), ("https://opencode.ai/zen/v1/systemone", Some("x-opencode-session")));
+        pick("opencode", Some("deepseek-v4.1-flash"));
+        assert_eq!(chat(reviewer(app, "deepseek").unwrap()).1, "deepseek-v4.1-flash");
+        // A picked provider the account no longer has hands the review back to the bot's.
+        app.credentials.lock().unwrap().opencode = None;
+        assert_eq!(chat(reviewer(app, "deepseek").unwrap()).0, "deepseek");
+        // No bot chats with a decision model.
+        assert!(provider_for(app, "custom:typesafe", None, None).err().unwrap().contains("not chat"));
+        assert_eq!(opencode_wire("opencode", "jev-1.13"), OpenCodeWire::Decides);
     }
 
     #[test]
@@ -568,11 +726,25 @@ mod tests {
         let server = std::thread::spawn(move || {
             use std::io::{Read, Write};
             let (mut socket, _) = listener.accept().unwrap();
-            let mut request = [0u8; 8192];
-            let read = socket.read(&mut request).unwrap();
+            // Headers and body can arrive apart: read up to the length the headers give.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let read = socket.read(&mut chunk).unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let Some(end) = text.find("\r\n\r\n") else { continue };
+                let length = text[..end].lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
             let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
             socket.write_all(reply.as_bytes()).unwrap();
-            String::from_utf8_lossy(&request[..read]).to_ascii_lowercase()
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
         });
         (root, server)
     }
@@ -590,13 +762,15 @@ mod tests {
             max_tokens: None,
             options: lorca_agent::RequestOptions::default().with_session_id("chat-1"),
         };
+        // A Messages root with its `/v1` and one without reach the same endpoint.
         let cases = [
             (CustomApi::ChatCompletions, "/v1", "data: [DONE]\n\n", "post /v1/chat/completions "),
             (CustomApi::Messages, "", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "post /v1/messages "),
+            (CustomApi::Messages, "/v1", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", "post /v1/messages "),
         ];
-        for (api, path, body, line) in cases {
+        for (index, (api, path, body, line)) in cases.into_iter().enumerate() {
             let (root, server) = answer_once(body);
-            let kind = format!("custom:keyless-{}", path.len());
+            let kind = format!("custom:keyless-{index}");
             let provider = CustomProvider { name: "Keyless".into(), api, base_url: format!("{root}{path}"), api_key: String::new(), models: vec![model("m")], created_at: 1 };
             app.credentials.lock().unwrap().custom.insert(kind.clone(), provider);
             let mut stream = provider_for(app, &kind, None, None).unwrap().stream(request(), CancellationToken::new()).await;
@@ -606,6 +780,54 @@ mod tests {
             assert!(!seen.contains("\r\nauthorization:") && !seen.contains("\r\nx-api-key:"), "{seen}");
             assert!(!seen.contains("prompt_cache_key"), "{seen}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_custom_model_sends_the_thinking_levels_its_list_declares() {
+        use futures::StreamExt;
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        let request = || ModelRequest {
+            system_prompt: String::new(),
+            messages: vec![lorca_agent::LlmMessage::User(lorca_agent::UserMessage::text("hi"))],
+            tools: Vec::new(),
+            cache_points: Vec::new(),
+            max_tokens: None,
+            options: lorca_agent::RequestOptions::default(),
+        };
+        use ThinkingLevel::{High, Low, Max, Medium, XHigh};
+        let declared = CustomModel { levels: Some(vec![Low, Medium, High, XHigh, Max]), ..model("gpt-lab") };
+        let plain = CustomModel { levels: Some(Vec::new()), ..model("plain") };
+        // The effort each model is sent at for each level asked.
+        let cases = [
+            ("gpt-lab", Max, Some("max")),
+            ("gpt-lab", XHigh, Some("xhigh")),
+            ("gpt-lab", Medium, Some("medium")),
+            // Nothing declared: the common levels, at most `high`.
+            ("mystery", XHigh, Some("high")),
+            ("mystery", Max, Some("high")),
+            // A model the list says does not reason gets no effort.
+            ("plain", Max, None),
+        ];
+        for (index, (id, level, effort)) in cases.into_iter().enumerate() {
+            let (root, server) = answer_once("data: [DONE]\n\n");
+            let kind = format!("custom:levels-{index}");
+            let models = vec![declared.clone(), plain.clone(), model("mystery")];
+            let provider = CustomProvider { name: "Levels".into(), api: CustomApi::ChatCompletions, base_url: format!("{root}/v1"), api_key: String::new(), models, created_at: 1 };
+            app.credentials.lock().unwrap().custom.insert(kind.clone(), provider);
+            let mut stream = provider_for(app, &kind, Some(id), Some(level)).unwrap().stream(request(), CancellationToken::new()).await;
+            while stream.next().await.is_some() {}
+            let seen = server.join().unwrap();
+            let body: serde_json::Value = serde_json::from_str(&seen[seen.find("\r\n\r\n").unwrap() + 4..]).unwrap();
+            println!("{id} at {level}: reasoning_effort = {}", body["reasoning_effort"]);
+            assert_eq!(body["reasoning_effort"].as_str(), effort, "{id} at {level}");
+        }
+
+        // The model entry and Auto-review's lowest level follow the list too.
+        let info = provider_for(app, "custom:levels-0", Some("gpt-lab"), None).unwrap().model_info().unwrap();
+        assert_eq!((info.levels, info.reasoning), (&[Low, Medium, High, XHigh, Max][..], true));
+        add_custom(app, "custom:review", CustomApi::ChatCompletions, vec![CustomModel { levels: Some(vec![Medium, Max]), ..model("gpt-lab") }]);
+        assert_eq!(small_model(app, "custom:review"), ("gpt-lab".into(), Some(Medium)));
     }
 
     #[test]

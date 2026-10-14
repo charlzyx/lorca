@@ -1,0 +1,143 @@
+// A channel, slid in from its row in Details: whether it listens, and what holds it when a
+// message's turn didn't finish or its account can't be read; where it listens and what it takes;
+// the chats asking to be allowed; the task the bot does with each message; and its conversations,
+// each a tap away. The bot sets a channel up and changes it when asked in chat; here the user
+// pauses it, allows or ignores a chat, settles a held message, or removes it.
+
+import { Stack, useLocalSearchParams, useRouter } from "expo-router";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { useShallow } from "zustand/react/shallow";
+import { chatTitle, engine } from "../../../src/core/engine";
+import type { ChatRequest } from "../../../src/core/model";
+import { useStore } from "../../../src/core/store";
+import { t, useLanguage } from "../../../src/i18n";
+import { alert, prompt } from "../../../src/ui/alert";
+import { channelChats, listenSummary, requestKind, serviceName } from "../../../src/ui/channels";
+import { Row, Section, ToggleRow } from "../../../src/ui/forms";
+import { stamp } from "../../../src/ui/format";
+import { usePalette } from "../../../src/ui/theme";
+
+export default function ChannelScreen() {
+  useLanguage();
+  const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
+  const p = usePalette();
+  const runner = useStore((s) => s.devices.find((d) => d.channels?.some((c) => c.id === id)));
+  const channel = runner?.channels?.find((c) => c.id === id);
+  const bot = useStore((s) => s.bots.find((b) => b.id === channel?.bot_id));
+  const account = runner?.plugins?.find((plugin) => plugin.id === channel?.account_id);
+  const conversations = useStore(useShallow((s) => s.chats.filter((c) => c.channel?.channel_id === id)));
+  if (!channel) return null;
+  const kept = [...conversations].sort((a, b) => (b.messages.at(-1)?.created_at ?? b.created_at) - (a.messages.at(-1)?.created_at ?? a.created_at)).slice(0, 6);
+  const held = channel.state === "held";
+  // A held message can be tried again or skipped; a channel waiting for the user has nothing to settle.
+  const settles = held && !!channel.held_delivery;
+  const footer = settles
+    ? t("A message’s turn didn’t finish, so later messages wait. Read its conversation, then try it again or skip it.")
+    : channel.detail || undefined;
+  const hint =
+    channel.service === "slack"
+      ? t("Invite the bot to a channel or send it a message, then allow the chat here.")
+      : t("Add the bot to a group or send it a message, then allow the chat here.");
+
+  // Anyone can message the bot or add it to a group; it answers only where the user allows.
+  function answer(request: ChatRequest) {
+    const name = bot?.name ?? t("The bot");
+    alert(t("Let “{chat}” chat with {name}?", { chat: request.title, name }), t("{name} answers there from now on. An ignored chat doesn’t ask again.", { name }), [
+      { text: t("Cancel"), style: "cancel" },
+      { text: t("Ignore"), style: "destructive", onPress: () => engine.answerChatRequest(channel!.id, request.id, false) },
+      { text: t("Allow"), onPress: () => engine.answerChatRequest(channel!.id, request.id, true) },
+    ]);
+  }
+
+  // For a chat that can't ask itself: one where the bot hears nothing it would answer.
+  function askChatId() {
+    prompt(t("Add a Chat"), {
+      message:
+        channel!.service === "slack"
+          ? t("Paste the channel’s id, such as C0123456789. Or message the bot there, and the chat asks here.")
+          : t("Paste the chat’s id, such as -1001234567890 for a group. Or message the bot there, and the chat asks here."),
+      placeholder: t("Chat ID"),
+      confirm: t("Add"),
+      done: (text) => {
+        const chatId = text.trim();
+        if (!chatId) return;
+        engine.addChat(channel!.id, chatId).catch((error) => alert(t("Couldn’t add the chat"), error instanceof Error ? error.message : String(error)));
+      },
+    });
+  }
+
+  function confirmRemove() {
+    alert(t("Remove “{name}”?", { name: channel!.name }), t("{name} stops listening there. Its conversations stay.", { name: bot?.name ?? t("The bot") }), [
+      { text: t("Cancel"), style: "cancel" },
+      {
+        text: t("Remove"),
+        style: "destructive",
+        onPress: () => {
+          engine.removeChannel(channel!.id);
+          router.back();
+        },
+      },
+    ]);
+  }
+
+  return (
+    <>
+      <Stack.Screen options={{ title: channel.name }} />
+      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={styles.content}>
+        <Section footer={footer}>
+          <ToggleRow title={t("Listening")} value={channel.state !== "paused"} onValueChange={(on) => engine.setChannelPaused(channel.id, !on)} />
+          {held && <Row title={t("State")} detail={t("On hold")} />}
+          {settles && <Row title={t("Try Again")} action onPress={() => engine.settleHeldMessage(channel.id, true)} />}
+          {settles && <Row title={t("Skip")} action onPress={() => engine.settleHeldMessage(channel.id, false)} />}
+          {channel.state === "offline" && <Row title={t("State")} detail={t("Can’t connect")} />}
+        </Section>
+        <Section footer={!channel.chats?.length && !channel.requests?.length ? hint : undefined}>
+          <Row title={t("Account")} detail={account?.name ?? serviceName(channel.service)} />
+          <Row title={t("Chats")} subtitle={channelChats(channel)} subtitleLines={3} />
+          <Row title={t("Add Chat…")} action onPress={askChatId} />
+          <Row title={t("Messages")} subtitle={listenSummary(channel.listen)} subtitleLines={2} />
+        </Section>
+        {!!channel.requests?.length && (
+          <Section title={t("Asking to Chat")} footer={t("{name} answers only in chats you allow. An ignored chat doesn’t ask again.", { name: bot?.name ?? t("The bot") })}>
+            {channel.requests.map((request) => (
+              <Row key={request.id} title={request.title} subtitle={requestKind(request)} onPress={() => answer(request)} />
+            ))}
+          </Section>
+        )}
+        <Section title={t("Task")}>
+          <View style={styles.task}>
+            <Text style={[styles.taskText, { color: p.label }]} selectable>
+              {channel.task}
+            </Text>
+          </View>
+        </Section>
+        {kept.length > 0 && (
+          <Section title={t("Conversations")}>
+            {kept.map((chat) => (
+              <Row
+                key={chat.id}
+                title={chatTitle(chat)}
+                detail={stamp(new Date((chat.messages.at(-1)?.created_at ?? chat.created_at) * 1000))}
+                chevron
+                onPress={() => {
+                  router.dismissAll();
+                  router.push(`/chat/${chat.id}`);
+                }}
+              />
+            ))}
+          </Section>
+        )}
+        <Section>
+          <Row title={t("Remove Channel…")} destructive onPress={confirmRemove} />
+        </Section>
+      </ScrollView>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  content: { paddingBottom: 32 },
+  task: { paddingHorizontal: 16, paddingVertical: 12 },
+  taskText: { fontSize: 15, lineHeight: 21 },
+});

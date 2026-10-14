@@ -62,6 +62,7 @@ type mainWindow struct {
 	palette     *paletteState
 	inspector   inspectorState
 	tasks       runningTasksState
+	attention   attentionState
 	// focusComposer asks the chat on screen to put the keyboard in its composer.
 	focusComposer bool
 	// cmdHeldAt is when Cmd (Ctrl on Windows and Linux) went down alone, for the chats' shortcut
@@ -274,6 +275,9 @@ func (m *mainWindow) toggleInspector() {
 func (m *mainWindow) open(chatID string) {
 	m.selectChat(chatID)
 	m.focusComposer = true
+	// Its row shows, even when it was already the chat on screen: its group unfolds.
+	m.chatsList.shownChat = ""
+	m.chatsList.revealSelection = true
 }
 
 // storeChanged is the window's reaction to the store: the Device picker falls back to this
@@ -333,8 +337,16 @@ func (m *mainWindow) run(id string) {
 	switch id {
 	case "newBot":
 		m.newBot()
+	case "importBotTemplate":
+		m.presentTemplateImport("", "", m.selectChat)
+	case "shareBotTemplate":
+		if bot := selectedDMBot(); bot != nil {
+			m.presentTemplateShare(bot.ID)
+		}
 	case "newGroupChat":
 		m.newGroupChat()
+	case "newTask":
+		m.presentDurableTask(m.selection.ChatID, nil)
 	case "marketplace":
 		m.presentMarketplace("")
 	case "pairDevice":
@@ -347,6 +359,8 @@ func (m *mainWindow) run(id string) {
 		}
 	case "palette":
 		m.palette.toggle()
+	case "attention":
+		m.toggleAttention()
 	case "toggleSidebar":
 		m.toggleSidebar()
 	case "toggleInspector":
@@ -363,6 +377,26 @@ func (m *mainWindow) run(id string) {
 		if id := m.selection.ChatID; id != "" {
 			store.TogglePin(id)
 		}
+	case "muteHour", "muteEightHours", "muteWeek", "muteAlways":
+		if chatID := m.selection.ChatID; chatID != "" {
+			muteChat(chatID, map[string]int{"muteHour": 3600, "muteEightHours": 8 * 3600, "muteWeek": 7 * 24 * 3600}[id])
+		}
+	case "unmuteChat":
+		if id := m.selection.ChatID; id != "" {
+			store.Unmute(id)
+		}
+	case "hideChat":
+		if chat := store.Chat(m.selection.ChatID); chat != nil {
+			store.SetHidden(chat.ID, !chat.IsHidden)
+		}
+	case "newSection":
+		m.newSection()
+	case "moveToNewSection":
+		if id := m.selection.ChatID; id != "" {
+			m.moveChatToNewSection(id)
+		}
+	case "newSkill":
+		m.newSkill()
 	case "stopResponding":
 		if id := m.selection.ChatID; id != "" {
 			store.StopResponding(id)
@@ -418,6 +452,57 @@ func (m *mainWindow) renameChat() {
 	})
 }
 
+// promptSectionName asks for a section's name in a sheet; `done` gets it, and is not called on
+// Cancel or for a blank name.
+func (m *mainWindow) promptSectionName(title, button, initial string, done func(name string)) {
+	value := initial
+	m.showAlert(alertOptions{
+		Message: title,
+		Buttons: []alertButton{{Title: button}, {Title: L("Cancel")}},
+		Accessory: func(c *ui.Context) {
+			textField(c, &value, fieldOptions{Placeholder: L("Section name"), AutoFocus: true})
+		},
+	}, func(answer int) {
+		if name := model.SectionName(value); answer == 0 && name != "" {
+			done(name)
+		}
+	})
+}
+
+func (m *mainWindow) newSection() {
+	m.promptSectionName(L("New Section"), L("Create"), "", func(name string) { store.CreateSection(name, "") })
+}
+
+func (m *mainWindow) moveChatToNewSection(chatID string) {
+	m.promptSectionName(L("New Section"), L("Create"), "", func(name string) { store.CreateSection(name, chatID) })
+}
+
+func (m *mainWindow) renameSection(id string) {
+	section := store.Section(id)
+	if section == nil {
+		return
+	}
+	m.promptSectionName(L("Rename Section"), L("Rename"), section.Name, func(name string) { store.RenameSection(id, name) })
+}
+
+// deleteSection asks first; the section's chats stay, under Chats.
+func (m *mainWindow) deleteSection(id string) {
+	section := store.Section(id)
+	if section == nil {
+		return
+	}
+	m.showAlert(alertOptions{
+		Message:     L("Delete “%@”?", section.Name),
+		Informative: L("Its chats move to %@.", Lc("Chats", "no section")),
+		Style:       alertWarning,
+		Buttons:     []alertButton{{Title: L("Delete"), Destructive: true}, {Title: L("Cancel")}},
+	}, func(answer int) {
+		if answer == 0 {
+			store.DeleteSection(id)
+		}
+	})
+}
+
 func (m *mainWindow) deleteChat() {
 	chat := store.Chat(m.selection.ChatID)
 	if chat == nil {
@@ -425,7 +510,7 @@ func (m *mainWindow) deleteChat() {
 		return
 	}
 	chatID := chat.ID
-	deletesBot := chat.IsDM() && len(chat.BotIDs) > 0 && store.Bot(chat.BotIDs[0]) != nil
+	deletesBot := chat.IsBotDM() && len(chat.BotIDs) > 0 && store.Bot(chat.BotIDs[0]) != nil
 	informative := L("The transcript is removed from this Device and from paired Devices.")
 	confirm := L("Delete")
 	if deletesBot {
@@ -790,6 +875,7 @@ func (m *mainWindow) contentHeader(c *ui.Context, chatID, title, subtitle string
 			return
 		}
 		m.runningTasksButton(c, chatID)
+		m.attentionButton(c)
 		if rightmost {
 			m.inspectorToggle(c)
 		}
@@ -867,9 +953,11 @@ func (m *mainWindow) shortcuts(c *ui.Context) {
 		return
 	}
 	for i, key := range chatNumberKeys {
-		if c.Shortcut(ui.Cmd, key) && i < len(store.Chats) {
-			m.open(store.Chats[i].ID)
-			m.chatsList.revealSelection = true
+		if c.Shortcut(ui.Cmd, key) {
+			if chats := visibleChats(); i < len(chats) {
+				m.open(chats[i].ID)
+				m.chatsList.revealSelection = true
+			}
 		}
 	}
 	if m.isSettings() && !m.palette.open && c.Shortcut(0, ui.KeyEscape) {

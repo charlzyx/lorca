@@ -2,8 +2,8 @@ import AppKit
 import UserNotifications
 
 /// System notifications for replies, failed responses, and pending confirmations,
-/// unless read on a paired Device; a click brings the app forward on the chat. The
-/// same "looking at" fact goes to the CLI (`ui.watching`), so a Runner does not push a reply
+/// unless read on a paired Device or the chat is muted; a click brings the app forward on the
+/// chat. The same "looking at" fact goes to the CLI (`ui.watching`), so no Runner pushes a reply
 /// the user is watching arrive to their phone.
 @MainActor
 final class Notifier: NSObject, UNUserNotificationCenterDelegate {
@@ -38,6 +38,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 self.watchingChanged()
             case let .messageAdded(chatID, messageID), let .messageChanged(chatID, messageID):
                 self.permissionChanged(chatID, messageID)
+                self.attentionMessageChanged(chatID, messageID)
             case let .messageRemoved(_, messageID): self.clearPermission(messageID)
             case let .turnFinished(chatID, botID, startedAt): self.turnFinished(chatID, botID, startedAt)
             default: break
@@ -48,12 +49,16 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
                 MainActor.assumeIsolated { self?.watchingChanged() }
             }
         }
+        observePresence()
         watchingChanged()
     }
 
-    /// The chat the user is looking at: the app is frontmost and its window shows the chat.
+    /// The chat the user is looking at: the app is frontmost, its window shows the chat, and the
+    /// user is at the computer, with the screen awake and unlocked and some input in the last
+    /// few minutes.
     private var watchedChat: Chat.ID? {
-        NSApp.isActive ? visibleChat() : nil
+        guard NSApp.isActive, !screenAway, Self.idleSeconds < Self.awayAfter else { return nil }
+        return visibleChat()
     }
 
     /// Call when the selection or the window's visibility changes.
@@ -63,6 +68,46 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         store.setWatchedChat(watched)
         // Whatever was posted for the chat now on screen has been seen.
         if let watched { clear(watched) }
+        // Input stopping is noticed by looking again; so is input coming back.
+        presenceCheck?.invalidate()
+        presenceCheck = nil
+        if NSApp.isActive, !screenAway, visibleChat() != nil {
+            presenceCheck = Timer.scheduledTimer(withTimeInterval: 15, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.watchingChanged() }
+            }
+        }
+    }
+
+    // MARK: - Presence
+
+    /// Without input for this long, the user is taken to be away from the screen.
+    private static let awayAfter: TimeInterval = 300
+    private var screenAway = false
+    private var presenceCheck: Timer?
+
+    private static var idleSeconds: TimeInterval {
+        CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+    }
+
+    /// A locked or sleeping screen, or another user's session in front, is a user away.
+    private func observePresence() {
+        let workspace = NSWorkspace.shared.notificationCenter
+        let away: [(NotificationCenter, Notification.Name, Bool)] = [
+            (workspace, NSWorkspace.screensDidSleepNotification, true),
+            (workspace, NSWorkspace.screensDidWakeNotification, false),
+            (workspace, NSWorkspace.sessionDidResignActiveNotification, true),
+            (workspace, NSWorkspace.sessionDidBecomeActiveNotification, false),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"), true),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsUnlocked"), false),
+        ]
+        for (center, name, isAway) in away {
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.screenAway = isAway
+                    self?.watchingChanged()
+                }
+            }
+        }
     }
 
     // MARK: - Posting
@@ -72,6 +117,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             switch message.body {
             case let .permission(request) where request.isPending: message.id
             case let .tool(tool) where tool.run?.state == .asking: message.id
+            case let .tool(tool) where tool.agent?.state == .asking: message.id
             default: nil
             }
         })
@@ -92,6 +138,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         switch message.body {
         case let .permission(request): asks = request.isPending
         case let .tool(tool) where tool.run != nil: asks = tool.run?.state == .asking
+        case let .tool(tool) where tool.agent != nil: asks = tool.agent?.state == .asking
         default: return
         }
         guard asks else { clearPermission(messageID); return }
@@ -120,12 +167,34 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    private var announcedAttention: Set<Message.ID> = []
+
+    private func attentionMessageChanged(_ chatID: Chat.ID, _ messageID: Message.ID) {
+        guard let message = store.chat(chatID)?.messages.first(where: { $0.id == messageID }),
+            let notification = ChatNotification(message), notification.kind == .summary || notification.kind == .urgent,
+            announcedAttention.insert(messageID).inserted else { return }
+        let identityID = store.identityID
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            guard let self, self.store.identityID == identityID else { return }
+            self.post(notification, in: chatID)
+        }
+    }
+
+    private func allows(_ notification: ChatNotification) -> Bool {
+        switch notification.kind {
+        case .summary: store.attention.preferences.summaries
+        case .urgent: store.attention.preferences.urgentDirect
+        default: true
+        }
+    }
+
     private func post(_ notification: ChatNotification, in chatID: Chat.ID) {
-        guard let center, let chat = store.chat(chatID), notification.canDeliver(in: chat, watchedChat: watchedChat) else { return }
+        guard let center, let chat = store.chat(chatID), allows(notification), notification.canDeliver(in: chat, watchedChat: watchedChat) else { return }
 
         let content = UNMutableNotificationContent()
         content.title = store.bot(notification.botID)?.name ?? store.title(for: chat)
-        if !chat.isDM { content.subtitle = store.title(for: chat) }
+        if !chat.isBotDM { content.subtitle = store.title(for: chat) }
         content.body = String(notification.body.split(whereSeparator: \.isNewline).joined(separator: " ").prefix(280))
         content.sound = .default
         content.threadIdentifier = chatID
@@ -137,6 +206,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             guard await self.authorized(center) else { return }
             // Notification authorization can stay open while the chat is read or answered.
             guard self.store.identityID == identityID,
+                self.allows(notification),
                 let chat = self.store.chat(chatID), notification.canDeliver(in: chat, watchedChat: self.watchedChat)
             else { return }
             do { try await center.add(request) } catch { NSLog("Posting a notification failed: \(error.localizedDescription)") }

@@ -17,6 +17,17 @@ export const AndroidIcons = {
   camera: require("../../assets/material/camera.xml") as ImageSourcePropType,
   folder: require("../../assets/material/folder.xml") as ImageSourcePropType,
   send: require("../../assets/material/send.xml") as ImageSourcePropType,
+  copy: require("../../assets/material/content_copy.xml") as ImageSourcePropType,
+  inbox: require("../../assets/material/inbox.xml") as ImageSourcePropType,
+  more: require("../../assets/material/more_vert.xml") as ImageSourcePropType,
+  workflow: require("../../assets/material/account_tree.xml") as ImageSourcePropType,
+  link: require("../../assets/material/link.xml") as ImageSourcePropType,
+  download: require("../../assets/material/download.xml") as ImageSourcePropType,
+  mute: require("../../assets/material/notifications_off.xml") as ImageSourcePropType,
+  unmute: require("../../assets/material/notifications.xml") as ImageSourcePropType,
+  hide: require("../../assets/material/visibility_off.xml") as ImageSourcePropType,
+  show: require("../../assets/material/visibility.xml") as ImageSourcePropType,
+  newFolder: require("../../assets/material/create_new_folder.xml") as ImageSourcePropType,
 } as const;
 
 /** The bar every stack shares: tinted on iOS, Material's plain label color on Android. */

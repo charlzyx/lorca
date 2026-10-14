@@ -21,6 +21,8 @@ type palette struct {
 	Window, Sidebar, Inspector, Content, ToolbarLine ui.Color
 
 	BotBubble, BotBubbleBorder, Code, CodeHover, Chip, Card, CardBorder ui.Color
+	// OutputCard fills a published output's card in the transcript, apart from the bubbles.
+	OutputCard ui.Color
 
 	ComposerField, ComposerBorder, ComposerControl, ComposerPrimary, ComposerPrimaryContent ui.Color
 	// GlassButton fills a round glass button over its frosted backdrop, as AppKit's glass bezel.
@@ -66,6 +68,7 @@ var lightPalette = palette{
 	Chip:            ui.RGBA(0, 0, 0, 0.05),
 	Card:            ui.Hex("#f1f1f2"),
 	CardBorder:      ui.RGBA(0, 0, 0, 0.05),
+	OutputCard:      ui.Hex("#ffffff"),
 
 	ComposerField:          ui.RGBA(255, 255, 255, 0.86),
 	ComposerBorder:         ui.RGBA(0, 0, 0, 0.12),
@@ -126,6 +129,7 @@ var darkPalette = palette{
 	Chip:            ui.RGBA(255, 255, 255, 0.08),
 	Card:            ui.RGBA(255, 255, 255, 0.06),
 	CardBorder:      ui.RGBA(255, 255, 255, 0.06),
+	OutputCard:      ui.RGBA(255, 255, 255, 0.05),
 
 	ComposerField:          ui.RGBA(46, 46, 48, 0.86),
 	ComposerBorder:         ui.RGBA(255, 255, 255, 0.14),

@@ -1,4 +1,4 @@
-import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from "expo-router";
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider, usePathname, useRootNavigationState, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo } from "react";
 import { Platform, useColorScheme } from "react-native";
@@ -8,7 +8,10 @@ import { engine } from "../src/core/engine";
 import { useStore } from "../src/core/store";
 import { startUpdateChecks } from "../src/core/updates";
 import { useStackScreenOptions } from "../src/ui/navigation";
-import { usePalette } from "../src/ui/theme";
+import { HostPaletteContext } from "@expo/ui/jetpack-compose";
+import { AlertHost } from "../src/ui/alert";
+import { UpdateProgress } from "../src/ui/UpdateProgress";
+import { useMaterialPalette, usePalette } from "../src/ui/theme";
 
 export default function RootLayout() {
   const ready = useStore((s) => s.ready);
@@ -16,11 +19,24 @@ export default function RootLayout() {
   const p = usePalette();
   const scheme = useColorScheme();
   const screenOptions = useStackScreenOptions();
+  const material = useMaterialPalette();
+  const router = useRouter();
+  const pathname = usePathname();
+  const navigationKey = useRootNavigationState()?.key;
+  const pendingLink = useStore((s) => s.pendingTemplateLink);
 
   useEffect(() => {
     void engine.start();
     startUpdateChecks();
   }, []);
+
+  // A shared bot's link the app was opened with opens New Bot from Template once the phone has an
+  // account; the sheet takes one that arrives while it is up.
+  useEffect(() => {
+    if (!navigationKey || !ready || !paired || !pendingLink || pathname === "/template") return;
+    useStore.setState({ pendingTemplateLink: null });
+    router.push({ pathname: "/template", params: { link: pendingLink } });
+  }, [navigationKey, ready, paired, pendingLink, pathname]);
 
   const navigationTheme = useMemo(() => {
     const base = p.dark ? DarkTheme : DefaultTheme;
@@ -66,6 +82,7 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
+      <HostPaletteContext.Provider value={material}>
       <KeyboardProvider>
         <StatusBar style={scheme === "dark" ? "light" : "dark"} />
         {/* The native bar takes its light/dark appearance from the navigation theme, not the OS. */}
@@ -73,23 +90,32 @@ export default function RootLayout() {
           <Stack screenOptions={screenOptions}>
             <Stack.Protected guard={paired}>
               <Stack.Screen name="(main)" options={{ headerShown: false }} />
+              <Stack.Screen name="attention" options={sheet} />
               <Stack.Screen name="chat-info" options={Platform.OS === "android" ? nestedSheet : { ...nestedSheet, sheetAllowedDetents: [0.7, 1], sheetGrabberVisible: true }} />
               <Stack.Screen name="message/[id]" options={Platform.OS === "android" ? sheet : { ...sheet, sheetAllowedDetents: [0.5, 1], sheetGrabberVisible: true }} />
+              <Stack.Screen name="command/[id]" options={Platform.OS === "android" ? sheet : { ...sheet, sheetAllowedDetents: [0.5, 1], sheetGrabberVisible: true }} />
+              <Stack.Screen name="agent/[id]" options={Platform.OS === "android" ? sheet : { ...sheet, sheetAllowedDetents: [0.7, 1], sheetGrabberVisible: true }} />
+              <Stack.Screen name="draft/[id]" options={sheet} />
               <Stack.Screen name="tasks" options={Platform.OS === "android" ? nestedSheet : { ...nestedSheet, sheetAllowedDetents: [0.5, 1], sheetGrabberVisible: true }} />
               <Stack.Screen name="new-bot" options={sheet} />
+              <Stack.Screen name="template" options={sheet} />
               <Stack.Screen name="new-group" options={sheet} />
+              <Stack.Screen name="workflows" options={nestedSheet} />
               <Stack.Screen name="settings" options={nestedSheet} />
               <Stack.Screen
                 name="attachment/[id]"
-                options={{ presentation: "fullScreenModal", headerShown: true, headerStyle: { backgroundColor: "#000000" }, headerTintColor: "#FFFFFF", headerTitleStyle: { color: "#FFFFFF" }, contentStyle: { backgroundColor: "#000000" } }}
+                options={{ presentation: "fullScreenModal", headerShown: true, headerStyle: { backgroundColor: "#000000" }, headerTintColor: "#FFFFFF", headerTitleStyle: { color: "#FFFFFF" }, contentStyle: { backgroundColor: "#000000" }, statusBarStyle: "light" }}
               />
             </Stack.Protected>
             <Stack.Protected guard={!paired}>
               <Stack.Screen name="pair" options={{ headerShown: false, gestureEnabled: false }} />
             </Stack.Protected>
           </Stack>
+          <UpdateProgress />
+          <AlertHost />
         </ThemeProvider>
       </KeyboardProvider>
+      </HostPaletteContext.Provider>
     </GestureHandlerRootView>
   );
 }

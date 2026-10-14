@@ -1,10 +1,11 @@
 // Stamps, previews, and the working row's words, the rules the Mac app uses
 // (Design/Formatters.swift, AppStore.preview, ChatViewController.activity).
 
-import type { Body, Bot, Chat, Routine } from "../core/model";
+import type { Body, Bot, Chat, Message, Routine } from "../core/model";
 import { attachmentSummary, isSentMessage } from "../core/model";
 import type { StoreState } from "../core/store";
 import { language, t } from "../i18n";
+import { draftTitle } from "./drafts";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -17,7 +18,7 @@ function weekday(date: Date): string {
 }
 
 /// "Sep 10", "9月10日".
-function monthDay(date: Date): string {
+export function monthDay(date: Date): string {
   return language === "zh" ? `${date.getMonth() + 1}月${date.getDate()}日` : `${MONTHS[date.getMonth()]} ${date.getDate()}`;
 }
 
@@ -112,18 +113,6 @@ export function scheduleText(text: string): string {
   return text;
 }
 
-/// The line under a routine's name: the schedule, then what is going on.
-export function routineDetail(routine: Routine): string {
-  const schedule = scheduleText(routine.schedule_text);
-  if (routine.is_running) return `${schedule} · ${t("Running…")}`;
-  if (!routine.is_enabled) return `${schedule} · ${routine.paused_reason === "away" ? t("Paused while you were away") : t("Paused")}`;
-  if (routine.next_run_at) {
-    const when = upcoming(routine.next_run_at);
-    return `${schedule} · ${routine.check ? t("Next check {when}", { when }) : t("Next {when}", { when })}`;
-  }
-  return schedule;
-}
-
 /// "Today 9:00 AM · replied", "Never", "Yesterday 6:00 PM · nothing to report".
 export function lastRunSummary(routine: Routine): string {
   if (!routine.last_run_at) return t("Never");
@@ -153,7 +142,11 @@ export function lastSeen(seenUnix: number | undefined): string {
 
 /// The last thing worth previewing: tool calls never are, except a sent message.
 export function preview(chat: Chat, bots: Map<string, Bot>): string {
-  const shown = [...chat.messages].reverse().find((m) => (m.body.kind === "tool" ? isSentMessage(m.body) : true));
+  let shown: Message | undefined;
+  for (let i = chat.messages.length - 1; i >= 0 && !shown; i--) {
+    const m = chat.messages[i];
+    if (m.body.kind !== "tool" || isSentMessage(m.body)) shown = m;
+  }
   if (!shown) return t("No messages yet");
   let body: string;
   switch (shown.body.kind) {
@@ -165,7 +158,7 @@ export function preview(chat: Chat, bots: Map<string, Bot>): string {
       break;
     case "handoff":
       body =
-        chat.kind !== "group" && chat.bot_ids.includes(shown.body.to)
+        chat.bot_ids.includes(shown.body.to) && !chat.bot_ids.includes(shown.body.from)
           ? t("Message from {name}: {reason}", { name: bots.get(shown.body.from)?.name ?? t("a teammate"), reason: shown.body.reason })
           : t("Handed off to {name}", { name: bots.get(shown.body.to)?.name ?? t("a teammate") });
       break;
@@ -183,6 +176,9 @@ export function preview(chat: Chat, bots: Map<string, Bot>): string {
             : t("{who} wants to use {plugin}", { who, plugin });
       break;
     }
+    case "draft":
+      body = draftTitle(shown.body.draft, shown.author.kind === "bot" ? (bots.get(shown.author.bot_id)?.name ?? t("A bot")) : t("A bot"));
+      break;
   }
   const flattened = body.replace(/\n/g, " ").replace(/\*\*/g, "").replace(/`/g, "").trim();
   if (chat.kind === "group" && shown.author.kind === "bot" && shown.body.kind === "text") {
@@ -302,4 +298,14 @@ function toolActivity(s: WorkState, botId: string, tool: Extract<Body, { kind: "
     return t("Using {name}…", { name: plugin?.name ?? pluginId.charAt(0).toUpperCase() + pluginId.slice(1) });
   }
   return t("Working…");
+}
+
+/// How long Mute keeps a chat quiet, in seconds; 0 is until unmuted.
+export function muteSpans(): { title: string; seconds: number }[] {
+  return [
+    { title: t("For 1 Hour"), seconds: 3600 },
+    { title: t("For 8 Hours"), seconds: 8 * 3600 },
+    { title: t("For 1 Week"), seconds: 7 * 24 * 3600 },
+    { title: t("Always"), seconds: 0 },
+  ];
 }

@@ -154,6 +154,11 @@ struct ProviderCredential: Hashable, Identifiable {
     var name: String? = nil
     var api: CustomAPI? = nil
     var models: [CustomModel] = []
+    /// The model Auto-review runs on it unless the user picks another.
+    var reviewModel: String? = nil
+
+    /// A custom provider of decision models, which Auto-review can run and no bot can.
+    var decides: Bool { api?.decides == true }
 }
 
 /// The wire protocol a custom provider's server speaks.
@@ -161,6 +166,8 @@ enum CustomAPI: String, CaseIterable, Hashable {
     case chatCompletions = "chat-completions"
     case responses
     case messages
+    case systemOne = "system-one"
+    case decisions
 
     /// Product names, the same in every language.
     var title: String {
@@ -168,34 +175,45 @@ enum CustomAPI: String, CaseIterable, Hashable {
         case .chatCompletions: "OpenAI Chat Completions"
         case .responses: "OpenAI Responses"
         case .messages: "Anthropic Messages"
+        case .systemOne: "System One"
+        case .decisions: "OpenAI Decisions"
         }
     }
+
+    /// A decision API, whose models answer typed questions instead of chatting: Auto-review can
+    /// run them, and no bot can.
+    var decides: Bool { self == .systemOne || self == .decisions }
 
     /// What the CLI adds to the base URL for a model call.
     var path: String {
         switch self {
         case .chatCompletions: "/chat/completions"
         case .responses: "/responses"
-        case .messages: "/v1/messages"
+        case .messages: "/messages"
+        case .systemOne: "/systemone"
+        case .decisions: "/decisions"
         }
     }
 
-    var baseURLPlaceholder: String {
-        self == .messages ? "https://api.example.com" : "https://api.example.com/v1"
-    }
+    var baseURLPlaceholder: String { "https://api.example.com/v1" }
 
     /// The URL the CLI calls for a base URL as typed: a pasted endpoint is cut back to its root
-    /// first, as the CLI does, then this protocol's path goes on.
+    /// first, as the CLI does, then this protocol's path goes on, Messages' with the `/v1` a root
+    /// without one lacks (Moonshot's `…/anthropic`). A decision API's URL is its endpoint, since
+    /// vendors serve one at different paths: one that ends in a decision path stays as it is.
     func endpoint(for baseURL: String) -> String {
         var root = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while root.hasSuffix("/") { root.removeLast() }
+        if decides, root.hasSuffix("/systemone") || root.hasSuffix("/decisions") { return root }
         let pasted: [String] =
             switch self {
             case .chatCompletions: ["/chat/completions"]
             case .responses: ["/responses"]
-            case .messages: ["/v1/messages", "/v1"]
+            case .messages: ["/messages"]
+            case .systemOne, .decisions: []
             }
         if let suffix = pasted.first(where: { root.hasSuffix($0) }) { root.removeLast(suffix.count) }
+        if self == .messages, !root.hasSuffix("/v1") { root += "/v1" }
         return root + path
     }
 }
@@ -241,14 +259,30 @@ struct CustomProviderPreset: Hashable {
         ]
     }
 
-    /// The preset for a base URL as typed, by its host and port, so a URL pasted into an empty
-    /// sheet still finds the server's name and key hint.
-    static func matching(_ baseURL: String) -> CustomProviderPreset? {
+    /// The preset for a base URL as typed, by its host and port and, among a server's presets,
+    /// its API, so a URL pasted into an empty sheet still finds the server's name and key hint.
+    static func matching(_ baseURL: String, api: CustomAPI? = nil) -> CustomProviderPreset? {
         guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)), let host = url.host else { return nil }
-        return (cloud + local).first { preset in
+        let server = (cloud + local + decisions).filter { preset in
             let known = URL(string: preset.baseURL)
             return known?.host == host && known?.port == url.port
         }
+        return server.first { $0.api == api } ?? server.first
+    }
+
+    /// Decision APIs, whose models Auto-review can run.
+    static var decisions: [CustomProviderPreset] {
+        [
+            CustomProviderPreset(
+                name: "OpenRouter Decisions", api: .systemOne, baseURL: "https://openrouter.ai/api/alpha/decisions",
+                keyPlaceholder: L("sk-or-… from openrouter.ai/keys")),
+            CustomProviderPreset(
+                name: "OpenAI Decisions", api: .decisions, baseURL: "https://api.openai.com/v1/decisions",
+                keyPlaceholder: L("sk-… from platform.openai.com")),
+            CustomProviderPreset(
+                name: "TypeSafe", api: .systemOne, baseURL: "https://api.typesafe.ai/v1/systemone",
+                keyPlaceholder: L("Key from typesafe.ai")),
+        ]
     }
 
     /// Model servers that run on the user's own computers.
@@ -304,6 +338,8 @@ struct ProviderModel: Hashable {
     var id: String
     var label: String
     var levels: [String]
+    /// A decision model, which Auto-review can run and no bot can.
+    var decides = false
 
     /// Every thinking level, lowest first.
     private static let allThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -377,11 +413,16 @@ struct Device: Identifiable, Hashable {
     var machineKey: String
     /// Plugins installed on this Runner, as it advertises them. Secrets stay on the Runner.
     var plugins: [InstalledPlugin] = []
+    /// The channels its bots listen on, as it advertises them.
+    var channels: [ChannelStatus] = []
     /// The `lorca` this Device runs.
     var version: String = ""
     /// Set for a CLI that updates itself (one installed with the site's script); a CLI an app
     /// carries updates with the app.
     var update: CLIUpdate? = nil
+    /// The name the machine goes by, which a name the account gives the Device stands in for.
+    /// Empty when it is `name`.
+    var machineName: String = ""
 
     /// A self-updating CLI's updates, as its `machine` blob says.
     struct CLIUpdate: Hashable {
@@ -397,12 +438,84 @@ struct Device: Identifiable, Hashable {
     /// Derived from `os` alone: a desktop Device is a Runner and can be assigned bots.
     var isRunner: Bool { os.isDesktop }
 
+    /// Released standalone CLIs advertise updates; bundled and development CLIs do not.
+    /// Only these Runners show `lorca service` status and installation advice.
+    var isStandaloneRunner: Bool { isRunner && update != nil }
+
     var roleLabel: String { isRunner ? L("Runner") : L("Device") }
 
     /// What the Device panes say about a machine that never said what it is.
     static var unknownNote: String {
         L("This machine is paired to your account but has not sent its name or system. If you don't recognize it, unpair it.")
     }
+}
+
+// MARK: - Channels
+
+/// Where a channel's conversation happens.
+struct ChatChannel: Hashable {
+    var channelID: String
+    var service: String
+    var accountID: String
+    var chatID: String
+    var threadID: String?
+}
+
+/// What a channel takes.
+struct ChannelListen: Hashable {
+    var every = false
+    var mentions = false
+    var replies = false
+    var tags: [String] = []
+
+    /// "Mentions, replies, #feedback", or "Every message".
+    var summary: String {
+        if every { return L("Every message") }
+        var parts: [String] = []
+        if mentions { parts.append(L("mentions")) }
+        if replies { parts.append(L("replies")) }
+        parts += tags.map { "#\($0)" }
+        let joined = parts.joined(separator: L(", ", context: "list"))
+        return joined.prefix(1).uppercased() + joined.dropFirst()
+    }
+}
+
+/// A bot listening on a Telegram or Slack account, as its Runner advertises it.
+struct ChannelStatus: Identifiable, Hashable {
+    enum State: String {
+        case listening, paused, held, offline
+    }
+
+    struct Chat: Hashable {
+        var id: String
+        var title: String
+    }
+
+    /// A chat that wrote to the account's bot or added it to a group, waiting for the user to
+    /// allow it; the bot answers nothing there meanwhile.
+    struct Request: Hashable {
+        var id: String
+        var title: String
+        var isPrivate: Bool
+        /// Who wrote, or who added the bot to the group.
+        var from: String
+    }
+
+    let id: String
+    var botID: Bot.ID
+    var name: String
+    var service: String
+    var accountID: String
+    var chats: [Chat]
+    var listen: ChannelListen
+    var task: String
+    var state: State
+    var detail: String
+    var heldDelivery: String?
+    var requests: [Request] = []
+
+    var serviceName: String { service == "slack" ? "Slack" : "Telegram" }
+    var isPaused: Bool { state == .paused }
 }
 
 // MARK: - Bot
@@ -423,6 +536,7 @@ struct Bot: Identifiable, Hashable {
     /// A custom profile image, kept as a `file` blob like a message attachment. Shown in place
     /// of the symbol and accent once this computer has the bytes.
     var avatar: Attachment? = nil
+    var permissions: BotPermissions? = nil
     var createdAt: Date
 }
 
@@ -447,10 +561,15 @@ struct AutoReviewRule: Hashable, Identifiable {
 }
 
 /// The check on effectful plugin actions and shell commands, shared by every Device through
-/// the roster: on, a small model on the bot's provider asks only when needed; off, each one asks.
+/// the roster: on, a model asks only when needed; off, each one asks. The model is the review
+/// model of the picked provider, else of the bot's.
 struct AutoReview: Hashable {
     var isEnabled: Bool = true
     var rules: [AutoReviewRule] = []
+    /// The provider that reviews; nil for the bot's own.
+    var provider: ProviderCredential.Kind? = nil
+    /// The review model picked for each provider; one without uses its default.
+    var models: [ProviderCredential.Kind: String] = [:]
 }
 
 // MARK: - Plugins
@@ -461,6 +580,7 @@ struct InstalledPlugin: Identifiable, Hashable {
         case ready
         case needsSetup = "needs_setup"
         case needsAuth = "needs_auth"
+        case insufficientAccess = "insufficient_access"
         case connecting
         case error
         case unknown
@@ -475,6 +595,12 @@ struct InstalledPlugin: Identifiable, Hashable {
     var detail: String
     /// `mcp.json` for one of the Runner's own MCP servers, which the server sheet edits.
     var source: String? = nil
+    /// A named account's marketplace service (gmail) and the user's name for it (Work). Its `id`
+    /// is the account's own.
+    var serviceID: String? = nil
+    var accountName: String? = nil
+
+    var marketplaceID: String { serviceID ?? id }
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
     var isMcpServer: Bool { source == "mcp.json" }
@@ -484,7 +610,29 @@ struct InstalledPlugin: Identifiable, Hashable {
         case .ready: .systemGreen
         case .connecting: .controlAccentColor
         case .error: .systemRed
-        case .needsSetup, .needsAuth, .unknown: .systemOrange
+        case .needsSetup, .needsAuth, .insufficientAccess, .unknown: .systemOrange
+        }
+    }
+
+    /// The state in a word or two, for a row in a list. What it needs, in full, is in its sheet.
+    var shortStatus: String {
+        switch state {
+        case .ready: L("Connected")
+        case .connecting: L("Connecting…")
+        case .needsAuth: L("Needs a sign-in")
+        case .insufficientAccess: L("Needs more access")
+        case .needsSetup: L("Needs setup")
+        case .error: L("Can’t connect")
+        case .unknown: detail
+        }
+    }
+
+    /// Colored only when the user has something to do.
+    var shortStatusColor: NSColor {
+        switch state {
+        case .needsSetup, .needsAuth, .insufficientAccess: .systemOrange
+        case .error: .systemRed
+        case .ready, .connecting, .unknown: .secondaryLabelColor
         }
     }
 }
@@ -525,6 +673,7 @@ struct MarketplacePlugin: Identifiable, Hashable {
     var skills: [Skill]
     var variables: [Variable]
     var installedOn: [Device.ID]
+    var namedAccounts: Bool = false
 
     var symbolName: String { icon.isEmpty ? "puzzlepiece.extension" : icon }
     /// At least one server signs in with OAuth on the Runner.
@@ -559,6 +708,7 @@ struct BotTemplate: Identifiable, Hashable {
 
 /// What the marketplace offers, in the index's order.
 struct Marketplace {
+    var packs: [WorkflowPack] = []
     var plugins: [MarketplacePlugin] = []
     var bots: [BotTemplate] = []
 }
@@ -592,6 +742,81 @@ struct PluginDetail {
     var skills: [(name: String, description: String)]
 }
 
+/// An email or Slack message a bot wrote in a chat, waiting for the user to send it: the chat's
+/// view of the review item that holds the exact call. Send names the version the card showed.
+struct DraftCard: Hashable {
+    /// The message's parts, as the card shows and edits them.
+    struct Fields: Hashable {
+        struct File: Hashable {
+            var name: String
+            var size: Int64
+        }
+
+        /// `email` or `slack`.
+        var kind: String
+        var to: [String]
+        var cc: [String] = []
+        var bcc: [String] = []
+        var subject = ""
+        var body: String
+        var attachments: [File] = []
+        /// What it answers: an email's id or a Slack thread.
+        var reply: String?
+
+        var isEmail: Bool { kind == "email" }
+
+        /// The wire shape `reviews.edit` takes as `message`.
+        var parameters: [String: Any] {
+            var fields: [String: Any] = ["kind": kind, "to": to, "cc": cc, "bcc": bcc, "subject": subject, "body": body,
+                "attachments": attachments.map { ["name": $0.name, "size": $0.size] }]
+            if let reply { fields["reply"] = reply }
+            return fields
+        }
+    }
+
+    var reviewID: String
+    var version: UInt64
+    /// The review item's state: pending, approved, executing, succeeded, failed, rejected,
+    /// cancelled, or uncertain.
+    var state: String
+    var pluginID: String
+    /// The account it goes out from: "Gmail · Work".
+    var account: String
+    var fields: Fields
+    /// Why it was not sent, or why it needs another look.
+    var note: String?
+    /// Whether, with drafts off, the bot sends these itself (Slack); Gmail only keeps drafts.
+    var direct: Bool
+    /// What the user changed on the card and has not sent; nothing leaves this Mac until Send.
+    var edited: Fields? = nil
+
+    /// The message as the card shows it: the user's changes, else the draft.
+    var shown: Fields { edited ?? fields }
+
+    var isPending: Bool { state == "pending" }
+
+    /// How it ended or where it stands, in a word or two; nil while it waits.
+    var stateText: String? {
+        switch state {
+        case "approved", "executing": L("Sending…")
+        case "succeeded": L("Sent")
+        case "failed": L("Not sent")
+        case "rejected", "cancelled": L("Discarded")
+        case "uncertain": L("Not confirmed")
+        default: nil
+        }
+    }
+
+    /// Whether the user has something to check: a send that failed or may not have gone out.
+    var needsAttention: Bool { state == "failed" || state == "uncertain" }
+
+    /// "Chef drafted an email", "a reply", or "a Slack message".
+    func title(botName: String) -> String {
+        if fields.isEmail { return fields.reply == nil ? L("%@ drafted an email", botName) : L("%@ drafted a reply", botName) }
+        return L("%@ drafted a Slack message", botName)
+    }
+}
+
 /// A bot asking before a plugin or shell action runs, or before a plugin is installed.
 struct PermissionRequest: Hashable {
     enum Decision: String, Hashable {
@@ -621,22 +846,52 @@ struct PermissionRequest: Hashable {
     var rule: String? = nil
     /// A shell card's whole command, where `summary` is its first line.
     var command: String? = nil
+    /// A secret request: what the bot asks for and where its Runner uses it. The card takes the
+    /// values; they go sealed to the Runner and never come back.
+    var secret: SecretAsk? = nil
 
     /// The command as the card and its sheet show it, without the summary's `$ ` prompt.
     var fullCommand: String {
         command ?? (summary.hasPrefix("$ ") ? String(summary.dropFirst(2)) : summary)
     }
 
+    /// The line under the title: an access request names a plugin's tool as it is, or what the
+    /// bot wanted to do on its Runner in the CLI's English, which reads here in the app's language.
+    var shownSummary: String {
+        guard isAccess else { return summary }
+        switch summary {
+        case "Shell commands": return L("Shell commands")
+        case "Changing files": return L("Changing files")
+        case "Reading files": return L("Reading files")
+        default: return summary
+        }
+    }
+
+    /// Why the card asks: what Auto-review said, or for an access request, where it is turned on.
+    var shownReason: String? { isAccess ? L("Not allowed in this bot's Access settings.") : reason }
+
     var isPending: Bool { decision == .pending }
     var isInstall: Bool { tool == "install" }
+    /// The bot's Access refused a call: the card opens its Access sheet or is dismissed.
+    var isAccess: Bool { tool == "access" }
     /// A shell command on the bot's Runner.
-    var isShell: Bool { pluginID == "computer" }
+    var isShell: Bool { pluginID == "computer" && !isAccess }
     /// A sign-in card: Sign in starts the OAuth flow on the Runner.
     var isConnect: Bool { tool == "connect" }
+    /// A secret request: the card holds a field for each value.
+    var isSecret: Bool { tool == "secret" && secret != nil }
 
     /// "wants to use GitHub" / "wants to install GitHub" / "needs a sign-in to GitHub" /
     /// "wants to run a command on Workbench"
     var verbPhrase: String {
+        if isAccess { return L("needs more access") }
+        if let secret, isSecret {
+            switch secret.use {
+            case .browser: return L("needs a secret for %@", secret.site ?? pluginName)
+            case .plugin: return L("needs a secret for %@", pluginName)
+            case .command: return L("needs a secret for its commands")
+            }
+        }
         if isConnect { return L("needs a sign-in to %@", pluginName) }
         if isShell { return L("wants to run a command on %@", pluginName) }
         return isInstall ? L("wants to install %@", pluginName) : L("wants to use %@", pluginName)
@@ -645,6 +900,8 @@ struct PermissionRequest: Hashable {
     var decisionText: String {
         switch decision {
         case .pending: L("Waiting for you")
+        case .allowed where isSecret: L("Saved")
+        case .denied where isSecret: L("Not now")
         case .allowed: isConnect ? L("Signing in") : L("Allowed once")
         case .always: L("Always allowed")
         case .denied: isConnect ? L("Not now") : L("Denied")
@@ -658,11 +915,46 @@ struct PermissionRequest: Hashable {
     /// The buttons a pending card offers: (title, decision). A shell command offers Always
     /// allow only with a rule to add.
     var choices: [(String, String)] {
+        if isAccess { return [(L("Edit Access…"), "access"), (L("Dismiss"), "deny")] }
         if isConnect { return [(L("Sign in"), "allow"), (L("Not now"), "deny")] }
         if isInstall { return [(L("Allow"), "allow"), (L("Deny"), "deny")] }
         if isShell && rule == nil { return [(L("Allow once"), "allow"), (L("Deny"), "deny")] }
         return [(L("Allow once"), "allow"), (L("Always allow"), "always"), (L("Deny"), "deny")]
     }
+}
+
+/// What a secret request asks for: the values the bot names, and where its Runner uses them.
+struct SecretAsk: Hashable {
+    enum Use: String, Hashable {
+        /// Typed into a sign-in page of `site` in the bot's Browser.
+        case browser
+        /// An environment variable of the bot's commands.
+        case command
+        /// A setting of the card's plugin.
+        case plugin
+    }
+
+    struct Field: Hashable {
+        /// How the bot refers to it.
+        var name: String
+        /// What the card calls it: "GitHub password".
+        var label: String
+    }
+
+    var use: Use
+    var site: String?
+    var fields: [Field]
+}
+
+/// A secret kept on a Runner for one of its bots, as the Secrets pane lists it: never its value.
+struct SavedSecret: Identifiable, Hashable {
+    let id: String
+    var botID: Bot.ID
+    var name: String
+    var label: String
+    var use: SecretAsk.Use
+    var site: String?
+    var updatedAt: Date
 }
 
 /// A bot's memory as its Runner reports it: the curated index with its load budget, and the
@@ -709,12 +1001,13 @@ struct Routine: Identifiable, Hashable {
     var name: String
     /// The task, written to the bot, handed to it on every run.
     var prompt: String
-    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time.
+    /// `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`.
     var schedule: String
     /// The schedule in words: "Weekdays at 9:00 AM".
     var scheduleText: String
     var isEnabled: Bool
-    /// Why Lorca paused it, when it did: "away".
+    /// Why Lorca paused it, when it did: "away", or "authentication" after three failed
+    /// sign-ins in a row.
     var pausedReason: String?
     var lastRunAt: Date?
     /// How the last run ended: "sent", "pass", or "error".
@@ -725,13 +1018,88 @@ struct Routine: Identifiable, Hashable {
     /// The script the Runner runs at each due time before the bot does; the bot runs only when
     /// it finds something. `nextRunAt` is then the next check.
     var check: String? = nil
+    /// The IANA timezone a cron schedule reads in.
+    var timezone = TimeZone.current.identifier
+    /// After due times its Runner missed: "coalesce" runs once when it is back, "skip" waits
+    /// for the next one.
+    var missedRunPolicy = "coalesce"
+    /// How it stands, from the CLI: "on", "running", "paused", "blocked", "failed", or
+    /// "waiting_for_runner".
+    var state = "on"
+    var health = RoutineHealth()
+    /// When a one-time routine runs; its Runner removes it after that run.
+    var onceAt: Date? = nil
+    /// What a routine on events listens to: a pull request through GitHub, or its own webhook.
+    var events: RoutineEvents? = nil
+    /// The calendar events a routine around events runs before or after.
+    var calendar: RoutineCalendar? = nil
+
+    /// Whether its Runner looks before it runs: a routine with a check.
+    var looksFirst: Bool { check != nil }
+
+    /// The symbol of its row: what places its runs, while it is on.
+    var symbol: String {
+        if isRunning { return "arrow.triangle.2.circlepath" }
+        if !isEnabled { return "pause.circle" }
+        if let events { return events.isWebhook ? "link" : "arrow.triangle.pull" }
+        if calendar != nil { return "calendar" }
+        if onceAt != nil { return "alarm" }
+        return "clock"
+    }
+
+    /// What went wrong, while something did: the CLI's state with the kind of failure.
+    var problem: RoutineProblem? {
+        if isRunning { return nil }
+        let model = health.modelStatus != nil
+        switch state {
+        case "blocked" where pausedReason == "authentication":
+            return .signedOut(model: health.modelAuthenticationFailures >= 3)
+        case "waiting_for_runner": return .offline
+        case "blocked": return calendar != nil ? .readFailed(calendar: true) : .checkBlocked
+        case "failed":
+            if model { return health.modelAuthenticationFailures > 0 ? .signInFailed(model: true) : .cantConnect(model: true) }
+            if health.authenticationFailures > 0 { return .signInFailed(model: false) }
+            if health.connectionFailures > 0 { return .cantConnect(model: false) }
+            if calendar != nil { return .readFailed(calendar: true) }
+            return .checkFailed
+        // A routine on events whose receiver waits for the user.
+        default:
+            guard isEnabled, let events, events.status == "needs_setup" else { return nil }
+            return .needsSetup(gitHub: events.isGitHub, subject: events.subject)
+        }
+    }
+
+    /// The schedule in words, with its timezone when this Mac keeps other hours, now or in half a
+    /// year: "Weekdays at 9:00 AM (New York time)". An interval counts time, whatever the zone.
+    var scheduleSummary: String {
+        // Events keep their own times.
+        guard !schedule.hasPrefix("every "), events == nil, calendar == nil, let zone = TimeZone(identifier: timezone) else { return scheduleText }
+        let now = Date()
+        let differs = [now, now.addingTimeInterval(182 * 86_400)].contains { zone.secondsFromGMT(for: $0) != TimeZone.current.secondsFromGMT(for: $0) }
+        guard differs else { return scheduleText }
+        let city = timezone.split(separator: "/").last.map { $0.replacingOccurrences(of: "_", with: " ") } ?? timezone
+        return L("%@ (%@ time)", scheduleText, city)
+    }
+
+    /// "Today 9:00 AM · nothing new", for a routine with a check that has run.
+    var lastCheckSummary: String? {
+        guard looksFirst, let at = health.lastCheckAt else { return nil }
+        let when = Format.daySeparator(at)
+        switch health.status {
+        case "quiet": return L("%@ · nothing new", when)
+        case "ready": return L("%@ · found something", when)
+        case "failed", "blocked": return L("%@ · failed", when)
+        default: return when
+        }
+    }
 
     /// The line under the name in the inspector: the schedule, then what is going on.
     var detail: String {
         if isRunning { return L("%@ · Running…", scheduleText) }
+        if let problem { return "\(problem.text) · \(scheduleText)" }
         guard isEnabled else { return pausedReason == "away" ? L("%@ · Paused while you were away", scheduleText) : L("%@ · Paused", scheduleText) }
         if let nextRunAt {
-            return check == nil ? L("%@ · Next %@", scheduleText, Format.upcoming(nextRunAt)) : L("%@ · Next check %@", scheduleText, Format.upcoming(nextRunAt))
+            return looksFirst ? L("%@ · Next check %@", scheduleText, Format.upcoming(nextRunAt)) : L("%@ · Next %@", scheduleText, Format.upcoming(nextRunAt))
         }
         return scheduleText
     }
@@ -745,6 +1113,132 @@ struct Routine: Identifiable, Hashable {
         case "pass": return L("%@ · nothing to report", when)
         case "error": return L("%@ · failed", when)
         default: return when
+        }
+    }
+}
+
+/// What a routine on events listens to, as the CLI gives it: a receiver on the relay (`github`,
+/// `webhook`), a subject (`acme/project#42`), how it listens, and the latest event.
+struct RoutineEvents: Hashable {
+    var receiver: String
+    var subject: String
+    /// "pending", "subscribed", "needs_setup", or "gateway".
+    var status: String
+    var sourceName: String
+    var title: String
+    var url: URL?
+    /// A webhook's URL and the key its senders include.
+    var endpoint: String
+    var key: String
+    var lastEvent: LastEvent?
+
+    struct LastEvent: Hashable {
+        var summary: String
+        var at: Date
+    }
+
+    var isWebhook: Bool { receiver == "webhook" || !endpoint.isEmpty }
+    var isGitHub: Bool { receiver == "github" }
+
+    /// What starts the routine: "Watches acme/project#42", "When its webhook is called".
+    var words: String {
+        if !subject.isEmpty { return L("Watches %@", subject) }
+        if isWebhook { return L("When its webhook is called") }
+        return L("On %@ events", sourceName.isEmpty ? receiver : sourceName)
+    }
+
+    /// The header line a sender pastes: "Authorization: Bearer <key>".
+    var authorizationHeader: String { "Authorization: Bearer \(key)" }
+}
+
+/// The calendar events a routine runs around: so many minutes before they start, or after they
+/// end, of the events that match its words, on one Calendar account.
+struct RoutineCalendar: Hashable {
+    var account: String
+    var matching: String?
+    var minutes: Int
+    var after: Bool
+    var nextEventTitle: String?
+}
+
+/// How a routine's checks and runs have gone, as its Runner records them.
+struct RoutineHealth: Hashable {
+    var lastCheckAt: Date?
+    var lastSuccessAt: Date?
+    /// How the last check went: "quiet", "ready", "failed", or "blocked".
+    var status: String?
+    var connectionFailures = 0
+    var authenticationFailures = 0
+    /// The runs' own streak with the model provider, which checks do not clear.
+    var modelStatus: String?
+    var modelAuthenticationFailures = 0
+}
+
+/// What went wrong with a routine, in the words the inspector row and the routine sheet use.
+enum RoutineProblem: Hashable {
+    /// Three failed sign-ins in a row paused it, of its runs (`model`) or its check.
+    case signedOut(model: Bool)
+    case offline
+    case cantConnect(model: Bool)
+    case signInFailed(model: Bool)
+    case checkFailed
+    /// The check called something that could change things.
+    case checkBlocked
+    /// A routine around events couldn't read its calendar.
+    case readFailed(calendar: Bool)
+    /// A routine on events waits for the user: the GitHub App installed on its repository.
+    case needsSetup(gitHub: Bool, subject: String)
+
+    /// One or two words for the row and the sheet's State.
+    var text: String {
+        switch self {
+        case .signedOut: return L("Needs sign-in")
+        case .offline: return L("Waiting for Runner")
+        case .cantConnect: return L("Can’t connect")
+        case .signInFailed: return L("Sign-in failed")
+        case .checkFailed, .checkBlocked, .readFailed: return L("Check failed")
+        case .needsSetup(gitHub: true, _): return L("App not installed")
+        case .needsSetup: return L("Needs setup")
+        }
+    }
+
+    /// Whether the user has to do something; a connection that fails is tried again on its own.
+    var needsUser: Bool {
+        if case .cantConnect = self { return false }
+        return true
+    }
+
+    /// What happened and how to fix it, for the routine sheet.
+    func explanation(bot: String, runner: String, standaloneRunner: Bool = false) -> String {
+        switch self {
+        case .signedOut(model: true):
+            return L("The model provider turned down three sign-ins in a row, so the routine is paused. Reconnect the provider in Settings, then resume it.")
+        case .signedOut(model: false):
+            return L("The check couldn’t sign in to a plugin three times in a row, so the routine is paused. Sign in to the plugin again on %@, then resume it.", runner)
+        case .offline:
+            return standaloneRunner
+                ? L("%@ is offline, so the routine waits for it. To keep it available while the app is closed, run lorca service install on it.", runner)
+                : L("%@ is offline, so the routine waits for it.", runner)
+        case .cantConnect(model: true):
+            return L("The last run couldn’t reach the model provider. It tries again at the next run, waiting longer after each failure.")
+        case .cantConnect(model: false):
+            return L("The last check couldn’t connect. It tries again at the next check, waiting longer after each failure.")
+        case .signInFailed(model: true):
+            return L("The last run couldn’t sign in to the model provider. Reconnect it in Settings; after three failures in a row the routine pauses.")
+        case .signInFailed(model: false):
+            return L("The last check couldn’t sign in to a plugin. Sign in to it again on %@; after three failures in a row the routine pauses.", runner)
+        case .checkFailed:
+            return L("The check stopped with an error. %@ got the error and can fix the check.", bot)
+        case .checkBlocked:
+            return L("The check tried to change something, or to use something this bot's Access leaves out. Ask %@ to fix it.", bot)
+        case .readFailed(calendar: false), .readFailed(calendar: true):
+            return L("The last check couldn’t read the calendar. Make sure %@ may use it in Access, and that it’s signed in on %@.", bot, runner)
+        case .needsSetup(gitHub: true, let subject):
+            // The repository of "acme/project#42".
+            let repo = subject.split(separator: "#").first.map(String.init) ?? subject
+            return L("The Lorca GitHub App isn’t installed on %@, or isn’t connected to this account yet. Install it from the GitHub row: the watch starts once it’s in.", repo)
+        case .needsSetup:
+            return L("The service needs you first. %@ said what to do in the chat.", bot)
         }
     }
 }
@@ -766,6 +1260,9 @@ struct ToolInvocation: Hashable {
     /// A shell command's card, which the transcript shows only while the command needs the user
     /// (`isShown`). Every `bash` row has one.
     var run: CommandRun? = nil
+    /// The card of the coding agent a `coding_agent` call started, which the transcript shows
+    /// from the start: what it works on, how it stands, and what it asks.
+    var agent: AgentRun? = nil
 
     /// A finished message_bot call: the one tool the transcript shows, as "Messaged ◉ Name".
     /// Everything else a bot does with tools stays behind the "is working" row.
@@ -779,6 +1276,7 @@ struct ToolInvocation: Hashable {
     /// question) until it ends. Before that the bot deals with it, and the command shows only
     /// as the working row's activity.
     var isShown: Bool {
+        if agent != nil { return true }
         guard let run else { return isSentMessage }
         return run.state == .asking || (run.isLive && run.handedOver)
     }
@@ -874,6 +1372,119 @@ struct CommandRun: Hashable {
     }
 }
 
+/// A coding agent a bot runs on its Runner, Claude Code or Codex, as the card of the call that
+/// started it shows it: Auto-review's question before it starts, what it works on and where, how
+/// it stands, its last lines, and what it asks. A question about starting it or a command it
+/// wants to run is answered like a command's (`chats.permission`); one its pane asks, with a
+/// choice or text (`coding.answer`). Stop is `coding.stop`; its transcript, `coding.transcript`.
+struct AgentRun: Hashable {
+    enum State: String, Hashable {
+        /// Auto-review is judging whether it may start.
+        case checking
+        /// A question waits for the user.
+        case asking
+        case starting
+        case working
+        /// Done with what it was asked; it takes a follow-up.
+        case idle
+        case exited
+        case failed
+        case stopped
+        /// Not allowed to start.
+        case denied
+        /// Nobody answered in time.
+        case expired
+        /// The user wrote in the chat instead of answering.
+        case dismissed
+    }
+
+    struct Question: Hashable {
+        enum Kind: String, Hashable {
+            /// Auto-review asks before it starts.
+            case start
+            /// It wants to run `command`.
+            case command
+            /// Its pane asks, with a menu of `choices`.
+            case choices
+            /// Its pane asks for an answer to type.
+            case text
+        }
+
+        var kind: Kind
+        /// What its pane shows asking.
+        var text: String
+        var command: String?
+        var choices: [String]
+        var reason: String?
+        var rule: String?
+
+        /// Answered with Allow once and Deny, and Always allow with a rule to add.
+        var isPermission: Bool { kind == .start || kind == .command }
+
+        /// The buttons a permission offers: (title, decision).
+        var decisions: [(String, String)] {
+            rule == nil ? [(L("Allow once"), "allow"), (L("Deny"), "deny")] : [(L("Allow once"), "allow"), (L("Always allow"), "always"), (L("Deny"), "deny")]
+        }
+    }
+
+    var id: String
+    /// `claude` or `codex`.
+    var kind: String
+    /// `herdr` or `luvus` when it runs in a pane of that terminal host on its Runner.
+    var host: String?
+    var task: String
+    /// Where it works, from the home folder.
+    var folder: String
+    var branch: String?
+    var state: State
+    /// Working, with nothing new for a while.
+    var stalled = false
+    /// Auto-review held its start and told the bot why, without asking: it is `denied`.
+    var held = false
+    var question: Question?
+    var output: String?
+    var outcome: String?
+    var device: String?
+    var startedAt: Date?
+
+    /// Its product's name, which is not translated.
+    var name: String { kind == "codex" ? "Codex" : "Claude Code" }
+    var hostName: String? {
+        switch host {
+        case "herdr": "Herdr"
+        case "luvus": "Luvus"
+        default: nil
+        }
+    }
+
+    /// It has not ended.
+    var isOpen: Bool { [.checking, .asking, .starting, .working, .idle].contains(state) }
+    /// It runs, or is about to: Stop ends it. Not while Auto-review decides whether it may start,
+    /// and not once it is done, waiting for a follow-up.
+    var isRunning: Bool { isOpen && state != .checking && state != .idle && question?.kind != .start }
+
+    /// Where it works, in a word: its branch, else its folder's name.
+    var place: String {
+        branch ?? folder.split(separator: "/").last.map(String.init) ?? folder
+    }
+
+    /// How it stands, in a word or two.
+    var status: String {
+        switch state {
+        case .checking, .starting: L("Starting", context: "coding agent")
+        case .asking: L("Needs you", context: "coding agent")
+        case .working: stalled ? L("Quiet", context: "coding agent") : L("Working", context: "coding agent")
+        case .idle: L("Done", context: "coding agent")
+        case .exited: L("Ended", context: "coding agent")
+        case .failed: L("Failed", context: "coding agent")
+        case .stopped: L("Stopped", context: "coding agent")
+        case .denied: held ? L("Held by Auto-review", context: "coding agent") : L("Not allowed", context: "coding agent")
+        case .expired: L("No answer", context: "coding agent")
+        case .dismissed: L("Dismissed", context: "coding agent")
+        }
+    }
+}
+
 /// A file sent with a message. The bytes live under `~/.lorca/files/<id>` once this Device
 /// has them; `width` and `height` size an image's thumbnail before the file arrives.
 struct Attachment: Hashable, Identifiable {
@@ -900,14 +1511,170 @@ struct Attachment: Hashable, Identifiable {
     }
 }
 
+/// A file or document link a bot published in a chat: one version of it. `id` names the output
+/// across its versions; the message that carries it is the version.
+struct Output: Hashable, Decodable {
+    var id: String
+    var name: String
+    var mime: String
+    var botId: String
+    var version: Int
+    var url: String?
+    var evidence: Evidence?
+
+    /// What the bot says it checked: a test run, a screenshot from before or after a change, or
+    /// another check, and how it went.
+    struct Evidence: Hashable, Decodable {
+        var kind: String
+        var summary: String
+        var status: String
+        var command: String?
+
+        var title: String {
+            switch kind {
+            case "test_result": L("Test result")
+            case "before_screenshot": L("Before screenshot")
+            case "after_screenshot": L("After screenshot")
+            default: L("Check")
+            }
+        }
+
+        var statusText: String {
+            switch status {
+            case "passed": L("Passed")
+            case "failed": L("Failed")
+            default: L("Not verified")
+            }
+        }
+
+        var failed: Bool { status == "failed" }
+    }
+
+    /// The document a link output points at; only an https address without credentials opens.
+    var documentURL: URL? {
+        guard let url, let parsed = URL(string: url), parsed.scheme == "https", parsed.host != nil,
+            parsed.user == nil, parsed.password == nil else { return nil }
+        return parsed
+    }
+
+    /// What an output is, for its icon and its tint: a link or a kind of file.
+    enum Kind {
+        case file, link, image, video, audio, pdf, code, data, table, archive, text
+    }
+
+    private static let extensionKinds: [String: Kind] = {
+        var kinds: [String: Kind] = [:]
+        let groups: [(Kind, [String])] = [
+            (.code, ["html", "htm", "css", "js", "mjs", "ts", "tsx", "jsx", "go", "rs", "py", "rb", "swift", "java", "kt", "c", "h", "cc", "cpp", "sh", "sql", "svg", "diff", "patch"]),
+            (.data, ["json", "jsonl", "yaml", "yml", "toml", "xml"]),
+            (.table, ["csv", "tsv", "xls", "xlsx", "numbers"]),
+            (.archive, ["zip", "gz", "tgz", "tar", "7z", "rar"]),
+            (.text, ["txt", "md", "log", "rtf", "doc", "docx"]),
+        ]
+        for (kind, extensions) in groups {
+            for ext in extensions { kinds[ext] = kind }
+        }
+        return kinds
+    }()
+
+    /// What the output is, from its link, its media type, or its file's extension.
+    var kind: Kind {
+        if url != nil { return .link }
+        if let kind = Self.extensionKinds[(name as NSString).pathExtension.lowercased()] { return kind }
+        if mime.hasPrefix("image/") { return .image }
+        if mime.hasPrefix("video/") { return .video }
+        if mime.hasPrefix("audio/") { return .audio }
+        if mime == "application/pdf" { return .pdf }
+        if mime == "application/json" { return .data }
+        if mime.hasPrefix("text/") { return .text }
+        return .file
+    }
+
+    /// The SF Symbol for what the output is.
+    var symbolName: String {
+        switch kind {
+        case .link: "link"
+        case .image: "photo"
+        case .video: "film"
+        case .audio: "waveform"
+        case .pdf: "richtext.page"
+        case .code: "chevron.left.forwardslash.chevron.right"
+        case .data: "curlybraces"
+        case .table: "tablecells"
+        case .archive: "zipper.page"
+        case .text: "text.page"
+        case .file: "document"
+        }
+    }
+
+    /// The color of the output's icon, by what it is.
+    var tint: NSColor {
+        switch kind {
+        case .link, .image: .systemBlue
+        case .video: .systemPurple
+        case .audio: .systemPink
+        case .pdf: .systemRed
+        case .code: .systemOrange
+        case .data: .systemTeal
+        case .table: .systemGreen
+        case .text: .systemIndigo
+        case .archive, .file: .secondaryLabelColor
+        }
+    }
+
+    /// "HTML", "PNG", or the link's host: what the output's card says it is beside its size.
+    var typeName: String {
+        if let url {
+            guard let host = URL(string: url)?.host else { return "" }
+            return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        }
+        let ext = (name as NSString).pathExtension
+        if !ext.isEmpty, ext.count <= 8 { return ext.uppercased() }
+        if let sub = mime.split(separator: "/").last, sub != "octet-stream", sub.count <= 8, mime.contains("/") {
+            return sub.uppercased()
+        }
+        return ""
+    }
+}
+
+/// An output and its versions, newest first. Each version is a message of its own.
+struct OutputSeries: Hashable, Identifiable {
+    var versions: [Message]
+
+    var id: String { output.id }
+    var latest: Message { versions[0] }
+    var output: Output { latest.output! }
+
+    /// The chat's output messages as one series per output, the latest published first.
+    static func group(_ messages: [Message]) -> [OutputSeries] {
+        var order: [String] = []
+        var byID: [String: [Message]] = [:]
+        for message in messages {
+            guard let output = message.output else { continue }
+            if byID[output.id] == nil { order.append(output.id) }
+            byID[output.id, default: []].append(message)
+        }
+        return order
+            .map { OutputSeries(versions: byID[$0]!.sorted { $0.output!.version > $1.output!.version }) }
+            .sorted { $0.latest.createdAt > $1.latest.createdAt }
+    }
+}
+
 struct Message: Identifiable, Hashable {
     enum Author: Hashable {
         case you
         case bot(Bot.ID)
         case system
+        /// Someone outside Lorca, in a channel's conversation.
+        case contact(String)
 
         var botID: Bot.ID? {
             if case let .bot(id) = self { return id }
+            return nil
+        }
+
+        var contactName: String? {
+            if case let .contact(name) = self { return name }
             return nil
         }
 
@@ -920,6 +1687,7 @@ struct Message: Identifiable, Hashable {
         case handoff(from: Bot.ID, to: Bot.ID, reason: String)
         case notice(String)
         case permission(PermissionRequest)
+        case draft(DraftCard)
     }
 
     enum State: Hashable {
@@ -940,6 +1708,12 @@ struct Message: Identifiable, Hashable {
     var replyTo: ReplyQuote?
     /// A message of the user's the bot's turn holds for its next step; Send now has it read now.
     var queued = false
+    var output: Output?
+    /// A bot's published output, which the transcript shows as a card of its own rather than a
+    /// bubble.
+    var isOutputCard: Bool { output != nil && !author.isYou }
+    /// summary, urgent, or quiet, supplied by the CLI for structured attention messages.
+    var notification: String?
 
     init(
         id: String = "msg-\(UUID().uuidString.lowercased())",
@@ -948,7 +1722,8 @@ struct Message: Identifiable, Hashable {
         state: State = .complete,
         createdAt: Date = Date(),
         attachments: [Attachment] = [],
-        replyTo: ReplyQuote? = nil
+        replyTo: ReplyQuote? = nil,
+        output: Output? = nil
     ) {
         self.id = id
         self.author = author
@@ -957,6 +1732,7 @@ struct Message: Identifiable, Hashable {
         self.createdAt = createdAt
         self.attachments = attachments
         self.replyTo = replyTo
+        self.output = output
     }
 
     /// A finished text message, the user's or a bot's, which a reply can answer.
@@ -985,6 +1761,7 @@ struct Message: Identifiable, Hashable {
         case let .handoff(_, _, reason): reason
         case let .notice(value): value
         case let .permission(request): request.summary
+        case let .draft(card): card.fields.body
         }
     }
 
@@ -1048,8 +1825,34 @@ struct Chat: Identifiable, Hashable {
     var ownerBotID: Bot.ID? = nil
     /// What a group is for, which every member reads in its system prompt; empty for none.
     var groupDescription = ""
+    /// The sidebar section the chat is listed under; none lists it with the chats in no section.
+    var sectionID: SidebarSection.ID? = nil
+    /// Out of the sidebar but kept: search finds it, and the sidebar's Hidden group lists it.
+    var isHidden = false
+    /// Set while the chat's alerts are off on every Device.
+    var mute: Mute? = nil
+
+    /// Alerts are off until `until`, or until unmuted without one.
+    struct Mute: Hashable {
+        var until: Date?
+    }
+
+    /// A conversation a channel keeps: one Telegram chat or topic, or one Slack thread.
+    var channel: ChatChannel? = nil
 
     var isGroup: Bool { kind == .group }
+
+    /// A transcript with more than one speaker on the bots' side: a group, or a channel's
+    /// conversation with the people there.
+    var showsSpeakers: Bool { isGroup || channel != nil }
+
+    /// Whether the chat's alerts are off now. The unread count is kept either way.
+    var isMuted: Bool { isMuted(at: Date()) }
+
+    func isMuted(at date: Date) -> Bool {
+        guard let mute else { return false }
+        return mute.until.map { date < $0 } ?? true
+    }
 
     /// A group's owner: the one set, else the first member, as the CLI picks.
     var owner: Bot.ID? {
@@ -1058,6 +1861,8 @@ struct Chat: Identifiable, Hashable {
         return botIDs.first
     }
     var isDM: Bool { kind == .dm }
+    /// The one DM a bot has with the user: a direct chat that is not a channel's conversation.
+    var isBotDM: Bool { kind == .dm && channel == nil }
 
     /// Whether another bot may join. Only groups grow, and never past the cap.
     var canAddBot: Bool { isGroup && botIDs.count < Self.maxGroupBots }
@@ -1075,6 +1880,16 @@ struct Chat: Identifiable, Hashable {
 }
 
 
+// MARK: - Sidebar sections
+
+/// A named group of chats in the sidebar. Every Device shows the same sections, in the same
+/// order, folded the same way.
+struct SidebarSection: Identifiable, Hashable {
+    let id: String
+    var name: String
+    var isCollapsed = false
+}
+
 // MARK: - Usage
 
 /// Tokens and money the turns in a chat used. `contextTokens` and `contextWindow` are the last
@@ -1088,6 +1903,10 @@ struct ChatUsage: Hashable {
     var costUSD: Double
     var turns: Int
     var model: String
+    var apiCostUSD: Double = 0
+    var subscriptionEstimateUSD: Double = 0
+    var unknownPriceCalls: Int = 0
+    var pricingKinds: [String] = []
 
     /// "128k of 1M · 13%", or "128k" when the window is unknown.
     var contextSummary: String {
@@ -1096,10 +1915,24 @@ struct ChatUsage: Hashable {
         return L("%@ of %@ · %d%%", Format.tokens(contextTokens), Format.tokens(contextWindow), percent)
     }
 
-    /// "$0.42 · 18 turns"
+    /// "$0.42 · 18 turns". A subscription's turns cost what the plan costs, so their price at
+    /// API rates reads as an estimate ("$0.42 est."); a model without a known price reads
+    /// Price unknown, never $0.00.
     var spendSummary: String {
-        let dollars = costUSD < 0.01 && costUSD > 0 ? "<$0.01" : String(format: "$%.2f", costUSD)
-        return turns == 1 ? L("%@ · %d turn", dollars, turns) : L("%@ · %d turns", dollars, turns)
+        let count = turns == 1 ? L("1 turn") : L("%d turns", turns)
+        var parts: [String] = []
+        if pricingKinds.contains("api") { parts.append(Format.dollars(apiCostUSD)) }
+        if pricingKinds.contains("subscription_estimate") { parts.append(L("%@ est.", Format.dollars(subscriptionEstimateUSD))) }
+        if unknownPriceCalls > 0 || parts.isEmpty { parts.append(parts.isEmpty ? L("Price unknown") : L("unknown", context: "price")) }
+        return "\(parts.joined(separator: " + ")) · \(count)"
+    }
+
+    /// What the Spent row's estimate or unknown price means, for its tooltip.
+    var spendNote: String? {
+        if pricingKinds.contains("subscription_estimate") {
+            return L("An estimate of what these turns would cost at API prices. Your subscription covers them.")
+        }
+        return unknownPriceCalls > 0 || pricingKinds.isEmpty ? L("This model has no known price.") : nil
     }
 }
 

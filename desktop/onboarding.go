@@ -293,7 +293,7 @@ func (o *onboardingWindow) connectProvider() {
 // setUpCustomProvider opens the custom provider sheet over onboarding; once the provider is saved,
 // the first bot runs with it and onboarding is done. Cancel leaves onboarding where it was.
 func (o *onboardingWindow) setUpCustomProvider() {
-	o.presentCustomProvider("", o.customPreset, func(kind model.ProviderKind) {
+	o.presentBotProvider(o.customPreset, func(kind model.ProviderKind) {
 		if o.step == onboardingDone {
 			return
 		}
@@ -768,9 +768,24 @@ func (o *onboardingWindow) doneStep(c *ui.Context) *onboardingButton {
 		ui.Row(c).Margin(0, 0, 6, 0).TextColor(p.Green).Children(func() { symbol(c, "checkmark.circle.fill", 56, 1.6) })
 		ui.Text(c, title).FontSize(22).FontWeight(600).TextAlign(ui.Center)
 		onboardingLede(c, lede)
-		if pushButton(c, open.title, pushOptions{Kind: buttonPrimary, Large: true}).Width(200).Margin(12, 0, 0, 0).AutoFocus().Clicked() {
-			open.run()
-		}
+		ui.Column(c).Gap(10).Margin(12, 0, 0, 0).Children(func() {
+			if pushButton(c, open.title, pushOptions{Kind: buttonPrimary, Large: true}).Width(200).AutoFocus().Clicked() {
+				open.run()
+			}
+			// The marketplace's workflows over this window; setting one up ends onboarding on its chat.
+			if pushButton(c, L("Choose a Workflow…"), pushOptions{Large: true}).Width(200).Clicked() {
+				runnerID := ""
+				if bot := o.firstBot(); bot != nil {
+					runnerID = bot.RunnerID
+				}
+				o.presentWorkflowChooser(runnerID, func(chatID string) {
+					app.endOnboarding()
+					if app.main != nil {
+						app.main.open(chatID)
+					}
+				})
+			}
+		})
 	})
 	return &open
 }

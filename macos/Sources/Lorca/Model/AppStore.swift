@@ -2,8 +2,11 @@ import AppKit
 import Foundation
 
 enum StoreEvent {
+    case attentionChanged
     case snapshotReplaced
     case rosterChanged
+    case reviewsChanged
+    case durableTasksChanged
     case chatsChanged
     case chatChanged(Chat.ID)
     case messageAdded(Chat.ID, Message.ID)
@@ -16,6 +19,14 @@ enum StoreEvent {
     case turnFinished(Chat.ID, Bot.ID, Date)
     /// A command in the chat has run long enough to count as a running task.
     case runningTasksChanged(Chat.ID)
+    /// A bot's workflow feedback changed on its Runner: notes, suggestions, or changes.
+    case feedbackChanged(Bot.ID)
+    /// A Runner's limits, or what its work used of them, changed.
+    case budgetsChanged
+    /// The chat's published outputs, or whether one's file could be fetched, changed.
+    case outputsChanged(Chat.ID)
+    /// A group's shared project context changed, here or on another Device.
+    case projectContextChanged(Chat.ID)
     case selectionChanged
     case connectionChanged
     case identityChanged
@@ -25,7 +36,9 @@ enum SettingsPane: String, CaseIterable {
     case general
     case providers
     case autoReview = "auto-review"
+    case sharedLinks = "shared-links"
     case plugins
+    case secrets
     case bots
     case device
     case advanced
@@ -35,8 +48,8 @@ enum SettingsPane: String, CaseIterable {
     /// the provider credentials.
     var isDeviceScoped: Bool {
         switch self {
-        case .general, .providers, .autoReview, .advanced: false
-        case .bots, .plugins, .device: true
+        case .general, .providers, .autoReview, .sharedLinks, .advanced: false
+        case .bots, .plugins, .secrets, .device: true
         }
     }
 }
@@ -68,12 +81,31 @@ final class AppStore {
     private(set) var chats: [Chat] = []
     /// Every bot's routines, from the roster.
     private(set) var routines: [Routine] = []
+    /// Every Runner's limits and what its turns and routines used of them.
+    private(set) var budgets: [BudgetState] = []
+    private(set) var reviews: [ReviewItem] = []
+    private(set) var durableTasks: [DurableTask] = []
     /// Auto-review, shared through the roster.
     private(set) var autoReview = AutoReview()
+    /// What waits on the user across chats, kept by the bots (`attention.changed`).
+    private(set) var attention = AttentionView()
+    /// The bots the account shares as links, shared through the roster.
+    private(set) var sharedLinks: [SharedLink] = []
+    /// The sidebar's sections, in order, shared through the roster.
+    private(set) var sections: [SidebarSection] = []
     /// The account's provider credentials, the same on every Device.
     private(set) var providers: [ProviderCredential] = []
     /// The models the CLI's catalog offers, for the Model and Thinking pickers.
     private(set) var catalog: [ProviderModel] = []
+    /// Every bot's and group's skills and drafts, from the roster; a body is fetched when one opens.
+    private(set) var playbooks: [PlaybookSummary] = []
+    /// The demo's skills, bodies and all.
+    var mockPlaybooks: [PlaybookRecord] = [] {
+        didSet {
+            playbooks = mockPlaybooks.map(\.summary)
+            emit(.rosterChanged)
+        }
+    }
 
     /// True when the CLI answers on localhost (mock: toggled from the Debug menu).
     private(set) var isConnected = false
@@ -272,8 +304,15 @@ final class AppStore {
             }
             return chat
         }
+        sections = (snapshot.sections ?? []).map { $0.toModel() }
         routines = (snapshot.routines ?? []).map { $0.toModel() }
+        budgets = snapshot.budgets ?? []
+        reviews = snapshot.reviews ?? []
+        durableTasks = snapshot.tasks ?? []
+        playbooks = snapshot.playbooks ?? []
         autoReview = snapshot.autoReview?.toModel() ?? AutoReview()
+        attention = snapshot.attention ?? AttentionView()
+        sharedLinks = snapshot.sharedLinks ?? []
         providers = (snapshot.providers ?? []).compactMap { $0.toModel() }
         catalog = (snapshot.models ?? []).compactMap { $0.toModel() }
         runningJobs = (snapshot.runningTurns ?? []).map { ($0.jobId, $0.chatId, $0.botId, $0.routineId) }
@@ -281,6 +320,8 @@ final class AppStore {
             runningJobs.append(("chat:\(id)", id, "", nil))
         }
         sortChats()
+        // A resync may bring outputs this app missed; they are asked for again when next shown.
+        staleOutputs = Set(outputMessages.keys)
         emit(.snapshotReplaced)
     }
 
@@ -292,15 +333,32 @@ final class AppStore {
         }
 
         switch name {
+        case "attention.changed":
+            if let incoming = decode(AttentionView.self) { applyAttention(incoming) }
+        case "reviews.changed":
+            struct Change: Decodable { var item: ReviewItem }
+            if let change = decode(Change.self) { upsertReview(change.item) }
         case "snapshot":
             if let snapshot = decode(Wire.Snapshot.self) { apply(snapshot: snapshot) }
+
+        case "feedback.changed":
+            if let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let body = envelope["data"] as? [String: Any], let botID = body["bot_id"] as? String {
+                emit(.feedbackChanged(botID))
+            }
+        case "tasks.changed":
+            guard let payload = decode(Wire.DurableTaskChanged.self) else { return }
+            acceptDurableTask(payload.task)
 
         case "roster.changed":
             guard let roster = decode(Wire.RosterChanged.self) else { return }
             devices = roster.devices.map { $0.toModel() }
             bots = roster.bots.map { $0.toModel() }
+            if let incoming = roster.sections { sections = incoming.map { $0.toModel() } }
             if let incoming = roster.routines { routines = incoming.map { $0.toModel() } }
+            if let incoming = roster.playbooks { playbooks = incoming }
             if let incoming = roster.autoReview { autoReview = incoming.toModel() }
+            if let incoming = roster.sharedLinks { sharedLinks = incoming }
             if let incoming = roster.providers { providers = incoming.compactMap { $0.toModel() } }
             if let incoming = roster.models { catalog = incoming.compactMap { $0.toModel() } }
             var merged: [Chat] = []
@@ -339,11 +397,14 @@ final class AppStore {
             chats[index].messages.removeAll { $0.id == payload.messageId }
             commandStarts[payload.messageId] = nil
             emit(.messageRemoved(payload.chatId, payload.messageId))
+            noteOutput(nil, removing: payload.messageId, in: payload.chatId)
 
         case "chat.removed":
             guard let payload = decode(Wire.ChatRemoved.self) else { return }
             chats.removeAll { $0.id == payload.chatId }
             runningJobs.removeAll { $0.chatID == payload.chatId }
+            outputMessages[payload.chatId] = nil
+            staleOutputs.remove(payload.chatId)
             emit(.chatsChanged)
 
         case "job.started":
@@ -386,6 +447,11 @@ final class AppStore {
             chats[index].usage = payload.usage.toModel()
             emit(.chatChanged(payload.chatId))
 
+        case "budgets.changed":
+            guard let payload = decode(Wire.BudgetsChanged.self) else { return }
+            budgets = payload.budgets
+            emit(.budgetsChanged)
+
         case "relay.status":
             guard let status = decode(Wire.RelayStatus.self) else { return }
             relayConnected = status.connected
@@ -393,6 +459,11 @@ final class AppStore {
             relayError = status.error?.message
             relayURL = status.url ?? relayURL
             emit(.rosterChanged)
+
+        case "projects.changed":
+            struct ProjectChanged: Decodable { var chatId: String }
+            guard let payload = decode(ProjectChanged.self) else { return }
+            emit(.projectContextChanged(payload.chatId))
 
         case "identity.changed":
             guard let payload = decode(Wire.IdentityChanged.self) else { return }
@@ -407,7 +478,16 @@ final class AppStore {
     private func upsert(_ message: Message, in chatID: Chat.ID) {
         guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }) else { return }
         noteCommand(message, in: chatID)
+        noteOutput(message, in: chatID)
         if let messageIndex = chats[chatIndex].index(of: message.id) {
+            var message = message
+            // A draft card the Runner wrote again, unchanged, keeps what the user is typing in it.
+            if case let .draft(old) = chats[chatIndex].messages[messageIndex].body, case var .draft(new) = message.body,
+                new.version == old.version, new.isPending, old.isPending
+            {
+                new.edited = old.edited
+                message.body = .draft(new)
+            }
             chats[chatIndex].messages[messageIndex] = message
             emit(.messageChanged(chatID, message.id))
             if message.state == .complete { refreshChatList() }
@@ -421,8 +501,58 @@ final class AppStore {
 
     // MARK: - Observation
 
+    func applyAttention(_ view: AttentionView) {
+        guard view != attention else { return }
+        attention = view
+        emit(.attentionChanged)
+    }
+
+    /// Takes an item off the Attention list. A coordinator resolves its items itself; this is
+    /// the user saying it is done. The task or review it links to is left as it is.
+    func resolveAttention(_ item: AttentionItem) async throws {
+        if isMock {
+            var view = attention
+            view.items.removeAll { $0.id == item.id }
+            return applyAttention(view)
+        }
+        _ = try await client.request("attention.resolve", ["id": item.id, "expected_revision": item.revision.params])
+    }
+
+    /// Takes a coordinator's brief off the Attention list, on every Device, until it publishes
+    /// another.
+    func dismissBrief(_ brief: AttentionBrief) async throws {
+        if isMock {
+            var view = attention
+            view.briefs.removeAll { $0.coordinatorBotId == brief.coordinatorBotId }
+            return applyAttention(view)
+        }
+        _ = try await client.request(
+            "attention.dismiss_brief",
+            ["coordinator_bot_id": brief.coordinatorBotId, "expected_revision": brief.revision.params])
+    }
+
+    /// `summaries`, `urgent_direct`, or `default_coordinator_bot_id` (a bot's id, or nil for
+    /// each chat's own coordinator). The account's, on every Device.
+    func setAttentionPreference(_ key: String, _ value: Any?) async throws {
+        if isMock {
+            var view = attention
+            switch key {
+            case "summaries": view.preferences.summaries = value as? Bool ?? true
+            case "urgent_direct": view.preferences.urgentDirect = value as? Bool ?? true
+            default: view.preferences.defaultCoordinatorBotId = value as? String
+            }
+            return applyAttention(view)
+        }
+        _ = try await client.request("attention.preferences", [key: value ?? NSNull()])
+    }
+
     func observe(_ owner: AnyObject, _ handler: @escaping (StoreEvent) -> Void) {
         subscriptions.append(Subscription(owner: owner, handler: handler))
+    }
+
+    /// A mock workflow's sample finished; open pages read its setup again.
+    func mockWorkflowChanged() {
+        emit(.rosterChanged)
     }
 
     private func emit(_ event: StoreEvent) {
@@ -478,13 +608,16 @@ final class AppStore {
     }
 
     func title(for chat: Chat) -> String {
-        if chat.isGroup, let custom = chat.customTitle, !custom.isEmpty { return custom }
+        if chat.isGroup || chat.channel != nil, let custom = chat.customTitle, !custom.isEmpty { return custom }
         let names = chat.botIDs.compactMap { bot($0)?.name }
         return names.isEmpty ? L("New Chat") : names.joined(separator: ", ")
     }
 
     func subtitle(for chat: Chat) -> String {
         let members = bots(in: chat)
+        if let channel = chat.channel, let only = members.first {
+            return L("%@ on %@", only.name, channel.service == "slack" ? "Slack" : "Telegram")
+        }
         if chat.isDM, let only = members.first {
             let host = device(only.runnerID)?.name ?? L("unassigned")
             return L("%@ on %@", only.provider.name, host)
@@ -507,13 +640,15 @@ final class AppStore {
         case let .text(value): body = value.isEmpty ? Attachment.summary(last.attachments) : value
         case let .tool(tool): body = L("Messaged %@: %@", tool.targetBotID.flatMap(bot)?.name ?? L("a teammate"), tool.detail)
         case let .handoff(from, to, reason):
-            body = !chat.isGroup && chat.botIDs.contains(to)
+            body = chat.botIDs.contains(to) && !chat.botIDs.contains(from)
                 ? L("Message from %@: %@", bot(from)?.name ?? L("a teammate"), reason)
                 : L("Handed off to %@", bot(to)?.name ?? L("a teammate"))
         case let .notice(value): body = value
         case let .permission(request):
             let who = bot(last.author.botID ?? "")?.name ?? L("A bot")
             body = "\(who) \(request.verbPhrase)"
+        case let .draft(card):
+            body = card.title(botName: bot(last.author.botID ?? "")?.name ?? L("A bot"))
         }
 
         let flattened = body
@@ -568,7 +703,7 @@ final class AppStore {
     /// twice lands in the same thread.
     @discardableResult
     func dm(with botID: Bot.ID) -> Chat.ID {
-        if let existing = chats.first(where: { $0.isDM && $0.botIDs == [botID] }) {
+        if let existing = chats.first(where: { $0.isBotDM && $0.botIDs == [botID] }) {
             return existing.id
         }
         return createChat(kind: .dm, with: [botID], title: nil)
@@ -658,14 +793,39 @@ final class AppStore {
         return dm(with: botID)
     }
 
+    /// The Runner returns its new independent bot. Keep that bot and DM visible while a remote
+    /// Runner's encrypted roster reaches this Device; subsequent roster events reconcile them.
+    func importTemplate(_ params: [String: Any]) async throws -> Chat.ID {
+        let reply = try await templateReply("templates.import", params)
+        guard let object = reply["bot"] as? [String: Any], let chatID = reply["chat_id"] as? String else {
+            throw CLIClient.RequestError(message: L("Couldn't read the imported bot."))
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let bot = try Wire.decoder.decode(Wire.Bot.self, from: data).toModel()
+        if !bots.contains(where: { $0.id == bot.id }) { bots.append(bot) }
+        if !chats.contains(where: { $0.id == chatID }) {
+            chats.insert(Chat(id: chatID, kind: .dm, customTitle: nil, botIDs: [bot.id], messages: [],
+                unreadCount: 0, isPinned: false, createdAt: bot.createdAt), at: 0)
+        }
+        emit(.rosterChanged)
+        emit(.chatsChanged)
+        return chatID
+    }
+
     /// The provider a bot made without asking runs with: the first one the account connected.
     var preferredProvider: ProviderCredential.Kind {
         providerKinds.first { credential(for: $0)?.isConnected == true } ?? .deepseek
     }
 
-    /// Every provider a bot can run with: the built-in ones, then the ones the user added.
+    /// Every provider a bot can run with: the built-in ones, then the ones the user added,
+    /// except those of decision models.
     var providerKinds: [ProviderCredential.Kind] {
-        ProviderCredential.Kind.builtIn + providers.map(\.kind).filter(\.isCustom)
+        ProviderCredential.Kind.builtIn + providers.filter { $0.kind.isCustom && !$0.decides }.map(\.kind)
+    }
+
+    /// The providers Auto-review can run a model of: every one the account has connected.
+    var reviewProviderKinds: [ProviderCredential.Kind] {
+        providers.filter(\.isConnected).map(\.kind)
     }
 
     func updateBot(_ id: Bot.ID, name: String, description: String? = nil, provider: ProviderCredential.Kind? = nil) {
@@ -679,6 +839,91 @@ final class AppStore {
         if let description { params["description"] = description }
         if let provider { params["provider"] = provider.wireValue }
         perform("bots.update", params)
+    }
+
+    /// The plugins on the bot's Runner and their tools, asked of that Runner.
+    func botAccessCatalog(_ id: Bot.ID) async throws -> BotAccessCatalog {
+        if isMock { return MockData.accessCatalog() }
+        return try await client.request("bots.permissions", ["id": id], as: BotAccessCatalog.self)
+    }
+
+    /// Sends a draft card's message: the user's edit first, as the item's next version, then
+    /// that version approved, which the bot's Runner sends. `always` then turns drafts off for
+    /// the bot, so its next messages go out directly. Throws why it was not sent, with the card
+    /// back as it was.
+    func sendDraft(_ card: DraftCard, chatID: Chat.ID, messageID: Message.ID, botID: Bot.ID?, always: Bool) async throws {
+        let edited = card.shown
+        setDraft(chatID: chatID, messageID: messageID) { $0.state = "approved"; $0.fields = edited; $0.edited = nil }
+        do {
+            if isMock {
+                setDraft(chatID: chatID, messageID: messageID) { $0.state = "succeeded" }
+            } else {
+                var version = card.version
+                if edited != card.fields {
+                    let data = try await client.request("reviews.edit", ["id": card.reviewID, "expected_version": version, "message": edited.parameters])
+                    let item = try Wire.decoder.decode(ReviewItem.self, from: data)
+                    upsertReview(item)
+                    version = item.version
+                }
+                let data = try await client.request("reviews.approve", ["id": card.reviewID, "expected_version": version])
+                upsertReview(try Wire.decoder.decode(ReviewItem.self, from: data))
+            }
+        } catch {
+            setDraft(chatID: chatID, messageID: messageID) { $0 = card }
+            throw error
+        }
+        if always, let botID { setDraftsDirect(botID) }
+    }
+
+    /// Discards a draft card's message: nothing is sent.
+    func discardDraft(_ card: DraftCard, chatID: Chat.ID, messageID: Message.ID) async throws {
+        setDraft(chatID: chatID, messageID: messageID) { $0.state = "rejected" }
+        guard !isMock else { return }
+        do {
+            let data = try await client.request("reviews.reject", ["id": card.reviewID, "expected_version": card.version])
+            upsertReview(try Wire.decoder.decode(ReviewItem.self, from: data))
+        } catch {
+            setDraft(chatID: chatID, messageID: messageID) { $0 = card }
+            throw error
+        }
+    }
+
+    /// The bot sends its messages directly from now on, as its Access says once drafts are off.
+    private func setDraftsDirect(_ id: Bot.ID) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        var policy = bots[index].permissions ?? BotPermissions()
+        policy.drafts = false
+        bots[index].permissions = policy
+        emit(.rosterChanged)
+        perform("bots.update", ["id": id, "drafts": false])
+    }
+
+    /// Keeps what the user changed on a draft card until they send it. Only a change to its
+    /// attachments redraws the card; typing never does.
+    func editDraft(chatID: Chat.ID, messageID: Message.ID, fields: DraftCard.Fields) {
+        guard let chatIndex = chats.firstIndex(where: { $0.id == chatID }), let index = chats[chatIndex].index(of: messageID),
+            case var .draft(card) = chats[chatIndex].messages[index].body, card.isPending
+        else { return }
+        let files = card.shown.attachments
+        card.edited = fields == card.fields ? nil : fields
+        chats[chatIndex].messages[index].body = .draft(card)
+        if files != fields.attachments { emit(.messageChanged(chatID, messageID)) }
+    }
+
+    private func setDraft(chatID: Chat.ID, messageID: Message.ID, _ change: (inout DraftCard) -> Void) {
+        update(messageID, in: chatID) { message in
+            guard case var .draft(card) = message.body else { return }
+            change(&card)
+            message.body = .draft(card)
+        }
+    }
+
+    /// Only the user changes a bot's Access; the CLI also dismisses the access requests it left.
+    func setBotPermissions(_ id: Bot.ID, _ policy: BotPermissions) {
+        guard let index = bots.firstIndex(where: { $0.id == id }) else { return }
+        bots[index].permissions = policy
+        emit(.rosterChanged)
+        perform("bots.update", ["id": id, "permissions": policy.json])
     }
 
     /// The bot's symbol and accent, the look under and behind its image.
@@ -735,21 +980,56 @@ final class AppStore {
     func marketplace() async throws -> Marketplace {
         if isMock { return MockData.marketplace() }
         let wire = try await client.request("marketplace", [:], as: Wire.Marketplace.self)
-        return Marketplace(plugins: wire.plugins.map { $0.toModel() }, bots: wire.bots.map { $0.toModel() })
+        return Marketplace(packs: wire.packs ?? [], plugins: wire.plugins.map { $0.toModel() }, bots: wire.bots.map { $0.toModel() })
     }
 
     /// Installs a marketplace plugin on a Runner (here, or sealed to that Runner).
-    func installPlugin(_ pluginID: String, on runnerID: Device.ID) async throws -> InstalledPlugin {
-        guard !isMock else { return InstalledPlugin(id: pluginID, name: pluginID, description: "", version: "", icon: "", state: .ready, detail: "Ready") }
-        return try await client.request("plugins.install", ["runner_id": runnerID, "plugin_id": pluginID], as: Wire.PluginInstalled.self).status.toModel()
+    func installPlugin(_ pluginID: String, on runnerID: Device.ID, accountName: String? = nil) async throws -> InstalledPlugin {
+        if isMock {
+            let named = accountName != nil
+            let status = InstalledPlugin(id: named ? "\(pluginID)-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())" : pluginID,
+                                         name: accountName.map { "\(pluginID) · \($0)" } ?? pluginID, description: "", version: "", icon: "", state: .ready, detail: "Connected",
+                                         serviceID: named ? pluginID : nil, accountName: accountName)
+            if let index = devices.firstIndex(where: { $0.id == runnerID }) { devices[index].plugins.append(status); emit(.rosterChanged) }
+            return status
+        }
+        var params: [String: Any] = ["runner_id": runnerID, "plugin_id": pluginID]
+        if let accountName { params["account_name"] = accountName }
+        let status = try await client.request("plugins.install", params, as: Wire.PluginInstalled.self).status.toModel()
+        rememberPlugin(status, on: runnerID)
+        return status
+    }
+
+    func renamePluginAccount(_ pluginID: String, on runnerID: Device.ID, accountName: String) async throws -> InstalledPlugin {
+        if isMock, var status = device(runnerID)?.plugins.first(where: { $0.id == pluginID }) {
+            status.name = "\(status.name.components(separatedBy: " · ").first ?? status.name) · \(accountName)"
+            status.accountName = accountName
+            rememberPlugin(status, on: runnerID)
+            return status
+        }
+        let status = try await client.request("plugins.rename", ["runner_id": runnerID, "plugin_id": pluginID, "account_name": accountName], as: Wire.PluginInstalled.self).status.toModel()
+        rememberPlugin(status, on: runnerID)
+        return status
+    }
+
+    /// A sealed management reply can arrive before the Runner's next machine advertisement.
+    private func rememberPlugin(_ status: InstalledPlugin, on runnerID: Device.ID) {
+        guard let index = devices.firstIndex(where: { $0.id == runnerID }) else { return }
+        if let plugin = devices[index].plugins.firstIndex(where: { $0.id == status.id }) { devices[index].plugins[plugin] = status }
+        else { devices[index].plugins.append(status) }
+        emit(.rosterChanged)
     }
 
     func uninstallPlugin(_ pluginID: String, on runnerID: Device.ID) async throws {
-        guard !isMock else { return }
-        _ = try await client.request("plugins.uninstall", ["runner_id": runnerID, "plugin_id": pluginID])
+        if !isMock { _ = try await client.request("plugins.uninstall", ["runner_id": runnerID, "plugin_id": pluginID]) }
+        if let index = devices.firstIndex(where: { $0.id == runnerID }) { devices[index].plugins.removeAll { $0.id == pluginID }; emit(.rosterChanged) }
     }
 
     func pluginDetail(_ pluginID: String, on runnerID: Device.ID) async throws -> PluginDetail {
+        if isMock, pluginID == BrowserProfile.pluginID, let status = device(runnerID)?.plugins.first(where: { $0.id == pluginID }) {
+            // Browser runs on the Runner and signs in to nothing itself.
+            return PluginDetail(status: status, homepage: "https://github.com/microsoft/playwright-mcp", variables: [], servers: [], skills: [(name: "Reading a page", description: "How to read a page without filling the context.")])
+        }
         if isMock {
             let status = device(runnerID)?.plugins.first { $0.id == pluginID } ?? InstalledPlugin(id: pluginID, name: pluginID, description: "", version: "", icon: "", state: .ready, detail: "Ready")
             return PluginDetail(status: status, homepage: nil, variables: [.init(name: "GITHUB_TOKEN", description: "A personal access token, instead of signing in.", secret: true, required: false, isSet: false, value: nil)], servers: [.init(name: "github", kind: "http", url: "https://api.githubcopilot.com/mcp/", oauth: true, signedIn: status.state == .ready)], skills: [])
@@ -774,6 +1054,71 @@ final class AppStore {
     func signOutPlugin(_ pluginID: String, server: String, on runnerID: Device.ID) async throws {
         guard !isMock else { return }
         _ = try await client.request("plugins.sign_out", ["runner_id": runnerID, "plugin_id": pluginID, "server": server])
+    }
+
+    // MARK: - Limits
+
+    func budget(_ kind: String, _ id: String, runnerID: Device.ID) -> BudgetState? {
+        budgets.first { $0.kind == kind && $0.id == id && $0.runnerId == runnerID }
+    }
+
+    /// The DM's newest turn when it stopped at a limit or was interrupted: the one to resume.
+    func stoppedTurn(in chatID: Chat.ID, runnerID: Device.ID) -> BudgetState? {
+        let newest = budgets
+            .filter { $0.kind == "job" && $0.chatId == chatID && $0.runnerId == runnerID }
+            .max { $0.updatedAt < $1.updatedAt }
+        return newest?.isStopped == true ? newest : nil
+    }
+
+    /// Sets limits on the bot's Runner. What the work used stays.
+    func setBudget(_ kind: String, _ id: String, limits: BudgetLimits, bot: Bot, chatID: Chat.ID) async throws {
+        if isMock {
+            let index = budgets.firstIndex { $0.kind == kind && $0.id == id }
+            var state = index.map { budgets[$0] } ?? BudgetState(
+                kind: kind, id: id, runnerId: bot.runnerID, chatId: chatID, limits: BudgetLimits(),
+                usage: .init(tokens: 0, apiCostUsd: 0, subscriptionEstimateUsd: 0, unknownPriceCalls: 0, runtimeSecs: 0, retries: 0, connectorCalls: 0),
+                state: "ready", updatedAt: Date().timeIntervalSince1970)
+            state.limits = limits
+            if let index { budgets[index] = state } else { budgets.append(state) }
+            emit(.budgetsChanged)
+            return
+        }
+        let params: [String: Any] = ["kind": kind, "id": id, "bot_id": bot.id, "chat_id": chatID, "runner_id": bot.runnerID, "limits": limits.params]
+        _ = try await client.request("budgets.set", params)
+    }
+
+    /// Resumes a stopped turn or routine where it left off. `fresh` grants the whole allowance
+    /// again; otherwise it goes on with what it used counted against the limits.
+    func resumeBudget(_ kind: String, _ id: String, bot: Bot, fresh: Bool) async throws {
+        if isMock {
+            guard let index = budgets.firstIndex(where: { $0.kind == kind && $0.id == id }) else { return }
+            budgets[index].state = "ready"
+            budgets[index].reached = nil
+            if fresh { budgets[index].usage = .init(tokens: 0, apiCostUsd: 0, subscriptionEstimateUsd: 0, unknownPriceCalls: 0, runtimeSecs: 0, retries: 0, connectorCalls: 0) }
+            emit(.budgetsChanged)
+            return
+        }
+        // The request id makes a repeated delivery a no-op on the Runner.
+        let params: [String: Any] = ["kind": kind, "id": id, "runner_id": bot.runnerID, "renew": fresh, "run": true, "request_id": UUID().uuidString]
+        _ = try await client.request("budgets.resume", params)
+    }
+
+    /// A plugin account's call limit, or with `service` the one all of its service's accounts share.
+    func callLimits(_ pluginID: String, on runnerID: Device.ID, service: Bool = false) async throws -> CallLimits {
+        if isMock {
+            return CallLimits(maxCalls: 60, windowSecs: 60, maxConcurrency: 4, retryAt: pluginID == "github" ? Date().addingTimeInterval(4 * 60) : nil, sharesService: false)
+        }
+        let params: [String: Any] = ["runner_id": runnerID, "plugin_id": pluginID, "scope": service ? "service" : "account"]
+        return try await client.request("connector_limits.get", params, as: Wire.CallLimits.self).toModel()
+    }
+
+    func setCallLimits(_ pluginID: String, on runnerID: Device.ID, service: Bool, limits: CallLimits) async throws {
+        guard !isMock else { return }
+        let params: [String: Any] = [
+            "runner_id": runnerID, "plugin_id": pluginID, "scope": service ? "service" : "account",
+            "limits": ["max_calls": limits.maxCalls, "window_secs": limits.windowSecs, "max_concurrency": limits.maxConcurrency],
+        ]
+        _ = try await client.request("connector_limits.set", params)
     }
 
     // MARK: - MCP servers
@@ -983,6 +1328,20 @@ final class AppStore {
         perform("auto_review.set", ["is_enabled": value.isEnabled, "rules": rules])
     }
 
+    /// Picks the provider that reviews, or nil for the bot's own.
+    func setReviewProvider(_ provider: ProviderCredential.Kind?) {
+        autoReview.provider = provider
+        emit(.rosterChanged)
+        perform("auto_review.set", ["provider": provider?.wireValue ?? NSNull()])
+    }
+
+    /// Picks the model Auto-review runs on `kind`, or nil for its default review model.
+    func setReviewModel(_ model: String?, for kind: ProviderCredential.Kind) {
+        autoReview.models[kind] = model
+        emit(.rosterChanged)
+        perform("auto_review.set", ["models": [kind.wireValue: model ?? NSNull()] as [String: Any]])
+    }
+
     /// Answers a question: a permission card's, or a command card's. `allow`, `always`, or
     /// `deny`. The CLI confirms with the card's new state.
     func answerPermission(chatID: Chat.ID, messageID: Message.ID, decision: String) {
@@ -990,9 +1349,18 @@ final class AppStore {
             switch message.body {
             case var .permission(request):
                 request.decision = decision == "always" ? .always : (decision == "deny" ? .denied : .allowed)
+                // An access request is only ever dismissed.
+                if request.isAccess, request.decision == .denied { request.decision = .dismissed }
                 if request.isConnect, request.decision == .allowed { request.summary = L("Starting the sign-in…") }
                 message.body = .permission(request)
             case var .tool(tool):
+                if var agent = tool.agent, let question = agent.question, question.isPermission {
+                    agent.question = nil
+                    agent.state = decision == "deny" ? (question.kind == .start ? .denied : .working) : (question.kind == .start ? .starting : .working)
+                    tool.agent = agent
+                    message.body = .tool(tool)
+                    return
+                }
                 guard var run = tool.run, run.state == .asking else { return }
                 run.state = decision == "deny" ? .denied : .running
                 tool.run = run
@@ -1053,19 +1421,216 @@ final class AppStore {
         }
     }
 
+    // MARK: - Coding agents
+
+    /// Stops a coding agent, here or on its bot's Runner; its card says so once the Runner has.
+    func stopAgent(chatID: Chat.ID, messageID: Message.ID) async throws {
+        guard !isMock else {
+            finishMockAgent(chatID: chatID, messageID: messageID, state: .stopped)
+            return
+        }
+        _ = try await client.request("coding.stop", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Answers what a coding agent's pane asks with one of the choices it offers.
+    func answerAgent(chatID: Chat.ID, messageID: Message.ID, choice: Int) async throws {
+        guard !isMock else {
+            finishMockAgent(chatID: chatID, messageID: messageID, state: .working)
+            return
+        }
+        _ = try await client.request("coding.answer", ["chat_id": chatID, "message_id": messageID, "choice": choice])
+    }
+
+    /// Types an answer into what a coding agent's pane asks, then Return.
+    func answerAgent(chatID: Chat.ID, messageID: Message.ID, text: String) async throws {
+        guard !isMock else {
+            finishMockAgent(chatID: chatID, messageID: messageID, state: .working)
+            return
+        }
+        _ = try await client.request("coding.answer", ["chat_id": chatID, "message_id": messageID, "text": text])
+    }
+
+    /// A coding agent's transcript, from its Runner: what it was sent, said, and did, or what
+    /// its pane shows.
+    func agentTranscript(chatID: Chat.ID, messageID: Message.ID) async throws -> String {
+        guard !isMock else { return MockData.agentTranscript }
+        struct Transcript: Decodable { var text: String }
+        let data = try await client.request("coding.transcript", ["chat_id": chatID, "message_id": messageID])
+        return try Wire.decoder.decode(Transcript.self, from: data).text
+    }
+
+    /// Brings a coding agent's pane forward on this Runner, in its terminal host.
+    func showAgent(chatID: Chat.ID, messageID: Message.ID) async throws {
+        guard !isMock else { return }
+        _ = try await client.request("coding.show", ["chat_id": chatID, "message_id": messageID])
+    }
+
+    /// Whether this Device runs the bot behind `message`: only there does its pane show.
+    func runsHere(_ message: Message) -> Bool {
+        guard let botID = message.author.botID, let bot = bot(botID), let here = thisDevice else { return false }
+        return bot.runnerID == here.id
+    }
+
+    /// The demo has no Runner: a Stop or an answer settles the card at once.
+    private func finishMockAgent(chatID: Chat.ID, messageID: Message.ID, state: AgentRun.State) {
+        update(messageID, in: chatID) { message in
+            guard case var .tool(tool) = message.body, var agent = tool.agent else { return }
+            agent.state = state
+            agent.question = nil
+            tool.agent = agent
+            message.body = .tool(tool)
+        }
+    }
+
     // MARK: - Routines
+
+    func review(_ id: String) -> ReviewItem? { reviews.first { $0.id == id } }
+
+    private func upsertReview(_ item: ReviewItem) {
+        if let index = reviews.firstIndex(where: { $0.id == item.id }) {
+            guard reviews[index].revision <= item.revision else { return }
+            reviews[index] = item
+        } else { reviews.append(item) }
+        emit(.reviewsChanged)
+    }
+
+    /// The plugin a call goes to, as its Runner lists it and the permission card names it: "GitHub".
+    func pluginName(of item: ReviewItem) -> String {
+        device(item.runnerId)?.plugins.first { $0.id == item.payload.pluginId }?.name ?? item.target.account
+    }
+
+    /// Approves the version the user saw. An edit made in the sheet is saved first, as the next
+    /// version, and that is the one approved: what runs is what the editor showed.
+    func approveReview(_ item: ReviewItem, payload: [String: Any]?) async throws -> ReviewItem {
+        var shown = item
+        if let payload { shown = try await changeReview(shown, action: "edit", fields: ["payload": payload]) }
+        return try await changeReview(shown, action: "approve")
+    }
+
+    func rejectReview(_ item: ReviewItem) async throws -> ReviewItem {
+        try await changeReview(item, action: "reject")
+    }
+
+    /// A change names the version the sheet displayed, so one made on another Device meanwhile is
+    /// refused rather than decided blind.
+    private func changeReview(_ item: ReviewItem, action: String, fields: [String: Any] = [:]) async throws -> ReviewItem {
+        var params = fields
+        params["id"] = item.id
+        params["expected_version"] = item.version
+        let data: Data
+        if isMock {
+            data = try MockData.changedReview(item, action: action, fields: fields)
+        } else {
+            data = try await client.request("reviews.\(action)", params)
+        }
+        let updated = try Wire.decoder.decode(ReviewItem.self, from: data)
+        upsertReview(updated)
+        return review(updated.id) ?? updated
+    }
 
     /// Pauses or resumes a routine. A resumed schedule counts from now.
     func setRoutineEnabled(_ id: Routine.ID, _ enabled: Bool) {
         guard let index = routines.firstIndex(where: { $0.id == id }) else { return }
         routines[index].isEnabled = enabled
         routines[index].pausedReason = nil
+        routines[index].state = enabled ? "on" : "paused"
         if !enabled { routines[index].nextRunAt = nil }
         emit(.rosterChanged)
         perform("routines.update", ["id": id, "enabled": enabled])
     }
 
     /// Runs the routine now, on its bot's Runner.
+    // MARK: - Channels
+
+    /// The bot's channels, as its Runner advertises them.
+    func channels(for botID: Bot.ID) -> [ChannelStatus] {
+        guard let bot = bot(botID) else { return [] }
+        return (device(bot.runnerID)?.channels ?? []).filter { $0.botID == botID }
+    }
+
+    func channel(_ id: String) -> ChannelStatus? {
+        devices.lazy.flatMap(\.channels).first { $0.id == id }
+    }
+
+    /// The conversations a channel keeps, the latest first.
+    func conversations(of channelID: String) -> [Chat] {
+        chats.filter { $0.channel?.channelID == channelID }.sorted { $0.lastActivity > $1.lastActivity }
+    }
+
+    /// The account a channel speaks through, by its name on the Runner: "Telegram · Community".
+    func accountName(of channel: ChannelStatus) -> String {
+        guard let bot = bot(channel.botID) else { return channel.serviceName }
+        return device(bot.runnerID)?.plugins.first { $0.id == channel.accountID }?.name ?? channel.serviceName
+    }
+
+    private func updateChannel(_ id: String, _ change: (inout ChannelStatus) -> Void) {
+        for index in devices.indices {
+            if let at = devices[index].channels.firstIndex(where: { $0.id == id }) {
+                change(&devices[index].channels[at])
+            }
+        }
+        emit(.rosterChanged)
+    }
+
+    private func runnerID(ofChannel id: String) -> Device.ID? {
+        devices.first { $0.channels.contains { $0.id == id } }?.id
+    }
+
+    /// Pauses or resumes a channel on its Runner. Paused, it takes no new messages.
+    func setChannelPaused(_ id: String, _ paused: Bool) {
+        guard let runnerID = runnerID(ofChannel: id) else { return }
+        updateChannel(id) { $0.state = paused ? .paused : .listening }
+        perform(paused ? "events.pause" : "events.resume", ["runner_id": runnerID, "id": id])
+    }
+
+    /// Tries the message that holds a channel again, or skips it, which lets the next ones run.
+    func settleHeldMessage(of id: String, retry: Bool) {
+        guard let runnerID = runnerID(ofChannel: id), let held = channel(id)?.heldDelivery else { return }
+        updateChannel(id) {
+            $0.state = .listening
+            $0.heldDelivery = nil
+            $0.detail = ""
+        }
+        perform(retry ? "events.retry" : "events.discard", ["runner_id": runnerID, "id": held])
+    }
+
+    /// Answers a chat asking a channel's bot: allowed, the channel listens there from now on;
+    /// ignored, the chat doesn't ask again.
+    func answerChatRequest(of id: String, chatID: String, allow: Bool) {
+        guard let runnerID = runnerID(ofChannel: id) else { return }
+        let request = channel(id)?.requests.first { $0.id == chatID }
+        updateChannel(id) { channel in
+            channel.requests.removeAll { $0.id == chatID }
+            if allow, let request { channel.chats.append(.init(id: request.id, title: request.title)) }
+        }
+        perform(allow ? "events.allow_chat" : "events.ignore_chat", ["runner_id": runnerID, "id": id, "chat_id": chatID])
+    }
+
+    /// Lets a chat in by its id, typed by the user: the channel listens there from now on. The
+    /// Runner refuses an id that isn't one of the service's.
+    func addChat(_ chatID: String, to id: String) async throws {
+        guard let runnerID = runnerID(ofChannel: id) else { return }
+        let before = channel(id)
+        updateChannel(id) { channel in
+            channel.requests.removeAll { $0.id == chatID }
+            if !channel.chats.contains(where: { $0.id == chatID }) { channel.chats.append(.init(id: chatID, title: "")) }
+        }
+        if isMock { return }
+        do {
+            _ = try await client.request("events.allow_chat", ["runner_id": runnerID, "id": id, "chat_id": chatID])
+        } catch {
+            if let before { updateChannel(id) { $0 = before } }
+            throw error
+        }
+    }
+
+    func removeChannel(_ id: String) {
+        guard let runnerID = runnerID(ofChannel: id) else { return }
+        for index in devices.indices { devices[index].channels.removeAll { $0.id == id } }
+        emit(.rosterChanged)
+        perform("events.delete", ["runner_id": runnerID, "id": id])
+    }
+
     func runRoutine(_ id: Routine.ID) {
         guard let index = routines.firstIndex(where: { $0.id == id }) else { return }
         routines[index].isRunning = true
@@ -1073,10 +1638,138 @@ final class AppStore {
         perform("routines.run", ["id": id])
     }
 
+    /// The link a user follows to set a routine's receiver up for what it listens to, such as the
+    /// Lorca GitHub App's install, or its authorization where it is installed already, from the
+    /// relay through the CLI.
+    func receiverSetupURL(_ receiver: String, subject: String) async throws -> URL {
+        if isMock { return URL(string: "https://github.com/apps/lorca/installations/new")! }
+        let data = try await client.request("receivers.setup", ["receiver": receiver, "subject": subject])
+        guard let text = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["url"] as? String, let url = URL(string: text) else {
+            throw CLIClient.RequestError(message: L("Request failed"))
+        }
+        return url
+    }
+
+    /// The routines on events that wait on the user's setup, such as installing the GitHub App.
+    var routinesAwaitingSetup: [Routine.ID] {
+        routines.filter { $0.events?.status == "needs_setup" }.map(\.id)
+    }
+
+    /// Has each routine that waits on the user's setup subscribe again on its Runner: the user is
+    /// back, likely from finishing the setup in the browser, so it needn't wait for its next try.
+    func resubscribeAwaitingSetup() {
+        guard !isMock else { return }
+        for id in routinesAwaitingSetup { perform("routines.subscribe", ["id": id]) }
+    }
+
+    /// A new key for a routine's webhook, made on its bot's Runner; the old one stops working.
+    func regenerateRoutineKey(_ id: Routine.ID) async throws {
+        if isMock {
+            guard let index = routines.firstIndex(where: { $0.id == id }) else { return }
+            routines[index].events?.key = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            emit(.rosterChanged)
+            return
+        }
+        _ = try await client.request("routines.regenerate_key", ["id": id])
+    }
+
     func deleteRoutine(_ id: Routine.ID) {
         routines.removeAll { $0.id == id }
         emit(.rosterChanged)
         perform("routines.delete", ["id": id])
+    }
+
+    // MARK: - Workflow feedback
+
+    /// A bot's notes, suggestions, and changes, from its Runner, through the relay when that is
+    /// another Device. Every decision is the Runner's to apply.
+    func feedback(of botID: Bot.ID) async throws -> BotFeedback {
+        if isMock { return mockFeedback[botID] ?? MockData.feedback(for: botID) }
+        return try await client.request("feedback.list", ["bot_id": botID], as: Wire.Feedback.self).toModel()
+    }
+
+    /// Records what the user said about a message of the bot's.
+    func recordFeedback(
+        botID: Bot.ID, kind: FeedbackNote.Kind, chatID: Chat.ID, messageID: Message.ID, note: String,
+        before: String?, after: String?, target: FeedbackTarget?
+    ) async throws {
+        var feedback: [String: Any] = ["kind": kind.rawValue, "origin": ["chat_id": chatID, "message_id": messageID], "note": note]
+        if let before, let after {
+            feedback["before"] = before
+            feedback["after"] = after
+        }
+        if let target { feedback["target"] = target.params }
+        try await feedbackRequest("feedback.record", botID: botID, ["feedback": feedback]) { mock in
+            let text = note.isEmpty ? (self.chat(chatID)?.messages.first { $0.id == messageID }?.text ?? "") : note
+            mock.notes.insert(FeedbackNote(id: UUID().uuidString, kind: kind, chatID: chatID, messageID: messageID, text: text, target: target, createdAt: Date()), at: 0)
+            mock.noteCount += 1
+        }
+    }
+
+    func decide(_ suggestion: FeedbackSuggestion, accept: Bool, botID: Bot.ID) async throws {
+        try await feedbackRequest(accept ? "feedback.accept" : "feedback.reject", botID: botID, ["id": suggestion.id, "diff_hash": suggestion.diffHash]) { mock in
+            mock.suggestions.removeAll { $0.id == suggestion.id }
+            if accept {
+                mock.changes.insert(FeedbackChange(id: UUID().uuidString, target: suggestion.target, diff: suggestion.diff, isUndo: false, canUndo: true, currentHash: "mock", createdAt: Date()), at: 0)
+            }
+        }
+    }
+
+    func undo(_ change: FeedbackChange, botID: Bot.ID) async throws {
+        try await feedbackRequest("feedback.rollback", botID: botID, ["id": change.id, "expected_hash": change.currentHash ?? ""]) { mock in
+            let reversed = DiffLine.lines(of: change.diff).map { line -> String in
+                switch line {
+                case let .removed(text): "+" + text
+                case let .added(text): "-" + text
+                }
+            }
+            mock.changes = mock.changes.map { FeedbackChange(id: $0.id, target: $0.target, diff: $0.diff, isUndo: $0.isUndo, canUndo: false, currentHash: $0.currentHash, createdAt: $0.createdAt) }
+            mock.changes.insert(FeedbackChange(id: UUID().uuidString, target: change.target, diff: reversed.joined(separator: "\n"), isUndo: true, canUndo: true, currentHash: "mock", createdAt: Date()), at: 0)
+        }
+    }
+
+    /// How often the bot looks through new feedback for changes to suggest; nil turns it off.
+    func setFeedbackReview(every seconds: Int?, botID: Bot.ID) async throws {
+        try await feedbackRequest("feedback.settings", botID: botID, ["review_every_secs": seconds.map { $0 as Any } ?? NSNull()]) { mock in
+            mock.reviewEvery = seconds
+        }
+    }
+
+    /// Takes a note's words out of the bot's feedback, or every note from a chat, now and later.
+    func exclude(note: FeedbackNote, wholeChat: Bool, botID: Bot.ID) async throws {
+        try await feedbackRequest("feedback.exclude", botID: botID, wholeChat ? ["chat_id": note.chatID] : ["id": note.id]) { mock in
+            mock.notes.removeAll { wholeChat ? $0.chatID == note.chatID : $0.id == note.id }
+            mock.noteCount = mock.notes.count
+        }
+    }
+
+    /// Has the bot look through its new feedback now; answers how many changes it suggests.
+    func suggestChanges(botID: Bot.ID) async throws -> Int {
+        if isMock {
+            try await Task.sleep(for: .seconds(1))
+            return 0
+        }
+        let review = try await client.request("feedback.review", ["bot_id": botID], as: Wire.FeedbackReview.self)
+        emit(.feedbackChanged(botID))
+        return review.proposals.count
+    }
+
+    /// The demo's feedback, changed in place by the same calls.
+    private var mockFeedback: [Bot.ID: BotFeedback] = [:]
+
+    /// A CLI call that changes a bot's feedback. The Runner announces its own bots' changes; a bot
+    /// on another Device answers only the call, so the change is announced here too.
+    private func feedbackRequest(_ method: String, botID: Bot.ID, _ params: [String: Any], mock: (inout BotFeedback) -> Void) async throws {
+        if isMock {
+            var feedback = mockFeedback[botID] ?? MockData.feedback(for: botID)
+            mock(&feedback)
+            mockFeedback[botID] = feedback
+        } else {
+            var params = params
+            params["bot_id"] = botID
+            _ = try await client.request(method, params)
+        }
+        emit(.feedbackChanged(botID))
     }
 
     /// A bot's memory, read from its Runner. Answers with `here == false` when the bot runs on
@@ -1119,8 +1812,9 @@ final class AppStore {
         guard let chat = chat(id) else { return }
 
         // A bot owns its DM, so deleting that row deletes the bot as one roster operation.
-        // Groups keep their other members; a group with nobody left is removed too.
-        if chat.isDM, let botID = chat.botIDs.first, bot(botID) != nil {
+        // Groups keep their other members; a group with nobody left is removed too. A channel's
+        // conversation is only its transcript.
+        if chat.isBotDM, let botID = chat.botIDs.first, bot(botID) != nil {
             let relatedChatIDs = chats.filter { $0.botIDs.contains(botID) }.map(\.id)
             for chatID in relatedChatIDs { replyEngine?.cancel(chatID: chatID) }
 
@@ -1174,9 +1868,110 @@ final class AppStore {
     func togglePin(_ id: Chat.ID) {
         guard let index = chats.firstIndex(where: { $0.id == id }) else { return }
         chats[index].isPinned.toggle()
+        // A pinned chat is back in the sidebar.
+        if chats[index].isPinned { chats[index].isHidden = false }
         sortChats()
         emit(.chatsChanged)
         perform("chats.pin", ["chat_id": id, "pinned": chats.first { $0.id == id }?.isPinned ?? false])
+    }
+
+    /// Takes a chat out of the sidebar, or puts it back. A hidden chat is not pinned.
+    func setHidden(_ id: Chat.ID, _ hidden: Bool) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].isHidden != hidden else { return }
+        chats[index].isHidden = hidden
+        if hidden { chats[index].isPinned = false }
+        sortChats()
+        emit(.chatsChanged)
+        perform("chats.hide", ["chat_id": id, "hidden": hidden])
+    }
+
+    /// Turns a chat's alerts off on every Device until `until`, or until unmuted.
+    func mute(_ id: Chat.ID, until: Date?) {
+        guard let index = chats.firstIndex(where: { $0.id == id }) else { return }
+        chats[index].mute = Chat.Mute(until: until)
+        emit(.chatsChanged)
+        var params: [String: Any] = ["chat_id": id, "muted": true]
+        if let until { params["until"] = until.timeIntervalSince1970 }
+        perform("chats.mute", params)
+    }
+
+    func unmute(_ id: Chat.ID) {
+        guard let index = chats.firstIndex(where: { $0.id == id }), chats[index].mute != nil else { return }
+        chats[index].mute = nil
+        emit(.chatsChanged)
+        perform("chats.mute", ["chat_id": id, "muted": false])
+    }
+
+    // MARK: - Sidebar sections
+
+    func section(_ id: SidebarSection.ID) -> SidebarSection? {
+        sections.first { $0.id == id }
+    }
+
+    /// Adds a section after the others, with `chatID` moved into it.
+    func createSection(named name: String, moving chatID: Chat.ID? = nil) {
+        let name = Self.sectionName(name)
+        guard !name.isEmpty else { return }
+        let section = SidebarSection(id: "section-\(UUID().uuidString.lowercased().prefix(8))", name: name)
+        sections.append(section)
+        if let chatID, let index = chats.firstIndex(where: { $0.id == chatID }) { chats[index].sectionID = section.id }
+        emit(.chatsChanged)
+        var params: [String: Any] = ["id": section.id, "name": section.name]
+        if let chatID { params["chat_id"] = chatID }
+        perform("sections.create", params)
+    }
+
+    func renameSection(_ id: SidebarSection.ID, to name: String) {
+        let name = Self.sectionName(name)
+        guard !name.isEmpty, let index = sections.firstIndex(where: { $0.id == id }), sections[index].name != name else { return }
+        sections[index].name = name
+        emit(.chatsChanged)
+        perform("sections.rename", ["id": id, "name": name])
+    }
+
+    /// Deletes a section; its chats go back to the chats in no section.
+    func deleteSection(_ id: SidebarSection.ID) {
+        guard sections.contains(where: { $0.id == id }) else { return }
+        sections.removeAll { $0.id == id }
+        for index in chats.indices where chats[index].sectionID == id { chats[index].sectionID = nil }
+        emit(.chatsChanged)
+        perform("sections.delete", ["id": id])
+    }
+
+    /// Puts a section at `place` among the sections.
+    func moveSection(_ id: SidebarSection.ID, to place: Int) {
+        guard let from = sections.firstIndex(where: { $0.id == id }) else { return }
+        let to = max(0, min(sections.count - 1, place))
+        guard to != from else { return }
+        sections.insert(sections.remove(at: from), at: to)
+        emit(.chatsChanged)
+        perform("sections.reorder", ["ids": sections.map(\.id)])
+    }
+
+    func setSectionCollapsed(_ id: SidebarSection.ID, _ collapsed: Bool) {
+        guard let index = sections.firstIndex(where: { $0.id == id }), sections[index].isCollapsed != collapsed else { return }
+        sections[index].isCollapsed = collapsed
+        emit(.chatsChanged)
+        perform("sections.collapse", ["id": id, "collapsed": collapsed])
+    }
+
+    /// Lists a chat under a section, or with the chats in no section, where the sidebar shows
+    /// it: off the pinned rows and out of Hidden.
+    func moveChat(_ id: Chat.ID, toSection sectionID: SidebarSection.ID?) {
+        guard let index = chats.firstIndex(where: { $0.id == id }) else { return }
+        let chat = chats[index]
+        guard chat.sectionID != sectionID || chat.isPinned || chat.isHidden else { return }
+        chats[index].sectionID = sectionID
+        chats[index].isPinned = false
+        chats[index].isHidden = false
+        sortChats()
+        emit(.chatsChanged)
+        perform("chats.set_section", ["chat_id": id, "section_id": sectionID ?? NSNull()])
+    }
+
+    /// One line of at most 60 characters, as the CLI keeps it.
+    static func sectionName(_ name: String) -> String {
+        String(name.split(whereSeparator: \.isWhitespace).joined(separator: " ").prefix(60))
     }
 
     /// Asks the CLI for the page of messages before the chat's first one. The transcript calls
@@ -1194,6 +1989,25 @@ final class AppStore {
             chats[index].hasMore = page.hasMore
             emit(.olderMessagesLoaded(id))
         }
+    }
+
+    /// Loads older pages of a chat until `messageID` is in it, so a note can show the message it
+    /// is about. False when the chat has no such message.
+    func loadMessage(_ messageID: Message.ID, in id: Chat.ID) async throws -> Bool {
+        for _ in 0..<100 {
+            guard let chat = chat(id) else { return false }
+            if chat.messages.contains(where: { $0.id == messageID }) { return true }
+            guard !isMock, chat.hasMore, let first = chat.messages.first else { return false }
+            let page = try await client.request("chats.messages", ["chat_id": id, "before": first.id], as: Wire.MessagePage.self)
+            guard let index = chats.firstIndex(where: { $0.id == id }) else { return false }
+            if chats[index].messages.first?.id != first.id { continue }
+            let known = Set(chats[index].messages.map(\.id))
+            chats[index].messages.insert(contentsOf: page.messages.map { $0.toModel() }.filter { !known.contains($0.id) }, at: 0)
+            chats[index].hasMore = page.hasMore
+            emit(.olderMessagesLoaded(id))
+            if page.messages.isEmpty { return false }
+        }
+        return false
     }
 
     /// Full-text chat and message matches from the local SQLite index.
@@ -1393,29 +2207,102 @@ final class AppStore {
 
     /// Where an attachment's bytes are on this computer. A file sent from here is known at once; one
     /// sent from another Device is fetched through the CLI, and the message reloads when it lands.
+    /// A fetch that failed keeps its reason until the user retries, so a scroll does not ask again.
     private var attachmentURLs: [Attachment.ID: URL] = [:]
     private var fetchingAttachments: Set<Attachment.ID> = []
+    private var attachmentErrors: [Attachment.ID: String] = [:]
 
     func localURL(for attachment: Attachment, in chatID: Chat.ID, messageID: Message.ID) -> URL? {
-        if let url = attachmentURLs[attachment.id] { return url }
-        guard !isMock, !fetchingAttachments.contains(attachment.id) else { return nil }
+        if let url = attachmentURLs[attachment.id], FileManager.default.fileExists(atPath: url.path) { return url }
+        guard !isMock, !fetchingAttachments.contains(attachment.id), attachmentErrors[attachment.id] == nil else { return nil }
         fetchingAttachments.insert(attachment.id)
         Task { [weak self] in
             let params: [String: Any] = [
                 "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size]
             ]
             guard let self else { return }
+            defer { fetchingAttachments.remove(attachment.id) }
             do {
                 let reply = try await client.request("files.path", params, as: Wire.FilePath.self)
                 attachmentURLs[attachment.id] = URL(fileURLWithPath: reply.path)
-                emit(.messageChanged(chatID, messageID))
             } catch {
-                // Left in the fetching set: the relay does not have it, and every scroll would
-                // ask again. A relaunch retries.
+                attachmentErrors[attachment.id] = error.localizedDescription
                 NSLog("fetching \(attachment.name) failed: \(error.localizedDescription)")
             }
+            emit(.messageChanged(chatID, messageID))
         }
         return nil
+    }
+
+    /// Why the attachment's bytes could not be fetched, until a retry.
+    func attachmentError(for attachment: Attachment) -> String? { attachmentErrors[attachment.id] }
+
+    func retryAttachment(_ attachment: Attachment, in chatID: Chat.ID, messageID: Message.ID) {
+        guard attachmentErrors.removeValue(forKey: attachment.id) != nil else { return }
+        _ = localURL(for: attachment, in: chatID, messageID: messageID)
+        emit(.messageChanged(chatID, messageID))
+    }
+
+    /// The attachment as a file named for what it is, for Quick Look, another app, or a copy:
+    /// the bytes under their attachment id carry no extension, so the CLI keeps a named copy.
+    func openableURL(for attachment: Attachment) async throws -> URL {
+        if let url = attachmentURLs[attachment.id], !url.pathExtension.isEmpty,
+            FileManager.default.fileExists(atPath: url.path)
+        { return url }
+        let params: [String: Any] = [
+            "attachment": ["id": attachment.id, "name": attachment.name, "mime": attachment.mime, "size": attachment.size],
+            "named": true,
+        ]
+        return URL(fileURLWithPath: try await client.request("files.path", params, as: Wire.FilePath.self).path)
+    }
+
+    // MARK: - Outputs
+
+    /// Every version of each chat's outputs, oldest first: what `outputs.list` answered, and
+    /// output messages that arrived since. A chat is asked for when something first shows it, and
+    /// again after a resync, while what it had stays on screen.
+    private var outputMessages: [Chat.ID: [Message]] = [:]
+    private var outputRequests: Set<Chat.ID> = []
+    private var staleOutputs: Set<Chat.ID> = []
+
+    /// The chat's outputs, the latest published first; empty until the CLI answers.
+    func outputs(in chatID: Chat.ID) -> [OutputSeries] {
+        if isMock { return OutputSeries.group(chat(chatID)?.messages ?? []) }
+        let known = outputMessages[chatID]
+        if known == nil || staleOutputs.contains(chatID) { listOutputs(in: chatID) }
+        return OutputSeries.group(known ?? [])
+    }
+
+    private func listOutputs(in chatID: Chat.ID) {
+        guard outputRequests.insert(chatID).inserted else { return }
+        staleOutputs.remove(chatID)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { outputRequests.remove(chatID) }
+            do {
+                let reply = try await client.request("outputs.list", ["chat_id": chatID], as: Wire.OutputList.self)
+                // Output messages that arrived while the list was on its way are in it too.
+                var messages = reply.outputs.map { $0.toModel() }
+                for message in outputMessages[chatID] ?? [] where !messages.contains(where: { $0.id == message.id }) {
+                    messages.append(message)
+                }
+                outputMessages[chatID] = messages
+                emit(.outputsChanged(chatID))
+            } catch {
+                NSLog("listing outputs failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Keeps a chat's known outputs in step with a message that was added, changed, or removed.
+    private func noteOutput(_ message: Message?, removing id: Message.ID? = nil, in chatID: Chat.ID) {
+        guard var messages = outputMessages[chatID] else { return }
+        let before = messages
+        messages.removeAll { $0.id == (message?.id ?? id) }
+        if let message, message.output != nil { messages.append(message) }
+        guard messages != before else { return }
+        outputMessages[chatID] = messages
+        emit(.outputsChanged(chatID))
     }
 
     func isResponding(in chatID: Chat.ID) -> Bool {
@@ -1501,6 +2388,31 @@ final class AppStore {
         perform("chats.stop", ["chat_id": chatID])
     }
 
+    /// The chat's tasks, what waits on the user first, then open work, each newest first.
+    func tasks(in chatID: Chat.ID) -> [DurableTask] {
+        durableTasks.filter { $0.chatIds.contains(chatID) }.sorted {
+            ($0.state.order, -$0.updatedAt) < ($1.state.order, -$1.updatedAt)
+        }
+    }
+
+    func durableTask(_ id: String) -> DurableTask? {
+        durableTasks.first { $0.id == id }
+    }
+
+    private func acceptDurableTask(_ task: DurableTask) {
+        if let index = durableTasks.firstIndex(where: { $0.id == task.id }) {
+            guard durableTasks[index].revision < task.revision else { return }
+            durableTasks[index] = task
+        } else { durableTasks.append(task) }
+        emit(.durableTasksChanged)
+    }
+
+    func taskRequest(_ method: String, params: [String: Any]) async throws -> DurableTask {
+        let task = try await client.request(method, params, as: DurableTask.self)
+        acceptDurableTask(task)
+        return task
+    }
+
     // MARK: - Identity, pairing, providers
 
     func createIdentity() async throws -> [String] {
@@ -1524,6 +2436,34 @@ final class AppStore {
             return
         }
         _ = try await client.request("device.update", ["id": id])
+    }
+
+    /// Whether `lorca service` keeps the CLI running on a Runner, asked of it through the CLI.
+    func serviceStatus(_ id: Device.ID) async throws -> Wire.ServiceStatus {
+        if isMock { return .init(installed: false, running: false) }
+        return try await client.request("device.service_status", ["id": id], as: Wire.ServiceStatus.self)
+    }
+
+    /// Names a Device on every paired Device; blank takes back the name its machine goes by. The
+    /// name shows at once and goes back if the CLI refuses it.
+    func setDeviceName(_ name: String, for id: Device.ID) async throws {
+        guard let index = devices.firstIndex(where: { $0.id == id }) else { return }
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let before = devices[index]
+        if before.machineName.isEmpty { devices[index].machineName = before.name }
+        devices[index].name = name.isEmpty ? devices[index].machineName : name
+        guard devices[index].name != before.name else { return }
+        emit(.rosterChanged)
+        if isMock { return }
+        do {
+            _ = try await client.request("device.set_name", ["id": id, "name": name])
+        } catch {
+            if let index = devices.firstIndex(where: { $0.id == id }) {
+                devices[index] = before
+                emit(.rosterChanged)
+            }
+            throw error
+        }
     }
 
     func unpairDevice(_ id: Device.ID) async throws {
@@ -1619,12 +2559,19 @@ final class AppStore {
         providers.first { $0.kind == kind }
     }
 
-    /// The models `kind` offers, in the catalog's order; the first is the default the CLI uses.
-    /// A custom provider's are the ones saved with it, with the levels the CLI says they take.
+    /// The models a bot of `kind` can run, in the catalog's order; the first is the default the
+    /// CLI uses. A custom provider's are the ones saved with it, with the levels the CLI says
+    /// they take. Decision models are Auto-review's alone.
     func models(for kind: ProviderCredential.Kind) -> [ProviderModel] {
+        reviewModels(for: kind).filter { !$0.decides }
+    }
+
+    /// Every model of `kind` Auto-review can run: the ones bots can, and decision models.
+    func reviewModels(for kind: ProviderCredential.Kind) -> [ProviderModel] {
         guard kind.isCustom else { return catalog.filter { $0.provider == kind } }
-        return (credential(for: kind)?.models ?? []).map {
-            ProviderModel(provider: kind, id: $0.id, label: $0.displayName, levels: $0.levels)
+        let credential = credential(for: kind)
+        return (credential?.models ?? []).map {
+            ProviderModel(provider: kind, id: $0.id, label: $0.displayName, levels: $0.levels, decides: credential?.decides == true)
         }
     }
 
@@ -1690,7 +2637,12 @@ final class AppStore {
         bots = MockData.bots()
         chats = MockData.chats()
         routines = MockData.routines()
+        budgets = MockData.budgets()
+        reviews = MockData.reviews()
+        mockPlaybooks = MockData.playbooks()
         autoReview = MockData.autoReview()
+        sharedLinks = MockData.sharedLinks()
+        sections = MockData.sections()
         providers = MockData.providers()
         catalog = MockData.models()
         sortChats()

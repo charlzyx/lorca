@@ -31,14 +31,14 @@ struct SettingsEntry: Hashable {
         keywords: [L("dictate speech voice microphone locale")]) }
     static var version: SettingsEntry { SettingsEntry(
         .general, L("Check for Updates"), row: L("Version"), keywords: [L("update upgrade release sparkle")]) }
-    static var automaticChecks: SettingsEntry { SettingsEntry(
-        .general, L("Check for updates automatically"), keywords: [L("update upgrade background")]) }
-    static var automaticDownloads: SettingsEntry { SettingsEntry(
-        .general, L("Download and install updates automatically"), keywords: [L("update upgrade background")]) }
 
     static var autoReviewSwitch: SettingsEntry { SettingsEntry(
         .autoReview, L("Check actions before they run"),
         keywords: [L("auto-review approve approval permission plugin ask")]) }
+    static var autoReviewModel: SettingsEntry { SettingsEntry(
+        .autoReview, L("Reviews with"), keywords: [L("review provider")]) }
+    static var reviewModels: SettingsEntry { SettingsEntry(
+        .providers, L("Review Models"), keywords: [L("review model auto-review decision")]) }
     static var autoReviewRules: SettingsEntry { SettingsEntry(
         .autoReview, L("Auto-review Rules"), keywords: [L("rule allow automatically ask first always allow")]) }
 
@@ -98,12 +98,14 @@ enum SettingsSearch {
         switch pane {
         case .general:
             [.sendOnReturn, .timestamps, .appearance, .appLanguage, .dictationLanguage]
-                + (Updater.isEnabled ? [.version, .automaticChecks, .automaticDownloads] : [])
-        case .autoReview: [.autoReviewSwitch, .autoReviewRules]
+                + (Updater.isEnabled ? [.version] : [])
+        case .autoReview: [.autoReviewSwitch, .autoReviewModel, .autoReviewRules]
+        case .sharedLinks: []
         case .advanced: [.relayURL, .cliPort, .onboarding] + (store.hasIdentity == true ? [.deleteAccount] : [])
         case .bots: (device.map { store.bots(on: $0.id) } ?? []).map { .bot($0) }
-        case .providers: store.providers.map { .provider($0.kind) }
+        case .providers: store.providers.map { .provider($0.kind) } + (store.reviewProviderKinds.isEmpty ? [] : [.reviewModels])
         case .plugins: pluginEntries(on: device)
+        case .secrets: []
         case .device: device == nil ? [.machineKey] : [.machineKey, .pairing]
         }
     }

@@ -4,6 +4,56 @@ use super::*;
 use lorca::app::OutboxItem;
 use lorca::relay::RelayClient;
 
+#[tokio::test]
+async fn encrypted_task_records_round_trip_and_replace_only_their_own_slot() {
+    fn task_outbox(app: &lorca::app::App) -> OutboxItem {
+        loop {
+            let item = app.store.first_outbox().unwrap().unwrap();
+            let state = app.state.lock().unwrap().clone();
+            app.store.remove_outbox_with_state(&item.id, &state).unwrap();
+            if item.kind == "task" { return item; }
+        }
+    }
+    let relay = Relay::start(0).await;
+    let app = lorca::app::App::load(lorca::config::Config { home: relay.home.join("source"), port: 0 }).unwrap();
+    lorca::identity::create(&app, Some("Source".into())).unwrap();
+    let bot = app.state.lock().unwrap().bots[0].clone();
+    let chat_id = app.state.lock().unwrap().chats[0].meta.id.clone();
+    let created = lorca::api::dispatch(&app, "tasks.create", serde_json::json!({
+        "request_id":"create","owner_bot_id":bot.id,"chat_ids":[chat_id],
+        "goal":"Encrypted durable work","acceptance_criteria":["Verified"],"next_action":"Inspect"
+    })).await.unwrap();
+    let id = created["id"].as_str().unwrap();
+    let first = task_outbox(&app);
+    assert!(!String::from_utf8_lossy(&first.ciphertext).contains("Encrypted durable work"));
+    let uploaded = relay.client.put_blob(&relay.url, &relay.token, first.clone()).await.unwrap();
+    assert_eq!(relay.client.put_blob(&relay.url, &relay.token, first).await.unwrap(), uploaded);
+    let (page, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "task").await.unwrap();
+    assert_eq!(page.len(), 1);
+    let replica = lorca::app::App::load(lorca::config::Config { home: relay.home.join("replica"), port: 0 }).unwrap();
+    lorca::identity::create(&replica, Some("Replica".into())).unwrap();
+    replica.machine.lock().unwrap().as_mut().unwrap().account_dek = app.machine_file().unwrap().account_dek;
+    let machine = replica.machine_file().unwrap();
+    lorca::sync::apply_blob(&replica, &machine, &page[0]);
+    assert_eq!(lorca::tasks::get(&replica, id).unwrap().revision, 1);
+    lorca::api::dispatch(&app, "tasks.update", serde_json::json!({
+        "id":id,"request_id":"progress","expected_revision":1,"next_action":"Verify"
+    })).await.unwrap();
+    let newest = task_outbox(&app);
+    relay.client.put_blob(&relay.url, &relay.token, newest).await.unwrap();
+    let (new_page, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "task").await.unwrap();
+    assert_eq!(new_page.len(), 1);
+    lorca::sync::apply_blob(&replica, &machine, &new_page[0]);
+    assert_eq!(lorca::tasks::get(&replica, id).unwrap().next_action, "Verify");
+    lorca::sync::apply_blob(&replica, &machine, &page[0]);
+    assert_eq!(lorca::tasks::get(&replica, id).unwrap().revision, 2);
+    for kind in ["roster","chat","job","job_cancel","job_result","request","response","machine","credentials","key","file","task","handoff","review","attention","project_context","playbook","event"] {
+        assert!(db::KINDS.contains(&kind));
+    }
+    assert!(db::SEALED_KINDS.contains(&"event"));
+    assert_eq!(PROTOCOL, lorca::relay::PROTOCOL);
+}
+
 struct Relay {
     state: AppState,
     url: String,
@@ -42,6 +92,7 @@ impl Relay {
             file_store: Arc::new(crate::store::FileStore::Local { dir: home.join("files") }),
             pusher: Arc::new(pusher),
             pushes: tokio_util::task::TaskTracker::new(),
+            receivers: Arc::new(crate::receivers::Receivers::default()),
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -79,6 +130,20 @@ impl Drop for Relay {
         self.task.abort();
         let _ = std::fs::remove_dir_all(&self.home);
     }
+}
+
+#[tokio::test]
+async fn event_blobs_require_a_recipient_and_travel_as_opaque_ciphertext() {
+    let relay = Relay::start(0).await;
+    let item = OutboxItem { id: "event-envelope".into(), kind: "event".into(), recipient: Some("machine".into()), ciphertext: b"opaque encrypted event".to_vec(), slot: None, group: None };
+    let seq = relay.client.put_blob(&relay.url, &relay.token, item.clone()).await.unwrap();
+    assert_eq!(relay.client.put_blob(&relay.url, &relay.token, item).await.unwrap(), seq);
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "event").await.unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(lorca::keys::unb64(&blobs[0].ciphertext).unwrap(), b"opaque encrypted event");
+    let response = relay.http.put(format!("{}/v1/blobs", relay.url)).bearer_auth(&relay.token)
+        .json(&json!({"id": "broadcast-event", "kind": "event", "ciphertext": lorca::keys::b64(b"ciphertext")})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 fn file(id: &str, group: Option<&str>, ciphertext: Vec<u8>) -> OutboxItem {
@@ -134,6 +199,26 @@ async fn binary_attachment_round_trip_stays_encrypted_and_idempotent() {
         .unwrap_err();
     assert_eq!(error.status, Some(409));
     assert!(!relay.home.join("files/identity/att-late").exists());
+}
+
+#[tokio::test]
+async fn encrypted_review_blobs_round_trip_and_keep_the_latest_version() {
+    let relay = Relay::start(0).await;
+    let make = |id: &str, version: u64| OutboxItem { id: id.into(), kind: "review".into(), recipient: None,
+        ciphertext: lorca::crypto::encrypt_json(&[9; 32], "review", &json!({ "id": "review-one", "version": version, "draft": "private draft" })).unwrap(),
+        slot: Some(lorca::app::Slot::latest(lorca::model::relay_name("review/review-one"))), group: None };
+    let first = make("review-first", 1);
+    relay.client.put_blob(&relay.url, &relay.token, first.clone()).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, first).await.unwrap();
+    let latest = make("review-last", 2);
+    relay.client.put_blob(&relay.url, &relay.token, latest.clone()).await.unwrap();
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "review").await.unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "review-last");
+    let ciphertext = lorca::keys::unb64(&blobs[0].ciphertext).unwrap();
+    assert_eq!(ciphertext, latest.ciphertext);
+    let content: Value = lorca::crypto::decrypt_json(&[9; 32], "review", &ciphertext).unwrap();
+    assert_eq!(content["version"], 2);
 }
 
 #[tokio::test]
@@ -272,6 +357,17 @@ async fn a_stopping_relay_delivers_the_pushes_it_took() {
     apns.abort();
 }
 
+/// Polls `done` for up to ten seconds, and fails the test naming `what` when it never holds.
+async fn until(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..200 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("timed out waiting until {what}");
+}
+
 /// A computer that joined by pairing pairs the next one: the identity device attests the first
 /// with the identity key, that one attests the next with its machine key, and the newest gets
 /// the account. Once unpaired, a computer pairs nobody.
@@ -294,17 +390,117 @@ async fn a_paired_computer_pairs_another() {
     assert_eq!(joined.account_dek, account.account_dek);
     assert_eq!(relay.state.db.machines_for(&account.identity_pubkey).await.unwrap().len(), 3);
     third.relay.token(&relay.url, &joined.machine().unwrap()).await.unwrap();
-    for _ in 0..50 {
-        if lorca::pairing::status(&second, &nonce)["state"] == "completed" {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    until("the second computer sees the pairing complete", || lorca::pairing::status(&second, &nonce)["state"] == "completed").await;
     assert_eq!(lorca::pairing::status(&second, &nonce)["device"]["name"], "Third");
 
     lorca::sync::unpair_device(&first, &second.this_device_id().unwrap()).await.unwrap();
     let error = lorca::pairing::start(second.clone()).await.unwrap_err();
     assert!(error.to_string().contains("unpaired"), "{error}");
+}
+
+/// Through a relay: what a phone signs reaches its Runner and the answer comes back. What the
+/// relay plants for the Runner, sealed with nothing but its public key, changes nothing, and
+/// neither does a request the phone signed once, delivered again under a new blob id.
+#[tokio::test]
+async fn a_runner_answers_only_what_a_device_signed() {
+    let relay = Relay::start(0).await;
+    let app = |name: &str| lorca::app::App::load(lorca::config::Config { home: relay.home.join(name), port: 0 }).unwrap();
+    let (runner, phone) = (app("runner"), app("phone"));
+    lorca::identity::create(&runner, Some("Runner".into())).unwrap();
+    runner.set_relay_url(Some(relay.url.clone())).unwrap();
+    let (_, code) = lorca::pairing::start(runner.clone()).await.unwrap();
+    lorca::pairing::accept(phone.clone(), &code, Some("Phone".into())).await.unwrap();
+    let loops = [tokio::spawn(lorca::sync::run(runner.clone())), tokio::spawn(lorca::sync::run(phone.clone()))];
+    let (runner_id, phone_id) = (runner.this_device_id().unwrap(), phone.this_device_id().unwrap());
+    // Each knows the other from the account's records, and the phone sees the Runner online.
+    // The relay can list the Runner online before its machine blob reaches the phone, and
+    // `requests::ask` refuses a Runner the phone holds no record and key for.
+    until("the phone knows the Runner and its key", || phone.device(&runner_id).is_some_and(|runner| !runner.box_pubkey.is_empty())).await;
+    until("the phone sees the Runner online", || phone.device_is_online(&runner_id)).await;
+    until("the Runner knows the phone", || runner.device(&phone_id).is_some()).await;
+    let chef = runner.state.lock().unwrap().bots[0].id.clone();
+    lorca::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+
+    let mcp = runner.config.mcp_path();
+    let servers = || std::fs::read_to_string(&mcp).unwrap_or_default();
+    let token = phone.relay.token(&relay.url, &phone.machine_file().unwrap().machine().unwrap()).await.unwrap();
+    let upload = |id: &str, ciphertext: Vec<u8>| {
+        let item = OutboxItem { id: id.into(), kind: "request".into(), recipient: Some(runner_id.clone()), ciphertext, slot: None, group: None };
+        relay.client.put_blob(&relay.url, &token, item)
+    };
+    let runner_device = phone.device(&runner_id).unwrap();
+    let save = |name: &str| lorca::model::Request {
+        id: format!("req-{name}"),
+        verb: "mcp.save".into(),
+        body: serde_json::json!({ "name": name, "config": { "command": "true" } }),
+    };
+    let signed = lorca::envelope::seal(&phone, "request", &runner_device, &save("docs")).unwrap();
+    upload("signed", signed.clone()).await.unwrap();
+    until("the Runner saves the signed request's server", || servers().contains("docs")).await;
+    lorca::requests::ask(&phone, &runner_id, "mcp.remove", serde_json::json!({ "name": "docs" })).await.unwrap();
+    assert!(!servers().contains("docs"));
+
+    upload("delivered-again", signed).await.unwrap();
+    let unsigned = lorca::crypto::seal_json(&runner_device.box_pubkey, &save("planted")).unwrap();
+    upload("planted", unsigned).await.unwrap();
+    // The Runner reads its envelopes in the order the relay took them, so once it answers a
+    // question asked after these, it has read them.
+    lorca::requests::ask(&phone, &runner_id, "memory.read", serde_json::json!({ "bot_id": chef })).await.unwrap();
+    assert!(!servers().contains("docs"), "the request again");
+    assert!(!servers().contains("planted"));
+    for task in loops {
+        task.abort();
+    }
+}
+
+/// Through a relay: unpairing a Device makes a new account key. The other Devices get it, and
+/// so do a Device paired afterwards and one restored from the backup phrase. What the account
+/// writes from then on does not open with the keys the unpaired Device kept.
+#[tokio::test]
+async fn unpairing_a_device_makes_an_account_key_it_never_gets() {
+    let relay = Relay::start(0).await;
+    let app = |name: &str| lorca::app::App::load(lorca::config::Config { home: relay.home.join(name), port: 0 }).unwrap();
+    let (identity, phone, laptop) = (app("identity"), app("phone"), app("laptop"));
+    let phrase = lorca::identity::create(&identity, Some("Identity".into())).unwrap().join(" ");
+    identity.set_relay_url(Some(relay.url.clone())).unwrap();
+    for (device, name) in [(&phone, "Phone"), (&laptop, "Laptop")] {
+        let (_, code) = lorca::pairing::start(identity.clone()).await.unwrap();
+        lorca::pairing::accept(device.clone(), &code, Some(name.into())).await.unwrap();
+    }
+    let mut loops = vec![tokio::spawn(lorca::sync::run(identity.clone())), tokio::spawn(lorca::sync::run(phone.clone())), tokio::spawn(lorca::sync::run(laptop.clone()))];
+    let laptop_id = laptop.this_device_id().unwrap();
+    until("the identity device knows the laptop", || identity.device(&laptop_id).is_some()).await;
+    let kept = laptop.dek().unwrap();
+
+    lorca::sync::unpair_device(&identity, &laptop_id).await.unwrap();
+    until("the identity device made a new key", || identity.dek().is_some_and(|held| held.newest() != kept.newest())).await;
+    let keys = identity.dek().unwrap();
+    until("the phone has the new key", || phone.dek().is_some_and(|held| held.newest() == keys.newest())).await;
+    assert!(phone.state.lock().unwrap().unpaired.contains(&laptop_id));
+
+    let mut scout = identity.state.lock().unwrap().bots[0].clone();
+    scout.id = String::new();
+    scout.name = "Scout".into();
+    identity.create_bot_with_dm(scout, None).unwrap();
+    until("the phone has the new bot", || phone.state.lock().unwrap().bots.iter().any(|bot| bot.name == "Scout")).await;
+    let (rosters, _) = relay.client.list_blobs(&relay.url, &identity.relay.token(&relay.url, &identity.machine_file().unwrap().machine().unwrap()).await.unwrap(), 0, "roster").await.unwrap();
+    let roster = lorca::keys::unb64(&rosters.last().unwrap().ciphertext).unwrap();
+    assert!(lorca::crypto::decrypt_json::<lorca::model::RosterBlob>(&kept, "roster", &roster).is_err(), "the laptop's keys open nothing new");
+
+    // A Device paired now, and one restored from the phrase, read the account as it is.
+    let tablet = app("tablet");
+    let (_, code) = lorca::pairing::start(identity.clone()).await.unwrap();
+    lorca::pairing::accept(tablet.clone(), &code, Some("Tablet".into())).await.unwrap();
+    assert_eq!(tablet.dek().unwrap().newest(), keys.newest());
+    loops.push(tokio::spawn(lorca::sync::run(tablet.clone())));
+    until("the tablet has the new bot", || tablet.state.lock().unwrap().bots.iter().any(|bot| bot.name == "Scout")).await;
+    let restored = app("restored");
+    restored.set_relay_url(Some(relay.url.clone())).unwrap();
+    lorca::identity::restore(&restored, &phrase, Some("Restored".into())).await.unwrap();
+    assert_eq!(restored.dek().unwrap(), keys);
+    for task in loops {
+        task.abort();
+    }
 }
 
 /// `POST /v1/machines` takes a paired machine's bearer and new keys, refuses a key paired with
@@ -328,4 +524,131 @@ async fn attesting_a_machine_takes_a_bearer_and_keeps_keys_apart() {
     assert!(relay.state.db.revoke_machine("identity", &laptop).await.unwrap());
     let refused = relay.client.attest(&relay.url, &relay.token, &laptop, &box_key).await.unwrap_err();
     assert_eq!(refused.status, Some(410));
+}
+
+#[tokio::test]
+async fn shared_links_are_read_by_anyone_and_changed_by_their_owner() {
+    let relay = Relay::start(0).await;
+    let put = |token: String, id: &str, bytes: &[u8]| {
+        let (client, url, id, bytes) = (&relay.client, relay.url.clone(), id.to_string(), bytes.to_vec());
+        async move { client.put_share(&url, &token, &id, bytes).await }
+    };
+    put(relay.token.clone(), "link-1", b"sealed").await.unwrap();
+
+    // A browser reads it with no token and no protocol, and may read the answer.
+    let read = reqwest::get(format!("{}/v1/shares/link-1", relay.url)).await.unwrap();
+    assert_eq!(read.status(), 200);
+    assert_eq!(read.headers()["access-control-allow-origin"], "*");
+    assert_eq!(read.bytes().await.unwrap().as_ref(), b"sealed");
+    let missing = reqwest::get(format!("{}/v1/shares/nothing", relay.url)).await.unwrap();
+    assert_eq!(missing.status(), 404);
+    assert_eq!(missing.headers()["access-control-allow-origin"], "*");
+    assert!(relay.client.get_share(&relay.url, "nothing").await.unwrap().is_none());
+
+    // The owner replaces it under the same id; another identity can neither replace nor delete it.
+    put(relay.token.clone(), "link-1", b"sealed again").await.unwrap();
+    assert_eq!(relay.client.get_share(&relay.url, "link-1").await.unwrap().unwrap(), b"sealed again");
+    relay.state.db.register_identity("other", "content-2", "machine-2", "box-2", "attestation").await.unwrap();
+    let other = issue_token(&relay.state.secret, "other", "machine-2").0;
+    assert_eq!(put(other.clone(), "link-1", b"taken").await.unwrap_err().status, Some(403));
+    assert_eq!(relay.client.delete_share(&relay.url, &other, "link-1").await.unwrap_err().status, Some(404));
+    assert_eq!(relay.client.get_share(&relay.url, "link-1").await.unwrap().unwrap(), b"sealed again");
+
+    // A template's size at most, and so many links per identity.
+    let too_large = vec![0u8; MAX_SHARE_BYTES + 1];
+    assert_eq!(put(relay.token.clone(), "link-big", &too_large).await.unwrap_err().status, Some(413));
+    for i in 1..MAX_SHARES {
+        put(relay.token.clone(), &format!("link-q{i}"), b"q").await.unwrap();
+    }
+    assert_eq!(put(relay.token.clone(), "link-over", b"q").await.unwrap_err().status, Some(409));
+    put(relay.token.clone(), "link-1", b"replacing is not another link").await.unwrap();
+
+    relay.client.delete_share(&relay.url, &relay.token, "link-1").await.unwrap();
+    assert!(relay.client.get_share(&relay.url, "link-1").await.unwrap().is_none());
+    // An identity that goes takes its links along.
+    relay.state.db.delete_identity("identity", false).await.unwrap();
+    assert!(relay.client.get_share(&relay.url, "link-q1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn attention_slots_round_trip_as_ciphertext_at_protocol_three() {
+    assert_eq!(PROTOCOL, lorca::relay::PROTOCOL);
+    let relay = Relay::start(1_000_000).await;
+    let dek = lorca::keys::random_32();
+    let payload = serde_json::json!({"source":{"chat_id":"private-chat"},"summary":"Private decision"});
+    for (id, summary) in [("attention-first", "Private decision"), ("attention-latest", "Updated decision")] {
+        let mut payload = payload.clone(); payload["summary"] = summary.into();
+        relay.client.put_blob(&relay.url, &relay.token, OutboxItem {
+            id: id.into(), kind: "attention".into(), recipient: None,
+            ciphertext: lorca::crypto::encrypt_json(&dek, "attention", &payload).unwrap(),
+            slot: Some(lorca::app::Slot::latest("opaque-attention-slot")), group: None,
+        }).await.unwrap();
+    }
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "attention").await.unwrap();
+    assert_eq!(blobs.len(), 1);
+    assert_eq!(blobs[0].id, "attention-latest");
+    let bytes = lorca::keys::unb64(&blobs[0].ciphertext).unwrap();
+    let opened: serde_json::Value = lorca::crypto::decrypt_json(&dek, "attention", &bytes).unwrap();
+    assert_eq!(opened["summary"], "Updated decision");
+    assert!(lorca::crypto::decrypt_json::<serde_json::Value>(&lorca::keys::random_32(), "attention", &bytes).is_err());
+    let response = relay.http.get(format!("{}/v1/blobs?kinds=attention", relay.url)).bearer_auth(&relay.token).header("lorca-protocol", "2").send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::UPGRADE_REQUIRED);
+}
+
+#[tokio::test]
+async fn handoff_request_report_and_cancellation_round_trip_in_independent_slots() {
+    let relay = Relay::start(0).await;
+    let key = [42; 32];
+    let make = |id: &str, role: &str, text: &str| OutboxItem {
+        id: id.into(), kind: "handoff".into(), recipient: None,
+        ciphertext: lorca::crypto::encrypt(&key, "handoff", text.as_bytes()).unwrap(),
+        slot: Some(lorca::app::Slot::latest(format!("handoff-test-1-{role}"))), group: None,
+    };
+    relay.client.put_blob(&relay.url, &relay.token, make("request", "request", "contract")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("started", "report", "running")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("finished", "report", "completed with evidence")).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, make("cancel", "cancel", "requester cancelled")).await.unwrap();
+    let (rows, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, lorca::sync::POLL_KINDS).await.unwrap();
+    assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["request", "finished", "cancel"]);
+    for (row, expected) in rows.iter().zip(["contract", "completed with evidence", "requester cancelled"]) {
+        let ciphertext = lorca::keys::unb64(&row.ciphertext).unwrap();
+        assert_ne!(ciphertext, expected.as_bytes());
+        assert_eq!(lorca::crypto::decrypt(&key, "handoff", &ciphertext).unwrap(), expected.as_bytes());
+    }
+    let health: Value = relay.http.get(format!("{}/v1/health", relay.url)).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["protocol"], 4);
+    assert!(!db::SEALED_KINDS.contains(&"handoff"));
+}
+
+#[tokio::test]
+async fn project_context_sync_is_encrypted_separate_from_transcript_paging_and_group_deleted() {
+    let relay = Relay::start(0).await;
+    let dek = [9; 32];
+    let plaintext = serde_json::json!({ "chat_id": "project-a", "entry": { "text": "confidential project brief" } });
+    let ciphertext = lorca::crypto::encrypt_json(&dek, "project_context", &plaintext).unwrap();
+    let context = OutboxItem {
+        id: "project-revision".into(), kind: "project_context".into(), recipient: None,
+        ciphertext: ciphertext.clone(), slot: Some(lorca::app::Slot::latest("project-revision")), group: Some("project-a".into()),
+    };
+    relay.client.put_blob(&relay.url, &relay.token, context.clone()).await.unwrap();
+    relay.client.put_blob(&relay.url, &relay.token, context).await.unwrap();
+    for i in 0..410 {
+        relay.client.put_blob(&relay.url, &relay.token, OutboxItem {
+            id: format!("message-{i}"), kind: "chat".into(), recipient: None,
+            ciphertext: vec![i as u8], slot: Some(lorca::app::Slot::latest(format!("message-{i}"))), group: Some("project-a".into()),
+        }).await.unwrap();
+    }
+    let (blobs, _) = relay.client.list_blobs(&relay.url, &relay.token, 0, "project_context").await.unwrap();
+    assert_eq!(blobs.len(), 1, "context is loaded independently of the newest transcript page");
+    let downloaded = lorca::keys::unb64(&blobs[0].ciphertext).unwrap();
+    assert_eq!(downloaded, ciphertext);
+    assert_eq!(lorca::crypto::decrypt_json::<serde_json::Value>(&dek, "project_context", &downloaded).unwrap(), plaintext);
+    let (page, has_more) = relay.client.group_page(&relay.url, &relay.token, "project-a", None, 400).await.unwrap();
+    assert_eq!(page.len(), 400);
+    assert!(has_more);
+    assert!(page.iter().flat_map(|slot| &slot.blobs).all(|blob| blob.kind == "chat"));
+    relay.client.delete_group(&relay.url, &relay.token, "project-a").await.unwrap();
+    assert!(relay.client.list_blobs(&relay.url, &relay.token, 0, "project_context").await.unwrap().0.is_empty());
+    let late = OutboxItem { id: "late-context".into(), kind: "project_context".into(), recipient: None, ciphertext, slot: None, group: Some("project-a".into()) };
+    assert_eq!(relay.client.put_blob(&relay.url, &relay.token, late).await.unwrap_err().status, Some(409));
 }

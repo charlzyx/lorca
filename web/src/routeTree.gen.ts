@@ -17,6 +17,8 @@ import { Route as ZhRouteImport } from './routes/zh'
 import { Route as ApiSearchRouteImport } from './routes/api/search'
 import { Route as DocsSplatRouteImport } from './routes/docs/$'
 import { Route as DocsChar123Char125DotmdRouteImport } from './routes/docs/{$}[.]md'
+import { Route as GithubConnectedRouteImport } from './routes/github.connected'
+import { Route as TIdRouteImport } from './routes/t.$id'
 import { Route as ZhDownloadRouteImport } from './routes/zh_/download'
 import { Route as ZhLlmsFullDottxtRouteImport } from './routes/zh_/llms-full[.]txt'
 import { Route as ZhLlmsDottxtRouteImport } from './routes/zh_/llms[.]txt'
@@ -63,6 +65,16 @@ const DocsChar123Char125DotmdRoute = DocsChar123Char125DotmdRouteImport.update({
   path: '/docs/{$}.md',
   getParentRoute: () => rootRouteImport,
 } as any)
+const GithubConnectedRoute = GithubConnectedRouteImport.update({
+  id: '/github/connected',
+  path: '/github/connected',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TIdRoute = TIdRouteImport.update({
+  id: '/t/$id',
+  path: '/t/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ZhDownloadRoute = ZhDownloadRouteImport.update({
   id: '/zh_/download',
   path: '/zh/download',
@@ -99,6 +111,8 @@ export interface FileRoutesByFullPath {
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
+  '/github/connected': typeof GithubConnectedRoute
+  '/t/$id': typeof TIdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
@@ -114,6 +128,8 @@ export interface FileRoutesByTo {
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
+  '/github/connected': typeof GithubConnectedRoute
+  '/t/$id': typeof TIdRoute
   '/zh/download': typeof ZhDownloadRoute
   '/zh/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh/llms.txt': typeof ZhLlmsDottxtRoute
@@ -130,6 +146,8 @@ export interface FileRoutesById {
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
   '/docs/{$}.md': typeof DocsChar123Char125DotmdRoute
+  '/github/connected': typeof GithubConnectedRoute
+  '/t/$id': typeof TIdRoute
   '/zh_/download': typeof ZhDownloadRoute
   '/zh_/llms-full.txt': typeof ZhLlmsFullDottxtRoute
   '/zh_/llms.txt': typeof ZhLlmsDottxtRoute
@@ -147,6 +165,8 @@ export interface FileRouteTypes {
     | '/api/search'
     | '/docs/$'
     | '/docs/{$}.md'
+    | '/github/connected'
+    | '/t/$id'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
@@ -162,6 +182,8 @@ export interface FileRouteTypes {
     | '/api/search'
     | '/docs/$'
     | '/docs/{$}.md'
+    | '/github/connected'
+    | '/t/$id'
     | '/zh/download'
     | '/zh/llms-full.txt'
     | '/zh/llms.txt'
@@ -177,6 +199,8 @@ export interface FileRouteTypes {
     | '/api/search'
     | '/docs/$'
     | '/docs/{$}.md'
+    | '/github/connected'
+    | '/t/$id'
     | '/zh_/download'
     | '/zh_/llms-full.txt'
     | '/zh_/llms.txt'
@@ -193,6 +217,8 @@ export interface RootRouteChildren {
   ApiSearchRoute: typeof ApiSearchRoute
   DocsSplatRoute: typeof DocsSplatRoute
   DocsChar123Char125DotmdRoute: typeof DocsChar123Char125DotmdRoute
+  GithubConnectedRoute: typeof GithubConnectedRoute
+  TIdRoute: typeof TIdRoute
   ZhDownloadRoute: typeof ZhDownloadRoute
   ZhLlmsFullDottxtRoute: typeof ZhLlmsFullDottxtRoute
   ZhLlmsDottxtRoute: typeof ZhLlmsDottxtRoute
@@ -258,6 +284,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DocsChar123Char125DotmdRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/github/connected': {
+      id: '/github/connected'
+      path: '/github/connected'
+      fullPath: '/github/connected'
+      preLoaderRoute: typeof GithubConnectedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/t/$id': {
+      id: '/t/$id'
+      path: '/t/$id'
+      fullPath: '/t/$id'
+      preLoaderRoute: typeof TIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/zh_/download': {
       id: '/zh_/download'
       path: '/zh/download'
@@ -305,6 +345,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiSearchRoute: ApiSearchRoute,
   DocsSplatRoute: DocsSplatRoute,
   DocsChar123Char125DotmdRoute: DocsChar123Char125DotmdRoute,
+  GithubConnectedRoute: GithubConnectedRoute,
+  TIdRoute: TIdRoute,
   ZhDownloadRoute: ZhDownloadRoute,
   ZhLlmsFullDottxtRoute: ZhLlmsFullDottxtRoute,
   ZhLlmsDottxtRoute: ZhLlmsDottxtRoute,

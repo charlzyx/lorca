@@ -116,7 +116,7 @@ func (mk *marketplace) homePage(c *ui.Context, page *marketPage) {
 	}
 
 	ui.Column(c).Gap(24).Margin(2, 0, 0, 0).Children(func() {
-		if len(mk.catalog.Plugins)+len(mk.catalog.Bots) == 0 && mk.loading != marketLoaded {
+		if len(mk.catalog.Plugins)+len(mk.catalog.Bots)+len(mk.catalog.Packs) == 0 && mk.loading != marketLoaded {
 			if mk.loading != marketFailed {
 				marketStatusLine(c, L("Loading the marketplace…"))
 				return
@@ -132,9 +132,13 @@ func (mk *marketplace) homePage(c *ui.Context, page *marketPage) {
 			return
 		}
 		query := strings.TrimSpace(page.query)
+		packs := workflowMatchingPacks(mk.catalog.Packs, query)
+		if len(packs) > 0 {
+			mk.workflowSection(c, packs)
+		}
 		if query == "" {
 			sections := mk.homeSections()
-			if len(sections) == 0 {
+			if len(sections) == 0 && len(packs) == 0 {
 				marketStatusLine(c, L("Nothing in the marketplace yet."))
 			}
 			for _, each := range sections {
@@ -149,8 +153,11 @@ func (mk *marketplace) homePage(c *ui.Context, page *marketPage) {
 				results = append(results, item)
 			}
 		}
-		if len(results) == 0 {
+		if len(results) == 0 && len(packs) == 0 {
 			marketStatusLine(c, L("No results match “%@”", query))
+			return
+		}
+		if len(results) == 0 {
 			return
 		}
 		shown, mixed := marketFiltered(results, page.filter)
@@ -309,9 +316,13 @@ func (mk *marketplace) pluginPage(c *ui.Context, page *marketPage) {
 					switch {
 					case mk.installing[plugin.ID]:
 						spinner(c, 16).Label(L("Adding %@", plugin.Name))
+					case isInstalled && plugin.NamedAccounts:
+						if pushButton(c, L("Add Account…"), pushOptions{}).Clicked() {
+							mk.addAccount(plugin)
+						}
 					case isInstalled:
 						if pushButton(c, L("Manage…"), pushOptions{}).Clicked() {
-							mk.manage(plugin.ID)
+							mk.manage(installed.ID)
 						}
 					default:
 						tip := L("Pair a Runner first.")
@@ -327,18 +338,30 @@ func (mk *marketplace) pluginPage(c *ui.Context, page *marketPage) {
 			ui.Text(c, plugin.Description).Padding(0, 12).FontSize(13).LineHeight(1.45).TextColor(p.Label2).Selectable()
 		})
 
-		if on != nil && isInstalled {
+		if on != nil && isInstalled && plugin.NamedAccounts {
+			marketCard(c, L("Accounts on %@", on.Name), -1, func(k *card) {
+				for _, account := range mk.installedAccounts(plugin.ID) {
+					text, tone := account.ShortStatus()
+					color := p.tone(tone)
+					_, row := statusRow(c.Key(account.ID), k, statusRowOptions{Symbol: marketPluginSymbol(plugin), PluginID: plugin.ID,
+						Title: firstNonEmpty(account.AccountName, account.Name), State: text, StateColor: &color, Clickable: true, Tooltip: L("Open %@", account.Name)})
+					if row.Clicked {
+						mk.manage(account.ID)
+					}
+				}
+			})
+		} else if on != nil && isInstalled {
 			marketCard(c, L("On %@", on.Name), -1, func(k *card) {
 				action := ""
 				switch installed.State {
-				case model.PluginNeedsAuth:
+				case model.PluginNeedsAuth, model.PluginInsufficientAccess:
 					action = L("Connect")
 				case model.PluginNeedsSetup:
 					action = L("Set Up")
 				}
 				_, row := statusRow(c, k, statusRowOptions{Symbol: on.Symbol(), Title: installed.Detail, Subtitle: L("Every bot on %@ can use it.", on.Name), ActionTitle: action})
 				if row.Action {
-					mk.manage(plugin.ID)
+					mk.manage(installed.ID)
 				}
 			})
 		}

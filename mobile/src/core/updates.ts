@@ -3,16 +3,18 @@
 // so the app finds the newest published mobile-v release itself, from the tags. Once a day, at
 // launch or back in the foreground, it checks and offers a newer version in an alert (Install
 // Update, Remind Me Later, Skip This Version); Settings › Updates checks at once or installs what a
-// check found, and holds the switch for the daily check. The native module downloads the APK, checks it against the size and
+// check found, and holds the switch for the daily check. While it installs, a dialog shows how far
+// the download is (UpdateProgress), and a failure is said in an alert. The native module downloads the APK, checks it against the size and
 // SHA-256 GitHub lists for it, and hands it to the package installer, which replaces the app.
 // iOS updates through TestFlight, and Lorca Dev never updates.
 
 import * as Application from "expo-application";
-import { Alert, AppState, Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import { create } from "zustand";
 import * as core from "../../modules/lorca-core";
 import { t } from "../i18n";
 import { loadPrefs, savePrefs } from "./prefs";
+import { alert } from "../ui/alert";
 
 const API = "https://api.github.com/repos/egoist/lorca";
 const TAG_PREFIX = "mobile-v";
@@ -126,7 +128,7 @@ function checkIfDue() {
 /// Sparkle's offer: what is new, then install it, ask again tomorrow, or never for this version.
 export function offerUpdate(release: Release) {
   const notes = release.notes.length > 1200 ? `${release.notes.slice(0, 1200).trimEnd()}…` : release.notes;
-  Alert.alert(
+  alert(
     t("Lorca {version} is available", { version: release.version }),
     [t("You have {version}.", { version: installedVersion }), notes].filter(Boolean).join("\n\n"),
     [
@@ -144,8 +146,15 @@ export async function installUpdate(release: Release) {
   try {
     await core.installUpdate(release.url, release.sha256, release.size);
   } catch (error) {
-    useUpdates.setState({ phase: "idle", error: error instanceof Error ? error.message : String(error) });
+    installFailed(error instanceof Error ? error.message : String(error));
   }
+}
+
+/// An install the user started and the download or the installer failed: said in an alert, since
+/// the progress dialog it ends may be the only sign of it on screen.
+function installFailed(message: string) {
+  useUpdates.setState({ phase: "idle", error: message });
+  alert(t("Couldn’t install the update"), message);
 }
 
 let started = false;
@@ -168,7 +177,7 @@ export function startUpdateChecks() {
         useUpdates.setState({ phase: "idle" });
         break;
       case "failed":
-        useUpdates.setState({ phase: "idle", error: status.message });
+        installFailed(status.message);
         break;
     }
   });

@@ -19,7 +19,7 @@ export const zh: Messages = {
     title: '拉个群，<br/>让 AI 队友<accent>分工</accent>。',
     body: '和一个队友单聊，或者把几个拉进一个群聊。它们可以读写你的文件、运行命令，并记住你说过的话。交给它们一件事，它们会自己分工协作。',
     how: '看看它怎么运作',
-    platforms: '支持 Mac、Windows 和 Linux，iPhone 和 iPad 版正在公测。',
+    platforms: '支持 Mac、Windows、Linux 和 Android，iPhone 和 iPad 版正在公测。',
   },
   turns: {
     eyebrow: '群聊',
@@ -64,7 +64,7 @@ export const zh: Messages = {
     title: '常见问题',
     items: [
       { q: '需要注册账号或者服务器吗？', a: '不需要。Lorca 在你自己的电脑上运行，不用注册，也不用架服务器。你的备份短语就是你的账户。' },
-      { q: '支持哪些平台？', a: 'Mac、Windows 和 Linux，用应用或只用命令行都可以。iPhone 和 iPad 版正在公测，用来和智能体聊天。你任何一台电脑上的智能体都能加入同一个群聊。' },
+      { q: '支持哪些平台？', a: 'Mac、Windows 和 Linux，用应用或只用命令行都可以。Android 版和正在公测的 iPhone、iPad 版用来和智能体聊天。你任何一台电脑上的智能体都能加入同一个群聊。' },
       { q: '它用的是哪家 AI？', a: '你自己的账号或 API 密钥。登录 ChatGPT 或 Grok，或者添加一个 DeepSeek API 密钥。每个智能体可以用不同的服务商，随时可以换。' },
       { q: '智能体能在我的电脑上做什么？', a: '在你给它的文件夹里读取、修改、新建文件和运行命令。它以你的用户权限在那台电脑上运行，并告诉你它运行了什么。' },
       { q: '有人能看到我的聊天记录吗？', a: '不能。聊天记录在同步之前就已在你的电脑上加密。中继只保存加密数据，没有密钥，所以看不到智能体名字、聊天标题和消息内容。' },
@@ -72,21 +72,20 @@ export const zh: Messages = {
   },
   cta: {
     title: '开始使用 Lorca。',
-    body: '下载 Mac、Windows 或 Linux 版。',
+    body: '下载 Mac、Windows、Linux 或 Android 版。',
   },
   docs: {
     title: 'Lorca 文档',
   },
   download: {
     title: '下载 Lorca',
-    description: '下载 Lorca 的 Mac、Windows 和 Linux 版，通过 TestFlight 加入 iPhone 和 iPad 版测试，或在任意电脑上安装 Lorca CLI。',
+    description: '下载 Lorca 的 Mac、Windows、Linux 和 Android 版，通过 TestFlight 加入 iPhone 和 iPad 版测试，或在任意电脑上安装 Lorca CLI。',
     version: '版本 {{version}}',
     unavailable: '暂时无法获取最新版本，请刷新页面重试。',
     mac: {
       title: 'Mac',
       body: '和智能体聊天，并在你的 Mac 上运行它们。',
       action: '下载 Mac 版',
-      system: 'macOS {{version}} 或更高版本',
       appleSilicon: 'Apple 芯片',
     },
     windows: {
@@ -109,7 +108,9 @@ export const zh: Messages = {
     },
     android: {
       title: 'Android',
-      body: '在 Android 手机上和智能体聊天。',
+      body: '和智能体聊天，它们继续在你的电脑上运行。扫描桌面应用里的二维码即可配对。Lorca 会自动更新。',
+      action: '下载 Android 版',
+      system: 'Android 7.0 或更高版本',
     },
     soon: '即将推出',
     cli: {
@@ -126,5 +127,51 @@ export const zh: Messages = {
     privacy: '隐私',
     faq: '常见问题',
     download: '下载',
+  },
+  github: {
+    home: '前往 lorca.app',
+    back: '可以关闭这个页面，回到 Lorca。',
+    connected: {
+      title: 'GitHub 已连接。',
+      body: 'Lorca GitHub 应用已安装到 {{account}}，并连接到你的 Lorca 账户。关注其仓库中拉取请求的例行任务会自行开始。',
+    },
+    not_yours: {
+      title: '这次安装不属于你。',
+      body: 'GitHub 列出的你的账户可访问的安装中没有它，所以 Lorca 没有连接它。请在 Lorca 的例行任务中安装应用，并以能管理该仓库的 GitHub 账户登录。',
+    },
+    expired: {
+      title: '这个链接已过期。',
+      body: 'Lorca 给出的链接一小时内有效。请在例行任务上再次选择“安装应用”。',
+    },
+    requested: {
+      title: '已申请安装。',
+      body: '需要组织的所有者先批准 Lorca GitHub 应用。批准后，在例行任务上再次选择“安装应用”即可连接。',
+    },
+    failed: {
+      title: '无法连接 GitHub。',
+      body: 'GitHub 没有完成登录。请在 Lorca 的例行任务上选择“安装应用”重试。',
+    },
+  },
+  template: {
+    title: '在 Lorca 中分享的智能体',
+    open: '在 Lorca 中打开',
+    noApp: '还没有 Lorca？<download>下载 Mac、Windows、Linux、Android 或 iPhone 版</download>，然后再打开这个链接。',
+    included: '包含的内容',
+    routines: '例行任务',
+    routinesNote: '例行任务添加后先处于暂停状态。',
+    plugins: '插件',
+    pluginsNote: '连接时用你自己的账号。',
+    memories: '记忆',
+    more: '还有 {{count}} 条',
+    skills: '技能',
+    privacy: '在你的浏览器里解密。Lorca 的服务器无法读取这个智能体。',
+    home: '前往 lorca.app',
+    error: {
+      noKey: { title: '链接不完整。', body: '缺少 # 后面的部分。请向对方要完整的链接。' },
+      notFound: { title: '这个链接已失效。', body: '它已被撤销，或者从未存在。' },
+      badKey: { title: '无法打开这个链接。', body: '密钥不匹配。请确认复制了完整的链接。' },
+      notTemplate: { title: '这个链接里不是 Lorca 智能体。', body: '它可能来自更新版本的 Lorca。' },
+      unreachable: { title: '无法加载这个智能体。', body: '保存它的中继没有响应。请稍后再试。' },
+    },
   },
 }

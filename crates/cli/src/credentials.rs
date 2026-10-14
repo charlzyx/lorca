@@ -36,33 +36,51 @@ pub enum CustomApi {
     ChatCompletions,
     /// OpenAI-compatible Responses, at `{base_url}/responses`.
     Responses,
-    /// Anthropic-compatible Messages, at `{base_url}/v1/messages`.
+    /// Anthropic-compatible Messages, at `{base_url}/messages`, or `{base_url}/v1/messages` for a
+    /// root without its `/v1` (Moonshot's `…/anthropic`).
     Messages,
+    /// System One decisions (TypeSafe's, which OpenRouter and other gateways serve too), at
+    /// `base_url` itself: a `state` and a map of typed questions.
+    SystemOne,
+    /// OpenAI's Decisions API, at `base_url` itself: an `input` and a list of typed questions.
+    Decisions,
 }
 
 impl CustomApi {
-    pub const ALL: [CustomApi; 3] = [CustomApi::ChatCompletions, CustomApi::Responses, CustomApi::Messages];
+    pub const ALL: [CustomApi; 5] = [CustomApi::ChatCompletions, CustomApi::Responses, CustomApi::Messages, CustomApi::SystemOne, CustomApi::Decisions];
 
     pub fn id(self) -> &'static str {
         match self {
             CustomApi::ChatCompletions => "chat-completions",
             CustomApi::Responses => "responses",
             CustomApi::Messages => "messages",
+            CustomApi::SystemOne => "system-one",
+            CustomApi::Decisions => "decisions",
         }
     }
 
     pub fn parse(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|api| api.id() == id)
     }
+
+    /// Whether its models are decision models, which answer typed questions instead of
+    /// chatting: Auto-review can run them, and no bot can.
+    pub fn decides(self) -> bool {
+        matches!(self, CustomApi::SystemOne | CustomApi::Decisions)
+    }
 }
 
-/// The thinking levels a custom provider's model takes: the catalog's for a model it knows by
+/// The thinking levels a custom provider's model takes, lowest first: the ones its server's
+/// list declares for it (`listed`, its saved entry), else the catalog's for a model it knows by
 /// id, else low, medium, and high, which every server with a reasoning setting understands. An
 /// unknown server has no one way to turn its thinking off, so Off is not among them; the
 /// provider's default sends nothing.
-pub fn custom_levels(model: &str) -> &'static [lorca_models::ThinkingLevel] {
+pub fn custom_levels(model: &str, listed: Option<&CustomModel>) -> Vec<lorca_models::ThinkingLevel> {
     use lorca_models::ThinkingLevel::{High, Low, Medium};
-    lorca_models::find_any(model).map(|known| known.levels).unwrap_or(&[Low, Medium, High])
+    if let Some(levels) = listed.and_then(|listed| listed.levels.as_ref()) {
+        return levels.clone();
+    }
+    lorca_models::find_any(model).map(|known| known.levels.to_vec()).unwrap_or_else(|| vec![Low, Medium, High])
 }
 
 /// A model a bot can run, as every app's Model menu offers it: its id, the name people know it
@@ -87,6 +105,10 @@ pub struct CustomModel {
     /// Whether it takes images.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<bool>,
+    /// The thinking levels the list declares it takes, lowest first; empty for a model the list
+    /// says does not reason, and `None` when the list says nothing ([`custom_levels`] decides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<lorca_models::ThinkingLevel>>,
 }
 
 /// A server the user added that speaks one of the wire protocols Lorca has: a gateway, another
@@ -225,9 +247,9 @@ impl Credentials {
         self.statuses().into_iter().filter(|s| s.is_connected).map(|s| s.kind).collect()
     }
 
-    /// Every kind a bot can run with: the built-in providers, then the custom ones.
+    /// Every kind a bot can run with: the built-in providers, then the custom ones that chat.
     pub fn kinds(&self) -> Vec<String> {
-        PROVIDER_KINDS.iter().map(|kind| kind.to_string()).chain(self.custom_kinds()).collect()
+        PROVIDER_KINDS.iter().map(|kind| kind.to_string()).chain(self.custom_kinds().into_iter().filter(|kind| !self.custom[kind].api.decides())).collect()
     }
 
     /// The custom providers' kinds, in the order the user added them.
@@ -239,16 +261,29 @@ impl Credentials {
 
     /// The models a bot of `kind` can pick, as every app's Model menu offers them: the catalog's
     /// for a built-in provider and the saved ones of a custom provider, the first being the
-    /// default. None for a kind the account does not have.
+    /// default. None for a kind the account does not have, or one whose models only decide.
     pub fn models(&self, kind: &str) -> Vec<OfferedModel> {
         if let Some(provider) = self.custom.get(kind) {
+            if provider.api.decides() {
+                return Vec::new();
+            }
             return provider
                 .models
                 .iter()
-                .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: custom_levels(&model.id).to_vec() })
+                .map(|model| OfferedModel { id: model.id.clone(), name: model.name.clone().unwrap_or_else(|| model.id.clone()), levels: custom_levels(&model.id, Some(model)) })
                 .collect();
         }
         lorca_models::for_provider(kind).into_iter().map(|model| OfferedModel { id: model.id.into(), name: model.name.into(), levels: model.levels.to_vec() }).collect()
+    }
+
+    /// The model Auto-review runs on a provider when the user picked none: the catalog's small,
+    /// fast `review` model for a built-in provider, and the first model of a custom one, the one
+    /// the user put at the top.
+    pub fn review_model(&self, kind: &str) -> Option<String> {
+        match self.custom.get(kind) {
+            Some(provider) => provider.models.first().map(|model| model.id.clone()),
+            None => lorca_models::review_model(kind).map(str::to_string),
+        }
     }
 
     /// The name people know a provider by: a custom provider's own, else the built-in's.
@@ -283,6 +318,7 @@ impl Credentials {
                 kind: kind.to_string(),
                 is_connected: detail.is_some(),
                 detail: detail.unwrap_or_else(|| "Not connected".into()),
+                review_model: self.review_model(kind),
                 base_url: self.api_key(kind).and_then(|c| c.base_url.clone()),
                 ..Default::default()
             }
@@ -294,13 +330,22 @@ impl Credentials {
                 key => format!("{} · {}", mask_key(key), provider.base_url),
             };
             ProviderStatus {
+                review_model: self.review_model(&kind),
                 kind,
                 is_connected: true,
                 detail,
                 base_url: Some(provider.base_url.clone()),
                 name: Some(provider.name.clone()),
                 api: Some(provider.api),
-                models: provider.models.iter().map(|model| StatusModel { model: model.clone(), levels: custom_levels(&model.id).to_vec() }).collect(),
+                models: provider
+                    .models
+                    .iter()
+                    // The levels it takes stand in for the ones its list declared, under one key.
+                    .map(|model| StatusModel {
+                        model: CustomModel { levels: None, ..model.clone() },
+                        levels: if provider.api.decides() { Vec::new() } else { custom_levels(&model.id, Some(model)) },
+                    })
+                    .collect(),
             }
         });
         built_in.chain(custom).collect()
@@ -375,7 +420,7 @@ mod tests {
     }
 
     fn custom(name: &str, created_at: i64) -> CustomProvider {
-        let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None }];
+        let models = vec![CustomModel { id: "m".into(), name: None, context_window: None, max_output: None, images: None, levels: None }];
         CustomProvider { name: name.into(), api: CustomApi::ChatCompletions, base_url: "http://lab/v1".into(), api_key: String::new(), models, created_at }
     }
 
@@ -410,7 +455,7 @@ mod tests {
         // An unknown model takes the levels every server understands; the catalog's model its own.
         use lorca_models::ThinkingLevel::{High, Low, Medium};
         assert_eq!(mine.models[0].levels, [Low, Medium, High]);
-        assert_eq!(custom_levels("anthropic/claude-opus-5"), lorca_models::find("anthropic", "claude-opus-5").unwrap().levels);
+        assert_eq!(custom_levels("anthropic/claude-opus-5", None), lorca_models::find("anthropic", "claude-opus-5").unwrap().levels);
         assert!(ours.connected_kinds().contains(&"custom:router".to_string()));
     }
 
@@ -418,7 +463,7 @@ mod tests {
     fn each_provider_offers_the_models_its_menu_lists() {
         let mut credentials = Credentials::default();
         let mut lab = custom("Lab", 1);
-        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus 5".into()), context_window: None, max_output: None, images: None });
+        lab.models.push(CustomModel { id: "anthropic/claude-opus-5".into(), name: Some("Opus 5".into()), context_window: None, max_output: None, images: None, levels: None });
         credentials.custom.insert("custom:lab".into(), lab);
 
         // The catalog's, its default first.
@@ -428,8 +473,50 @@ mod tests {
         // A custom provider's, named as its server names them, with the levels each takes.
         let lab = credentials.models("custom:lab");
         assert_eq!(lab.iter().map(|m| (m.id.as_str(), m.name.as_str())).collect::<Vec<_>>(), [("m", "m"), ("anthropic/claude-opus-5", "Opus 5")]);
-        assert_eq!(lab[1].levels, custom_levels("anthropic/claude-opus-5"));
+        assert_eq!(lab[1].levels, custom_levels("anthropic/claude-opus-5", None));
         assert!(credentials.models("custom:gone").is_empty());
+
+        // A decision provider's models review actions; a bot runs none of them.
+        let mut decider = custom("Decider", 2);
+        decider.api = CustomApi::SystemOne;
+        credentials.custom.insert("custom:decider".into(), decider);
+        assert!(credentials.models("custom:decider").is_empty());
+        assert!(!credentials.kinds().contains(&"custom:decider".to_string()));
+        let status = credentials.statuses().into_iter().find(|status| status.kind == "custom:decider").unwrap();
+        assert_eq!((status.api, status.models.len(), status.models[0].levels.len()), (Some(CustomApi::SystemOne), 1, 0));
+    }
+
+    #[test]
+    fn a_custom_model_takes_the_levels_its_list_declares() {
+        use lorca_models::ThinkingLevel::{High, Low, Max, Medium, XHigh};
+        let mut credentials = Credentials::default();
+        let mut lab = custom("Lab", 1);
+        let declared = |id: &str, levels: Option<Vec<lorca_models::ThinkingLevel>>| CustomModel { id: id.into(), name: None, context_window: None, max_output: None, images: None, levels };
+        lab.models = vec![
+            declared("gpt-lab", Some(vec![Low, Medium, High, XHigh, Max])),
+            // The list's word wins over the catalog's for a model it knows.
+            declared("anthropic/claude-opus-5", Some(vec![Low, High])),
+            declared("plain", Some(Vec::new())),
+            declared("m", None),
+        ];
+        credentials.custom.insert("custom:lab".into(), lab);
+
+        let levels = credentials.models("custom:lab").into_iter().map(|m| m.levels).collect::<Vec<_>>();
+        assert_eq!(levels, [vec![Low, Medium, High, XHigh, Max], vec![Low, High], vec![], vec![Low, Medium, High]]);
+        assert_eq!(custom_levels("anthropic/claude-opus-5", None), lorca_models::find("anthropic", "claude-opus-5").unwrap().levels);
+
+        // The apps read one `levels` per model: the ones it takes.
+        let status = credentials.statuses().into_iter().find(|status| status.kind == "custom:lab").unwrap();
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["models"][0]["levels"], serde_json::json!(["low", "medium", "high", "xhigh", "max"]));
+        assert_eq!(json["models"][3]["levels"], serde_json::json!(["low", "medium", "high"]));
+        assert_eq!(serde_json::to_string(&json["models"][0]).unwrap().matches("\"levels\"").count(), 1);
+
+        // A provider saved before lists declared levels loads with none declared.
+        let saved: CustomModel = serde_json::from_str(r#"{ "id": "qwen3:8b", "context_window": 32768 }"#).unwrap();
+        assert_eq!((saved.levels, saved.context_window), (None, Some(32_768)));
+        let kept: CustomModel = serde_json::from_value(serde_json::to_value(declared("gpt-lab", Some(vec![High, Max]))).unwrap()).unwrap();
+        assert_eq!(kept.levels, Some(vec![High, Max]));
     }
 
     #[test]

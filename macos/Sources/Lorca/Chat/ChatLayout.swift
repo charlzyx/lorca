@@ -146,16 +146,25 @@ struct NoticeMetrics {
     var labelFrame: NSRect
 }
 
+/// Where an output's card sits in a run of one bot's outputs, which join into one list of
+/// compact rows: whether the card above and the one below are in the run too.
+struct OutputStack: Hashable {
+    var above = false
+    var below = false
+
+    var isStacked: Bool { above || below }
+}
+
 enum ChatRow: Hashable {
     case day(Date)
-    case message(id: Message.ID, groupStart: Bool)
+    case message(id: Message.ID, groupStart: Bool, stack: OutputStack = OutputStack())
     /// Bots with a turn running, shown after the last message.
     case working([Bot.ID])
     /// A one-line note after the last message, such as "Chef stopped without replying".
     case status(String)
 
     var messageID: Message.ID? {
-        if case let .message(id, _) = self { return id }
+        if case let .message(id, _, _) = self { return id }
         return nil
     }
 
@@ -329,7 +338,9 @@ final class ChatLayout {
         let width = min(PermissionCellView.width, tableWidth - indent - ChatMetrics.horizontalInset)
         var entry = entry(for: message)
         if let card = entry.card, card.width == width { return card.height }
-        let height = PermissionCellView.height(for: request, rowWidth: tableWidth, indent: indent)
+        let height = request.isSecret
+            ? SecretCellView.height(for: request, rowWidth: tableWidth, indent: indent)
+            : PermissionCellView.height(for: request, rowWidth: tableWidth, indent: indent)
         entry.card = (width, height)
         cache[message.id] = entry
         return height
@@ -341,6 +352,28 @@ final class ChatLayout {
         var entry = entry(for: message)
         if let card = entry.card, card.width == width { return card.height }
         let height = CommandCellView.height(for: run, rowWidth: tableWidth, indent: indent)
+        entry.card = (width, height)
+        cache[message.id] = entry
+        return height
+    }
+
+    /// A published output's card, for a bot's message that carries one.
+    private func outputHeight(for message: Message, tableWidth: CGFloat, indent: CGFloat) -> CGFloat {
+        let width = min(OutputCellView.width, tableWidth - indent - ChatMetrics.horizontalInset)
+        var entry = entry(for: message)
+        if let card = entry.card, card.width == width { return card.height }
+        let height = OutputCellView.height(for: message, rowWidth: tableWidth, indent: indent)
+        entry.card = (width, height)
+        cache[message.id] = entry
+        return height
+    }
+
+    /// A coding agent's card, for the `coding_agent` row that started it.
+    private func agentHeight(for message: Message, agent: AgentRun, tableWidth: CGFloat, indent: CGFloat) -> CGFloat {
+        let width = min(AgentCellView.width, tableWidth - indent - ChatMetrics.horizontalInset)
+        var entry = entry(for: message)
+        if let card = entry.card, card.width == width { return card.height }
+        let height = AgentCellView.height(for: agent, rowWidth: tableWidth, indent: indent)
         entry.card = (width, height)
         cache[message.id] = entry
         return height
@@ -387,18 +420,27 @@ final class ChatLayout {
         case .status:
             return ChatMetrics.statusRowHeight
 
-        case let .message(_, groupStart):
+        case let .message(_, groupStart, stack):
             guard let message else { return 0 }
             let top = groupStart ? ChatMetrics.groupTopPadding : ChatMetrics.tightTopPadding
             let indent = ChatMetrics.indent(showsAvatar: showsAvatar)
 
             switch message.body {
+            case .text where message.isOutputCard && stack.isStacked:
+                return (stack.above ? 0 : top) + OutputCellView.stackedHeight
+            case .text where message.isOutputCard:
+                return top + outputHeight(for: message, tableWidth: tableWidth, indent: indent)
+
             case .text:
                 let metrics = metrics(for: message, showsAvatar: showsAvatar, groupStart: groupStart, tableWidth: tableWidth)
                 return top + metrics.rowHeight
 
-            // Tool calls never show but as a message_bot marker or a command's card.
+            // Tool calls never show but as a message_bot marker, a command's card, or a coding
+            // agent's card.
             case let .tool(tool):
+                if let agent = tool.agent {
+                    return top + agentHeight(for: message, agent: agent, tableWidth: tableWidth, indent: indent)
+                }
                 if let run = tool.run {
                     return top + commandHeight(for: message, run: run, tableWidth: tableWidth, indent: indent)
                 }
@@ -412,6 +454,10 @@ final class ChatLayout {
 
             case let .permission(request):
                 return top + cardHeight(for: message, request: request, tableWidth: tableWidth, indent: indent)
+
+            // Its height changes as the user leaves out a file, so it is not cached.
+            case let .draft(card):
+                return top + DraftCellView.height(for: card, rowWidth: tableWidth, indent: indent)
             }
         }
     }

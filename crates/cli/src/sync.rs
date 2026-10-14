@@ -7,16 +7,17 @@ use crate::app::{remember_applied, upsert_device, App};
 use crate::events::{Event, RelayProblem};
 use crate::keys::unb64;
 use crate::model::*;
-use crate::relay::{BlobIn, RelayError, Signal};
+use crate::relay::{BlobIn, RelayError};
 
 /// A pull page at least this long is applied as a backlog: see `App::bulk_sync`.
 const BULK_BLOBS: usize = 20;
 
 /// What a pull takes. `file` blobs are left out: a transcript fetches them by id when it
 /// needs them, so a photo sent to one bot is not downloaded by every Device.
-pub const POLL_KINDS: &str = "roster,chat,machine,credentials,job,job_cancel,job_result,request,response";
+pub const POLL_KINDS: &str = "roster,task,project_context,playbook,chat,machine,credentials,review,handoff,attention,job,event,job_cancel,job_result,request,response,key";
 
 pub async fn run(app: Arc<App>) {
+    crate::identity::publish_keyring(&app);
     let mut failures: u32 = 0;
     // The last try's bearer was refused and the next one went at once: a second refusal in a
     // row waits out the backoff.
@@ -147,6 +148,8 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         ensure_registered(app, &url).await?;
     }
 
+    // A Device unpaired while this identity device was away gets no newer account key.
+    app.rotation_due.store(true, Ordering::Relaxed);
     // The socket opens before the first pull, so no blob lands unseen between the two.
     let token = token_or_register(app, &url, &machine).await?;
     let mut socket = app.relay.sync_socket(&url, &token).await?;
@@ -163,6 +166,8 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         // What landed while this Device was away is unread until the first pull ends.
         state.caught_up = false;
     }
+
+    pull_keyrings(app, &url, &token, &machine_file).await?;
 
     let (mut pull, mut refresh) = (true, true);
     let mut credentials_due = true;
@@ -189,6 +194,11 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         }
         if pull {
             pull_blobs(app, &url, &token, &machine_file).await?;
+            // Made once the pull caught up, so what the other Devices wrote under the old key
+            // has landed here first and goes up again under the new one.
+            if app.rotation_due.swap(false, Ordering::Relaxed) {
+                crate::identity::rotate_if_due(app);
+            }
             // Once per session, so a relay that refuses the kind is not asked in a loop.
             if std::mem::take(&mut credentials_due) {
                 app.push_credentials_if_owed();
@@ -202,10 +212,10 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         *failures = 0;
 
         (pull, refresh) = tokio::select! {
-            signal = socket.next() => match signal? {
-                Signal::Blobs => (true, false),
-                Signal::Machines => (false, true),
-            },
+            signals = socket.next() => {
+                let signals = signals?;
+                (signals.blobs, signals.machines)
+            }
             // The outbox, or a wake from a phone that came back to the foreground: its socket
             // may have died unnoticed while the app was suspended, so the relay is asked to
             // answer on it, and a pull costs one request.
@@ -213,7 +223,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
                 let woken = app.sync_wakes.load(Ordering::Relaxed);
                 if woken != wakes {
                     wakes = woken;
-                    socket.probe().await?;
+                    socket.probe();
                 }
                 (true, false)
             }
@@ -221,8 +231,25 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
     }
 }
 
+/// The keyrings the relay holds for this Device, read before anything waiting in the outbox goes
+/// up: what was written while this Device was away from a rotation then goes up under the newest
+/// key. Each sits in a slot of its own, so the whole log holds few; reading them all finds one
+/// that a build which did not read keyrings stepped past. The pull after reads them again, which
+/// changes nothing.
+async fn pull_keyrings(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    let mut since = 0;
+    loop {
+        let (blobs, _) = app.relay.list_blobs(url, token, since, "key").await?;
+        let Some(last) = blobs.last().map(|blob| blob.seq) else { return Ok(()) };
+        for blob in &blobs {
+            apply_blob_contents(app, machine_file, blob);
+        }
+        since = last;
+    }
+}
+
 /// Everything a Device polls for but the messages.
-const NOT_CHAT_KINDS: &str = "roster,machine,credentials,job,job_cancel,job_result,request,response";
+const NOT_CHAT_KINDS: &str = "roster,task,project_context,playbook,machine,credentials,review,handoff,attention,job,event,job_cancel,job_result,request,response,key";
 /// How much of each chat a Device takes when it first syncs: what a bot's turn reads.
 const FIRST_SYNC_MESSAGES: usize = 400;
 /// Messages to a page when reading a chat backwards.
@@ -268,8 +295,9 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             break;
         };
         for blob in &blobs {
-            apply_blob(app, machine_file, blob);
+            apply_synced_blob(app, machine_file, blob)?;
         }
+        release_held_if_due(app, machine_file);
         since = last;
     }
     // The credentials are here, so onboarding can tell whether the account has a provider
@@ -283,8 +311,9 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
             Err(error) if matches!(error.status, Some(404 | 405)) => return Ok(FirstSync::CannotPage),
             Err(error) => return Err(error),
         };
-        for blob in slots.iter().flat_map(|slot| &slot.blobs) {
-            apply_blob(app, machine_file, blob);
+        // A message as it stands: its latest version, or its removal. The page keeps its place.
+        for blob in slots.iter().filter_map(|slot| slot.blobs.last()) {
+            apply_history_blob(app, machine_file, blob);
         }
         let before = slots.first().map(|slot| slot.place).filter(|_| has_more);
         if let Err(error) = app.store.set_history_before(&chat_id, before) {
@@ -293,7 +322,7 @@ async fn first_sync_quietly(app: &Arc<App>, url: &str, token: &str, machine_file
         // A page ends early at its byte budget; a bot's turn wants the whole count.
         let mut here = slots.len();
         while here < FIRST_SYNC_MESSAGES && app.history_is_partial(&chat_id) {
-            here += older_messages_from(app, url, token, machine_file, &chat_id).await?.max(1);
+            here += older_messages_from(app, url, token, &chat_id).await?.max(1);
         }
     }
     app.state.lock().unwrap().last_seq = head.unwrap_or(0);
@@ -310,15 +339,16 @@ pub async fn older_messages(app: &Arc<App>, chat_id: &str) -> Result<usize, Stri
     let machine_file = app.machine_file().ok_or("This Device is not paired")?;
     let machine = machine_file.machine().map_err(|e| e.to_string())?;
     let token = token_or_register(app, &url, &machine).await.map_err(|e| e.message)?;
-    older_messages_from(app, &url, &token, &machine_file, chat_id).await.map_err(|e| e.message)
+    older_messages_from(app, &url, &token, chat_id).await.map_err(|e| e.message)
 }
 
-async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile, chat_id: &str) -> Result<usize, RelayError> {
+async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, chat_id: &str) -> Result<usize, RelayError> {
     let _reading = READING_BACK.lock().await;
     let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
     let Some(before) = app.store.history_before(chat_id).map_err(local)? else { return Ok(0) };
     let (slots, has_more) = app.relay.group_page(url, token, &crate::model::relay_name(chat_id), Some(before), OLDER_PAGE).await?;
-    let dek = machine_file.dek().map_err(local)?;
+    // The keys as they are now: a sync session's `machine_file` is the one it started with.
+    let dek = app.dek().ok_or_else(|| local(anyhow::anyhow!("This Device is not paired")))?;
     // A slot's last blob is the message as it stands. A removal or a read mark is nothing to
     // show, and a read mark from back then must not clear what is unread now.
     let newest_first: Vec<Message> = slots
@@ -339,6 +369,29 @@ async fn older_messages_from(app: &Arc<App>, url: &str, token: &str, machine_fil
 
 /// Pulls the log from `last_seq` until a page comes back empty.
 async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate::keys::MachineFile) -> Result<(), RelayError> {
+    // An older build can already have consumed the relay log while ignoring attention or
+    // project context. Replay each of these bounded slot families once when its local table is
+    // empty; ordinary first sync already reads them through NOT_CHAT_KINDS.
+    if !app.attention_backfilled.load(Ordering::Relaxed) {
+        let local = |error: anyhow::Error| RelayError { status: None, message: error.to_string() };
+        let mut kinds = Vec::new();
+        if app.state.lock().unwrap().last_seq > 0 {
+            if app.store.attention_rows().map_err(local)?.is_empty() { kinds.push("attention"); }
+            if !app.store.has_project_entries().map_err(local)? { kinds.push("project_context"); }
+            if app.playbooks.lock().unwrap().records.is_empty() { kinds.push(crate::playbooks::BLOB_KIND); }
+        }
+        if !kinds.is_empty() {
+            let kinds = kinds.join(",");
+            let mut since = 0;
+            loop {
+                let (blobs, _) = app.relay.list_blobs(url, token, since, &kinds).await?;
+                let Some(last) = blobs.last().map(|blob| blob.seq) else { break };
+                for blob in &blobs { apply_blob(app, machine_file, blob); }
+                since = last;
+            }
+        }
+        app.attention_backfilled.store(true, Ordering::Relaxed);
+    }
     if app.state.lock().unwrap().last_seq == 0 && first_sync(app, url, token, machine_file).await? == FirstSync::CannotPage {
         // A relay that cannot page a chat: replay its log. It keeps the latest roster, which
         // in a replay comes after the messages, so that is taken first as a preview.
@@ -371,7 +424,11 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
             if bulk && blob.kind == "job_result" {
                 results.push(blob);
             } else {
-                apply_blob(app, machine_file, &blob);
+                if let Err(error) = apply_synced_blob(app, machine_file, &blob) {
+                    app.bulk_sync.store(false, Ordering::Relaxed);
+                    app.save_state_now();
+                    return Err(error);
+                }
             }
             let mut state = app.state.lock().unwrap();
             state.last_seq = state.last_seq.max(seq);
@@ -385,6 +442,7 @@ async fn pull_blobs(app: &Arc<App>, url: &str, token: &str, machine_file: &crate
         for blob in results {
             apply_blob(app, machine_file, &blob);
         }
+        release_held_if_due(app, machine_file);
     }
 }
 
@@ -452,22 +510,33 @@ pub async fn ensure_registered(app: &Arc<App>, url: &str) -> Result<(), RelayErr
         }
     }
     // A relay that knew this machine before and lost the account (a reset, or the identity
-    // dropped for inactivity) gets back what a Device pairing or restoring needs: the DEK
-    // sealed to the content key, the roster, and the chats' messages as this Device has them.
+    // dropped for inactivity) gets back what a Device pairing or restoring needs: the account
+    // key, the roster, and the chats' messages as this Device has them.
     if again {
-        if let Some(dek) = app.dek() {
-            match crate::crypto::seal(&identity.content_pubkey(), &dek) {
-                Ok(sealed) => {
-                    app.push_blob("key", None, sealed);
-                }
-                Err(error) => tracing::error!(%error, "sealing the account key"),
-            }
-        }
+        crate::identity::publish_keyring(app);
         app.push_roster();
+        crate::review_queue::enqueue_owned(app);
         app.push_history();
     }
     app.save_machine().map_err(|e| RelayError { status: None, message: e.to_string() })?;
     Ok(())
+}
+
+/// An account record as it goes up: under the newest account key, whatever key it was queued
+/// under, since a write can be sealed just before a newer key lands and queued just after. An
+/// attachment goes as it is: any generation opens one.
+pub(crate) fn under_newest_key(app: &App, mut item: crate::app::OutboxItem) -> crate::app::OutboxItem {
+    if !ACCOUNT_KINDS.contains(&item.kind.as_str()) || item.kind == "file" {
+        return item;
+    }
+    let Some(keys) = app.dek() else { return item };
+    if crate::crypto::under_newest(&keys, &item.kind, &item.ciphertext) {
+        return item;
+    }
+    if let Ok(ciphertext) = crate::crypto::decrypt(&keys, &item.kind, &item.ciphertext).and_then(|plaintext| crate::crypto::encrypt(&keys, &item.kind, &plaintext)) {
+        item.ciphertext = ciphertext;
+    }
+    item
 }
 
 async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), RelayError> {
@@ -480,8 +549,14 @@ async fn drain_outbox(app: &Arc<App>, url: &str, token: &str) -> Result<(), Rela
             return Ok(());
         };
         let (id, kind) = (item.id.clone(), item.kind.clone());
+        let item = under_newest_key(app, item);
+        let recent = (ACCOUNT_KINDS.contains(&kind.as_str()) && kind != "file").then(|| item.clone());
         match app.relay.put_blob(url, token, item).await {
-            Ok(_) => {}
+            Ok(seq) => {
+                if let Some(item) = recent {
+                    app.remember_upload(item, seq);
+                }
+            }
             // Over the relay's budget for this identity, as a history uploaded again is: the
             // same blob goes after a second.
             Err(error) if error.is_rate_limited() => {
@@ -552,11 +627,6 @@ async fn refresh_presence(app: &Arc<App>, url: &str, token: &str) -> Result<(), 
         state.device_online = machines.iter().filter(|m| m.online).map(|m| m.machine_pubkey.clone()).collect();
         for machine in &machines {
             state.device_seen.insert(machine.machine_pubkey.clone(), machine.last_seen);
-            if let Some(device) = state.devices.iter_mut().find(|d| d.id == machine.machine_pubkey) {
-                if device.box_pubkey.is_empty() {
-                    device.box_pubkey = machine.box_pubkey.clone();
-                }
-            }
         }
         let count = state.devices.len();
         state.devices.retain(|d| Some(&d.id) == this_id.as_ref() || machines.iter().any(|m| m.machine_pubkey == d.id));
@@ -660,8 +730,16 @@ pub async fn unpair_device(app: &Arc<App>, id: &str) -> Result<(), String> {
         state.turns_online.remove(id);
         state.listed_machines.remove(id);
         state.unknown_machines.remove(id);
+        state.device_names.remove(id);
+        state.unpaired.insert(id.to_string());
     }
     app.save_state();
+    // Every Device's roster keeps the key as unpaired, so none takes it back from a relay that
+    // lists it again; the name the account gave it goes. An identity device makes a new account
+    // key, which the unpaired Device never gets, once its next pull has caught up.
+    app.push_roster();
+    app.rotation_due.store(true, Ordering::Relaxed);
+    app.outbox_notify.notify_waiters();
     app.emit(app.roster_summary());
     app.set_device_turns(id, Vec::new());
     app.turns_changed();
@@ -712,7 +790,28 @@ pub async fn delete_remote_blob(app: &Arc<App>, id: &str) {
 
 // MARK: - Applying blobs
 
+fn apply_synced_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) -> Result<(), RelayError> {
+    if blob.kind == "event" {
+        crate::event_triggers::receive_blob(app, machine_file, blob)
+            .map_err(|error| RelayError { status: None, message: format!("Persisting event delivery: {error}") })
+    } else {
+        apply_blob(app, machine_file, blob);
+        Ok(())
+    }
+}
+
 pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    apply_blob_as(app, machine_file, blob, false);
+}
+
+/// `apply_blob` for what a Device reads of a chat's history, the newest page of each chat on its
+/// first sync: a message under an older account key is history there, as on the pages it reads
+/// backwards (`older_messages`), where the live log takes none.
+fn apply_history_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    apply_blob_as(app, machine_file, blob, true);
+}
+
+fn apply_blob_as(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn, history: bool) {
     let already = {
         let mut state = app.state.lock().unwrap();
         if state.applied_blob_ids.iter().any(|id| id == &blob.id) {
@@ -725,15 +824,55 @@ pub fn apply_blob(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob:
     if already {
         return;
     }
-    apply_blob_contents(app, machine_file, blob);
+    apply_blob_contents_as(app, machine_file, blob, history);
 }
+
+/// What the account key encrypts on the relay. Every other kind is sealed to one Device.
+pub const ACCOUNT_KINDS: &[&str] = &["roster", "task", "project_context", "playbook", "chat", "machine", "credentials", "review", "handoff", "attention", "file"];
 
 /// Applies a blob whether or not it was applied before, and leaves no record of it.
 fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn) {
+    apply_blob_contents_as(app, machine_file, blob, false);
+}
+
+fn apply_blob_contents_as(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn, history: bool) {
     let Ok(ciphertext) = unb64(&blob.ciphertext) else { return };
-    let Ok(dek) = machine_file.dek() else { return };
+    // The keys as they are now: a keyring earlier in this pull may have brought a newer one.
+    let Some(dek) = app.dek() else { return };
+    // Once the account key has changed, what an older key encrypted is history: a message from
+    // before still reads, but nothing under an older key changes what this Device holds or does.
+    // An unpaired Device keeps the keys it had and gets no newer one.
+    if ACCOUNT_KINDS.contains(&blob.kind.as_str()) && !crate::crypto::under_newest(&dek, &blob.kind, &ciphertext) {
+        match crate::crypto::decrypt_json::<ChatBlob>(&dek, &blob.kind, &ciphertext) {
+            // History: added when missing, waking no bot and changing nothing that is there.
+            Ok(ChatBlob::Upsert { message }) if history && blob.kind == "chat" => {
+                if app.message(&message.chat_id, &message.id).is_none() {
+                    app.upsert_message(message, false);
+                }
+            }
+            _ if crate::crypto::decrypt(&dek, &blob.kind, &ciphertext).is_ok() => {
+                tracing::debug!(kind = %blob.kind, blob_id = %blob.id, "under an older account key; left as it is");
+            }
+            // A newer key than this Device holds, whose keyring is yet to come: the relay can
+            // deliver the record before it. Held until a keyring lands.
+            _ => hold(app, &blob.id, &blob.kind, &ciphertext),
+        }
+        return;
+    }
 
     match blob.kind.as_str() {
+        "review" => {
+            if let Err(error) = crate::review_queue::apply(app, &ciphertext) { tracing::warn!(%error, "review blob"); }
+        }
+        "task" => match crate::crypto::decrypt_json::<crate::tasks::Task>(&dek, "task", &ciphertext) {
+            Ok(task) => { if let Err(error) = crate::tasks::apply(app, task) { tracing::warn!(%error, "task sync conflict"); } },
+            Err(error) => tracing::warn!(%error, "task blob"),
+        },
+        "attention" => {
+            if let Err(error) = crate::attention::receive(app, &ciphertext) {
+                tracing::warn!(%error, "attention blob");
+            }
+        }
         "roster" => match crate::crypto::decrypt_json::<RosterBlob>(&dek, "roster", &ciphertext) {
             Ok(roster) => apply_roster(app, roster),
             Err(error) => tracing::warn!(%error, "roster blob"),
@@ -742,31 +881,52 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(op) => apply_chat_op(app, op),
             Err(error) => tracing::warn!(%error, "chat blob"),
         },
+        crate::playbooks::BLOB_KIND => {
+            if let Err(error) = crate::playbooks::apply_remote(app, &dek, &ciphertext) {
+                tracing::warn!(%error, "playbook blob");
+            }
+        }
+        "project_context" => match crate::crypto::decrypt_json::<crate::project_context::ProjectBlob>(&dek, "project_context", &ciphertext) {
+            Ok(project) => {
+                if let Err(error) = crate::project_context::apply_remote(app, &project.chat_id, &project.entry) {
+                    tracing::warn!(%error, chat_id = %project.chat_id, "applying shared project context");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "project context blob"),
+        },
         "machine" => match crate::crypto::decrypt_json::<MachineBlob>(&dek, "machine", &ciphertext) {
-            Ok(MachineBlob { device, turns }) => {
-                if app.this_device_id().as_deref() == Some(device.id.as_str()) {
+            Ok(MachineBlob { device, turns, budgets, watching }) => {
+                // An unpaired key stays out, though its old blob comes again.
+                if app.this_device_id().as_deref() == Some(device.id.as_str()) || app.state.lock().unwrap().unpaired.contains(&device.id) {
                     return;
                 }
+                app.budgets.merge_remote(app, &device.id, budgets);
+                app.set_device_watching(&device.id, watching);
                 // Shown only while the relay lists the Device online, so a key it no longer
                 // lists shows nothing.
                 app.set_device_turns(&device.id, turns);
                 let mut state = app.state.lock().unwrap();
+                let landed = (!state.devices.iter().any(|known| known.id == device.id)).then_some(());
                 // A key the last presence refresh did not list is either a Device that just
                 // paired or one unpaired since, whose old blob must not bring it back. It
                 // lands quietly, and the refresh at the end of the cycle confirms or prunes it.
                 if !state.device_seen.contains_key(&device.id) {
                     upsert_device(&mut state.devices, device);
+                    drop(state);
                     app.presence_stale.store(true, Ordering::Relaxed);
-                    return;
+                } else {
+                    // A blob that only lists other turns is stamped anew but changes nothing the
+                    // roster shows.
+                    let restamped = state.devices.iter().any(|known| *known == Device { updated_at: known.updated_at, ..device.clone() });
+                    let changed = !restamped && upsert_device(&mut state.devices, device);
+                    drop(state);
+                    if changed {
+                        app.save_state();
+                        app.emit(app.roster_summary());
+                    }
                 }
-                // A blob that only lists other turns is stamped anew but changes nothing the
-                // roster shows.
-                let restamped = state.devices.iter().any(|known| *known == Device { updated_at: known.updated_at, ..device.clone() });
-                let changed = !restamped && upsert_device(&mut state.devices, device);
-                drop(state);
-                if changed {
-                    app.save_state();
-                    app.emit(app.roster_summary());
+                if landed.is_some() {
+                    app.held_due.store(true, Ordering::Relaxed);
                 }
             }
             Err(error) => tracing::warn!(%error, "machine blob"),
@@ -775,70 +935,267 @@ fn apply_blob_contents(app: &Arc<App>, machine_file: &crate::keys::MachineFile, 
             Ok(credentials) => app.apply_credentials(&credentials),
             Err(error) => tracing::warn!(%error, "credentials blob"),
         },
-        "job" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Job>(&machine.box_secret, &ciphertext) {
-                Ok(job) => {
-                    crate::runtime::spawn_local_job(app.clone(), job, Some(blob.id.clone()));
+        "handoff" => match crate::crypto::decrypt_json::<crate::handoffs::HandoffUpdate>(&dek, "handoff", &ciphertext) {
+            Ok(update) => {
+                if let Err(error) = crate::handoffs::apply_update(app, update) {
+                    tracing::warn!(%error, "handoff update");
                 }
-                Err(error) => tracing::warn!(%error, "job envelope"),
             }
+            Err(error) => tracing::warn!(%error, "handoff blob"),
+        },
+        "job" | "job_cancel" | "job_result" | "request" | "response" => {
+            apply_envelope(app, machine_file, &blob.kind, &blob.id, &ciphertext);
         }
-        "job_cancel" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<JobCancel>(&machine.box_secret, &ciphertext) {
-                Ok(cancel) => {
-                    app.cancel_job(&cancel.job_id);
-                    let app = app.clone();
-                    let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
-                }
-                Err(error) => tracing::warn!(%error, "job cancellation envelope"),
-            }
-        }
-        "job_result" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<JobResult>(&machine.box_secret, &ciphertext) {
-                Ok(result) => {
-                    crate::runtime::deliver_job_result(app, result);
-                    let app = app.clone();
-                    let blob_id = blob.id.clone();
-                    tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
-                }
-                Err(error) => tracing::warn!(%error, "job result envelope"),
-            }
-        }
-        "request" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Request>(&machine.box_secret, &ciphertext) {
-                Ok(request) => crate::requests::serve(app.clone(), request, blob.id.clone()),
-                Err(error) => tracing::warn!(%error, "request envelope"),
-            }
-        }
-        "response" => {
-            let Ok(machine) = machine_file.machine() else { return };
-            match crate::crypto::unseal_json::<Response>(&machine.box_secret, &ciphertext) {
-                Ok(response) => crate::requests::deliver(app.clone(), response, blob.id.clone()),
-                Err(error) => tracing::warn!(%error, "response envelope"),
-            }
-        }
+        "key" => receive_keyring(app, machine_file, blob, &ciphertext),
         _ => {}
     }
 }
 
+/// Keyrings the identity signed: sealed to this Device's box key by any Device that holds them,
+/// or, on an identity device, the copy in the `key` slot, sealed to the content key. The Devices
+/// a generation leaves out are unpaired here too, whatever the roster says yet, and a newer
+/// generation changes the key this Device writes with.
+fn receive_keyring(app: &Arc<App>, machine_file: &crate::keys::MachineFile, blob: &BlobIn, ciphertext: &[u8]) {
+    let Ok(machine) = machine_file.machine() else { return };
+    let keyrings: Vec<crate::keys::SignedKeyring> = if blob.recipient_machine_pubkey.as_deref() == Some(machine.pubkey().as_str()) {
+        crate::crypto::unseal_json(&machine.box_secret, ciphertext).unwrap_or_default()
+    } else {
+        let identity = app.identity.lock().unwrap().clone().and_then(|file| file.identity().ok());
+        identity.and_then(|identity| crate::identity::open_restore_keyring(&identity, ciphertext)).map(|(signed, _)| vec![signed]).unwrap_or_default()
+    };
+    let mut changed = false;
+    {
+        let mut machine = app.machine.lock().unwrap();
+        let Some(file) = machine.as_mut() else { return };
+        for signed in keyrings {
+            match file.add_keyring(signed) {
+                Ok(newer) => changed |= newer,
+                Err(error) => tracing::warn!(%error, "account keyring refused"),
+            }
+        }
+    }
+    if let Err(error) = app.save_machine() {
+        tracing::error!(%error, "saving the account keyring");
+    }
+    let unpaired = app.machine_file().and_then(|file| file.keyring().ok()).map(|keyring| keyring.unpaired()).unwrap_or_default();
+    let this = app.this_device_id();
+    let grew = {
+        let mut state = app.state.lock().unwrap();
+        let grew = !unpaired.is_subset(&state.unpaired);
+        state.unpaired.extend(unpaired);
+        let gone = state.unpaired.clone();
+        state.devices.retain(|device| this.as_ref() == Some(&device.id) || !gone.contains(&device.id));
+        grew
+    };
+    if grew {
+        app.save_state();
+        app.emit(app.roster_summary());
+        // A generation another identity device made can leave out fewer Devices than are
+        // unpaired now.
+        app.rotation_due.store(true, Ordering::Relaxed);
+    }
+    if changed {
+        account_key_changed(app, false, Some(blob.seq));
+    }
+}
+
+/// The newest account key changed: this identity device made it (`made_here`), or it reached
+/// this Device in a keyring the relay put at `keyring_seq` in its log. The other Devices take
+/// nothing under an older key from now on.
+///
+/// What waits in the outbox goes up under the new key as it is uploaded (`drain_outbox`). What
+/// this Device uploaded after the keyring's place, before the keyring reached it, goes up again
+/// under the new key, unless a newer version of it is waiting already. The Device puts up again
+/// what it owns or what merges: its `machine` blob, its credentials, and the reviews, tasks, and
+/// skills it keeps. It passes the keyrings on. The identity device that made the key has just
+/// caught up, so it also puts up the roster, attention, and project entries, whose revisions
+/// keep a newer write from being undone. Messages stay as they are: a Device that pairs later
+/// reads those from before as history. The phone's notification extension gets the new push key.
+pub fn account_key_changed(app: &Arc<App>, made_here: bool, keyring_seq: Option<i64>) {
+    let Some(keys) = app.dek() else { return };
+    if let Some(machine_file) = app.machine_file() {
+        release_held(app, &machine_file);
+    }
+    if app.is_identity_device() {
+        crate::identity::publish_keyring(app);
+    }
+    crate::identity::forward_keyrings(app);
+    let recent: Vec<crate::app::RecentUpload> = app.recent_uploads.lock().unwrap().drain(..).collect();
+    if let Some(after) = keyring_seq {
+        for upload in recent.into_iter().filter(|upload| upload.seq > after) {
+            let mut item = upload.item;
+            let waiting = item.slot.as_ref().is_some_and(|slot| app.store.outbox_has_slot(&slot.name).unwrap_or(true));
+            if waiting || crate::crypto::under_newest(&keys, &item.kind, &item.ciphertext) {
+                continue;
+            }
+            let Ok(ciphertext) = crate::crypto::decrypt(&keys, &item.kind, &item.ciphertext).and_then(|plaintext| crate::crypto::encrypt(&keys, &item.kind, &plaintext)) else { continue };
+            item.id = uuid::Uuid::new_v4().to_string();
+            item.ciphertext = ciphertext;
+            app.queue_blob(item);
+        }
+    }
+    {
+        let mut state = app.state.lock().unwrap();
+        state.machine_blob_hash = None;
+        state.credentials_uploaded = false;
+    }
+    app.push_machine_blob_if_changed();
+    app.push_credentials_if_owed();
+    crate::review_queue::enqueue_owned(app);
+    if let Err(error) = crate::tasks::push_all(app) {
+        tracing::warn!(%error, "requeueing durable tasks");
+    }
+    crate::playbooks::push_all(app);
+    if made_here {
+        app.push_roster();
+        if let Err(error) = crate::attention::push_history(app) {
+            tracing::warn!(%error, "requeueing attention");
+        }
+        let chats: Vec<String> = app.state.lock().unwrap().chats.iter().map(|chat| chat.meta.id.clone()).collect();
+        for chat_id in chats {
+            if let Err(error) = crate::project_context::push_history(app, &chat_id, false) {
+                tracing::warn!(%error, %chat_id, "requeueing shared project context");
+            }
+        }
+    }
+    app.save_state();
+    app.emit(Event::AccountKeyChanged);
+}
+
+/// Applies an envelope another Device signed and sealed to this one (`envelope.rs`). One from a
+/// Device this one has no record of yet is held until that Device's `machine` blob lands, and
+/// true is answered; any other that does not open does nothing here and stays on the relay until
+/// its sweep.
+fn apply_envelope(app: &Arc<App>, machine_file: &crate::keys::MachineFile, kind: &str, blob_id: &str, ciphertext: &[u8]) -> bool {
+    let refused = |error: anyhow::Error| {
+        if error.is::<crate::envelope::UnknownSender>() {
+            hold(app, blob_id, kind, ciphertext);
+            return true;
+        }
+        tracing::warn!(%error, blob_id, kind, "envelope refused");
+        false
+    };
+    let delete = || {
+        let app = app.clone();
+        let blob_id = blob_id.to_string();
+        tokio::spawn(async move { delete_remote_blob(&app, &blob_id).await });
+    };
+    match kind {
+        "job" => match crate::envelope::open::<Job>(app, machine_file, kind, ciphertext) {
+            // The Device that asks for a turn is the one its result and its authority checks
+            // answer to.
+            Ok(opened) if opened.body.requested_by != opened.from => {
+                tracing::warn!(job_id = %opened.body.id, "a job signed by another Device than the one it names");
+            }
+            // The signed durable inbox alone admits event work and its budget scope, and a job
+            // stopped before it arrived does not start.
+            Ok(opened) if opened.body.kind == "event" || app.store.job_cancelled(&opened.body.id).unwrap_or(false) => delete(),
+            Ok(opened) => crate::runtime::spawn_local_job(app.clone(), opened.body, Some(blob_id.to_string())),
+            Err(error) => return refused(error),
+        },
+        "job_cancel" => match crate::envelope::open::<JobCancel>(app, machine_file, kind, ciphertext) {
+            Ok(opened) => {
+                let expires_at = crate::config::now_unix() + crate::envelope::max_age("job").unwrap_or_default();
+                if let Err(error) = app.store.cancel_job(&opened.body.job_id, expires_at) {
+                    tracing::error!(%error, "recording a job cancellation");
+                }
+                app.cancel_job(&opened.body.job_id);
+                delete();
+            }
+            Err(error) => return refused(error),
+        },
+        "job_result" => match crate::envelope::open::<JobResult>(app, machine_file, kind, ciphertext) {
+            Ok(opened) => {
+                crate::runtime::deliver_job_result(app, &opened.from, opened.body);
+                delete();
+            }
+            Err(error) => return refused(error),
+        },
+        "request" => match crate::envelope::open::<Request>(app, machine_file, kind, ciphertext) {
+            Ok(opened) => crate::requests::serve(app.clone(), opened.from, opened.body, blob_id.to_string()),
+            Err(error) => return refused(error),
+        },
+        "response" => match crate::envelope::open::<Response>(app, machine_file, kind, ciphertext) {
+            Ok(opened) => crate::requests::deliver(app.clone(), &opened.from, opened.body, blob_id.to_string()),
+            Err(error) => return refused(error),
+        },
+        _ => {}
+    }
+    false
+}
+
+/// Keeps a blob this Device cannot take yet, by its id: an envelope from a Device it has no
+/// record of, or an account record under a key it does not hold yet.
+fn hold(app: &App, id: &str, kind: &str, ciphertext: &[u8]) {
+    if let Err(error) = app.store.hold_blob(id, kind, ciphertext) {
+        tracing::error!(%error, "holding a blob");
+    }
+}
+
+/// After a Device this one had no record of landed, or a newer account key did: the held blobs
+/// that can be taken now are applied, and the rest stay held as they were. Called between pages,
+/// never while a blob is being applied.
+fn release_held_if_due(app: &Arc<App>, machine_file: &crate::keys::MachineFile) {
+    if app.held_due.swap(false, Ordering::Relaxed) {
+        release_held(app, machine_file);
+    }
+}
+
+pub(crate) fn release_held(app: &Arc<App>, machine_file: &crate::keys::MachineFile) {
+    let held = match app.store.held_blobs(crate::envelope::max_age("job").unwrap_or_default()) {
+        Ok(held) => held,
+        Err(error) => return tracing::error!(%error, "reading held blobs"),
+    };
+    for (id, kind, ciphertext) in held {
+        let takeable = if ACCOUNT_KINDS.contains(&kind.as_str()) {
+            app.dek().is_some_and(|keys| crate::crypto::decrypt(&keys, &kind, &ciphertext).is_ok())
+        } else {
+            crate::envelope::sender(machine_file, &ciphertext).is_some_and(|from| app.device(&from).is_some())
+        };
+        if !takeable {
+            continue;
+        }
+        if let Err(error) = app.store.release_blob(&id) {
+            tracing::error!(%error, "releasing a held blob");
+            continue;
+        }
+        let blob = BlobIn { id, kind, recipient_machine_pubkey: None, seq: 0, ciphertext: crate::keys::b64(&ciphertext), created_at: 0 };
+        apply_blob_contents(app, machine_file, &blob);
+    }
+}
+
 fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
+    let _project_context = app.project_context_lock.lock().unwrap();
     let removed: Vec<String>;
     let normalized_descriptions = roster.bots.iter_mut().fold(false, |changed, bot| bot.normalize_description() || changed);
     let this_device = app.this_device_id();
     let kept_checks;
+    let kept_workflows;
+    let kept_permissions;
+    let kept_unpaired;
+    let unpaired_grew;
+    let removed_bots: Vec<String>;
     {
         let mut state = app.state.lock().unwrap();
+        // Unpaired keys stay unpaired, whatever an older roster says; one that left some out
+        // gets them back from this Device.
+        kept_unpaired = !state.unpaired.is_subset(&roster.unpaired);
+        unpaired_grew = !roster.unpaired.is_subset(&state.unpaired);
+        state.unpaired.extend(roster.unpaired);
+        let unpaired = state.unpaired.clone();
+        state.devices.retain(|device| this_device.as_ref() == Some(&device.id) || !unpaired.contains(&device.id));
         let local_updated = state.chats.iter().map(|_| 0.0).fold(0.0, f64::max);
         let _ = local_updated;
         kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
+        kept_workflows = crate::workflows::merge(&mut state.workflows, roster.workflows);
+        kept_permissions = crate::permissions::keep_policies(&state.bots, &mut roster.bots);
+        removed_bots = state.bots.iter().filter(|bot| !roster.bots.iter().any(|kept| kept.id == bot.id)).map(|bot| bot.id.clone()).collect();
         state.bots = roster.bots;
         state.routines = roster.routines;
         state.auto_review = roster.auto_review;
+        state.shared_links = roster.shared_links;
+        state.device_names = roster.device_names;
+        state.sections = roster.sections;
         let incoming_ids: Vec<String> = roster.chats.iter().map(|c| c.id.clone()).collect();
         removed = state.chats.iter().filter(|c| !incoming_ids.contains(&c.meta.id)).map(|c| c.meta.id.clone()).collect();
         state.chats.retain(|c| incoming_ids.contains(&c.meta.id));
@@ -858,13 +1215,23 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     if let Err(error) = app.store.retain_codemode_bots(&bot_ids) {
         tracing::warn!(%error, "forgetting deleted bots' script values");
     }
+    // The skills of bots and groups this roster deleted go too; their blobs go with the
+    // deleted chats' groups on the relay.
+    crate::playbooks::forget_scopes(app, &removed_bots, &removed);
+    #[cfg(feature = "runner")]
+    crate::secrets::forget_bots(app, &removed_bots);
     for chat_id in removed {
         app.cancel_chat(&chat_id);
         app.emit(Event::ChatRemoved { chat_id });
     }
     #[cfg(feature = "runner")]
     app.shell_sessions.close_orphans(app);
-    app.roster_changed(normalized_descriptions || kept_checks);
+    #[cfg(feature = "runner")]
+    app.coding_agents.close_orphans(app);
+    app.roster_changed(normalized_descriptions || kept_checks || kept_permissions || kept_workflows || kept_unpaired);
+    if unpaired_grew {
+        app.rotation_due.store(true, Ordering::Relaxed);
+    }
 }
 
 fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
@@ -878,7 +1245,7 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
                 if !state.chats.iter().any(|c| c.meta.id == message.chat_id) {
                     // Roster not here yet: keep the message under a placeholder until it is.
                     state.chats.push(Chat {
-                        meta: ChatMeta { id: message.chat_id.clone(), kind: "group".into(), title: Some("Chat".into()), bot_ids: vec![], owner_bot_id: None, description: None, is_pinned: false, created_at: message.created_at },
+                        meta: ChatMeta { id: message.chat_id.clone(), kind: "group".into(), title: Some("Chat".into()), bot_ids: vec![], owner_bot_id: None, description: None, is_pinned: false, section_id: None, is_hidden: false, mute: None, created_at: message.created_at, channel: None },
                         unread_count: 0,
                         usage: None,
                         compactions: Vec::new(),
@@ -897,16 +1264,17 @@ fn apply_chat_op(app: &Arc<App>, op: ChatBlob) {
     }
 }
 
-/// Restore path: pull the account DEK the identity device sealed to the content key.
-pub async fn fetch_dek(app: &Arc<App>, url: &str, identity: &crate::keys::Identity, machine: &crate::keys::Machine) -> Result<[u8; 32], String> {
+/// Restore path: pull the account keyring the identity device signed and sealed to the content
+/// key. Answers generation 0 of the account key, and the signed keyring with every generation.
+pub async fn fetch_dek(app: &Arc<App>, url: &str, identity: &crate::keys::Identity, machine: &crate::keys::Machine) -> Result<([u8; 32], crate::keys::SignedKeyring), String> {
     let token = app.relay.authenticate(url, machine).await.map_err(|e| e.to_string())?;
     let (blobs, _) = app.relay.list_blobs(url, &token, 0, "key").await.map_err(|e| e.to_string())?;
     for blob in blobs.iter().rev() {
         let Ok(ciphertext) = unb64(&blob.ciphertext) else { continue };
-        if let Ok(bytes) = crate::crypto::unseal(&identity.content_secret, &ciphertext) {
-            if let Ok(dek) = <[u8; 32]>::try_from(bytes.as_slice()) {
-                return Ok(dek);
-            }
+        let Some((signed, keyring)) = crate::identity::open_restore_keyring(identity, &ciphertext) else { continue };
+        let Some(first) = keyring.keys.iter().find(|key| key.generation == 0) else { continue };
+        if let Ok(dek) = crate::keys::unb64_32(&first.key) {
+            return Ok((dek, signed));
         }
     }
     Err("The relay has no account key for this identity. Create the identity on a Device that is online first.".into())
@@ -931,6 +1299,164 @@ mod tests {
         let home = std::env::temp_dir().join(format!("lorca-sync-{}", uuid::Uuid::new_v4()));
         let app = App::load(Config { home: home.clone(), port: 0 }).unwrap();
         ScratchApp(app, home)
+    }
+
+    /// Once a newer account key is here, a message under an older one is history: read on a
+    /// chat's first page, never taken from the live log.
+    #[tokio::test]
+    async fn an_older_key_message_is_history_only() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let old = app.dek().unwrap();
+        app.state.lock().unwrap().unpaired.insert(crate::keys::Machine::generate().pubkey());
+        crate::identity::rotate_if_due(app);
+        let chat = app.state.lock().unwrap().chats[0].meta.id.clone();
+        let blob = |message: &Message| BlobIn {
+            id: uuid::Uuid::new_v4().to_string(), kind: "chat".into(), recipient_machine_pubkey: None, seq: 1,
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&old, "chat", &ChatBlob::Upsert { message: message.clone() }).unwrap()), created_at: 0,
+        };
+        let (live, page) = (Message::new(&chat, Author::You, Body::text("live")), Message::new(&chat, Author::You, Body::text("on a page")));
+        let machine_file = app.machine_file().unwrap();
+        apply_blob(app, &machine_file, &blob(&live));
+        apply_history_blob(app, &machine_file, &blob(&page));
+        assert!(app.message(&chat, &live.id).is_none());
+        assert!(app.message(&chat, &page.id).is_some());
+    }
+
+    /// A Device unpaired anywhere stays out: neither a roster from before nor its old `machine`
+    /// blob brings it back, here or after a restart, and the roster that left the key out gets
+    /// it back from this Device.
+    #[tokio::test]
+    async fn an_unpaired_device_stays_unpaired() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        crate::identity::create(app, Some("Runner".into())).unwrap();
+        let dek = app.dek().unwrap();
+        let latest = |kind: &str| app.store.outbox().unwrap().into_iter().rev().find(|blob| blob.kind == kind).unwrap();
+        let before: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &latest("roster").ciphertext).unwrap();
+        let mut laptop: MachineBlob = crate::crypto::decrypt_json(&dek, "machine", &latest("machine").ciphertext).unwrap();
+        let keys = crate::keys::Machine::generate();
+        laptop.device.id = keys.pubkey();
+        laptop.device.box_pubkey = keys.box_pubkey();
+        let deliver = |kind: &str, ciphertext: Vec<u8>| {
+            let blob = BlobIn { id: uuid::Uuid::new_v4().to_string(), kind: kind.into(), recipient_machine_pubkey: None, seq: 1, ciphertext: crate::keys::b64(&ciphertext), created_at: 0 };
+            apply_blob(app, &app.machine_file().unwrap(), &blob);
+        };
+        deliver("machine", crate::crypto::encrypt_json(&dek, "machine", &laptop).unwrap());
+        assert!(app.device(&laptop.device.id).is_some());
+
+        let mut unpaired = before.clone();
+        unpaired.unpaired.insert(laptop.device.id.clone());
+        apply_roster(app, unpaired);
+        assert!(app.device(&laptop.device.id).is_none());
+        // This identity device makes a new account key once its pull catches up; even under it,
+        // the laptop's blob does not bring it back.
+        assert!(app.rotation_due.swap(false, Ordering::Relaxed));
+        crate::identity::rotate_if_due(app);
+        let keys = app.dek().unwrap();
+        assert_ne!(keys.newest(), dek.newest());
+        deliver("machine", crate::crypto::encrypt_json(&keys, "machine", &laptop).unwrap());
+        assert!(app.device(&laptop.device.id).is_none(), "its old blob again");
+
+        apply_roster(app, before);
+        assert!(app.state.lock().unwrap().unpaired.contains(&laptop.device.id), "a roster from before");
+        let sent: RosterBlob = crate::crypto::decrypt_json(&keys, "roster", &latest("roster").ciphertext).unwrap();
+        assert!(sent.unpaired.contains(&laptop.device.id));
+
+        let restarted = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(restarted.state.lock().unwrap().unpaired.contains(&laptop.device.id));
+    }
+
+    /// Sections, a hidden chat, a mute, and the chat a computer has in front reach the other
+    /// Devices.
+    #[tokio::test]
+    async fn sidebar_state_and_the_chat_in_front_travel_to_other_devices() {
+        let sender = scratch_app();
+        crate::identity::create(&sender.0, Some("Runner".into())).unwrap();
+        let bot = sender.0.state.lock().unwrap().bots[0].clone();
+        let chat = sender.0.dm_with(&bot.id, None).unwrap();
+        let section = sender.0.create_section(None, "Pipeline", Some(&chat.meta.id)).unwrap();
+        sender.0.update_section(&section.id, |section| section.collapsed = true).unwrap();
+        sender.0.hide_chat(&chat.meta.id, true).unwrap();
+        sender.0.mute_chat(&chat.meta.id, Some(Mute { until: Some(5.0) })).unwrap();
+        sender.0.set_watched_chat(Some(chat.meta.id.clone()));
+        sender.0.push_machine_blob_if_changed();
+        let dek = sender.0.dek().unwrap();
+        let outbox = sender.0.store.outbox().unwrap();
+        let roster: RosterBlob = crate::crypto::decrypt_json(&dek, "roster", &outbox.iter().rev().find(|blob| blob.kind == "roster").unwrap().ciphertext).unwrap();
+        let machine: MachineBlob = crate::crypto::decrypt_json(&dek, "machine", &outbox.iter().rev().find(|blob| blob.kind == "machine").unwrap().ciphertext).unwrap();
+        assert_eq!(machine.watching.as_deref(), Some(chat.meta.id.as_str()));
+
+        let receiver = scratch_app();
+        apply_roster(&receiver.0, roster);
+        let state = receiver.0.state.lock().unwrap().clone();
+        assert_eq!(state.sections, [Section { id: section.id.clone(), name: "Pipeline".into(), collapsed: true }]);
+        let meta = &state.chats.iter().find(|c| c.meta.id == chat.meta.id).unwrap().meta;
+        assert_eq!((meta.section_id.as_deref(), meta.is_hidden, meta.mute.clone()), (Some(section.id.as_str()), true, Some(Mute { until: Some(5.0) })));
+
+        receiver.0.set_device_watching(&machine.device.id, machine.watching.clone());
+        assert!(!receiver.0.is_watched_anywhere(&chat.meta.id), "only while the relay lists the computer online");
+        receiver.0.state.lock().unwrap().device_online.insert(machine.device.id.clone());
+        assert!(receiver.0.is_watched_anywhere(&chat.meta.id));
+        assert!(!receiver.0.is_watching(&chat.meta.id), "another computer's chat is not read here");
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn attention_arrives_in_live_pulls_and_backfills_after_an_older_build_consumed_the_log() {
+        use axum::{extract::Query, routing::get, Json, Router};
+        use std::collections::HashMap;
+        use std::sync::atomic::AtomicUsize;
+        use crate::attention::{Category, Report, Source};
+        let sender = scratch_app();
+        crate::identity::create(&sender.0, Some("Runner".into())).unwrap();
+        let bot = sender.0.state.lock().unwrap().bots[0].clone();
+        let chat = sender.0.dm_with(&bot.id, None).unwrap();
+        for key in ["older-decision", "new-blocker"] {
+            crate::attention::report(&sender.0, Report {
+                key: key.into(), category: Category::Blocker, title: key.into(), summary: "Private coordinator work".into(),
+                next_action: "Review the source".into(), source: Source { chat_id: chat.meta.id.clone(), task_id: None, message_id: None, review_id: None },
+                coordinator_bot_id: Some(bot.id.clone()), urgent: false, quiet: true,
+            }, Some(&bot.id), 0).unwrap();
+        }
+        let queued: Vec<_> = sender.0.store.outbox().unwrap().into_iter().filter(|blob| blob.kind == "attention").collect();
+        let blobs: Vec<serde_json::Value> = queued.iter().zip([50, 101]).map(|(blob, seq)| serde_json::json!({
+            "id":blob.id,"kind":"attention","seq":seq,"recipient_machine_pubkey":null,
+            "ciphertext":crate::keys::b64(&blob.ciphertext),"created_at":1,
+        })).collect();
+        let backfills = Arc::new(AtomicUsize::new(0));
+        let counted = backfills.clone();
+        let server = Router::new().route("/v1/blobs", get(move |Query(query): Query<HashMap<String,String>>| {
+            let blobs = blobs.clone(); let counted = counted.clone();
+            async move {
+                let kinds = query.get("kinds").cloned().unwrap_or_default();
+                let since: i64 = query["since"].parse().unwrap();
+                // The replay asks for the slot families an older build skipped, and nothing else.
+                if since == 0 && kinds.split(',').all(|kind| kind == "attention" || kind == "project_context" || kind == "playbook") { counted.fetch_add(1, Ordering::Relaxed); }
+                let selected: Vec<_> = blobs.into_iter().filter(|blob| kinds.split(',').any(|kind| kind == "attention") && blob["seq"].as_i64().unwrap() > since).collect();
+                Json(serde_json::json!({"blobs":selected,"seq":101}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let receiver = || {
+            let receiver = scratch_app();
+            *receiver.0.machine.lock().unwrap() = sender.0.machine_file();
+            *receiver.0.state.lock().unwrap() = sender.0.state.lock().unwrap().clone();
+            receiver.0.state.lock().unwrap().last_seq = 100;
+            receiver
+        };
+        let live = receiver(); live.0.attention_backfilled.store(true, Ordering::Relaxed);
+        pull_blobs(&live.0, &url, "test", &live.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(crate::attention::view(&live.0).unwrap().items.len(), 1, "normal live polling includes attention");
+        let upgraded = receiver();
+        pull_blobs(&upgraded.0, &url, "test", &upgraded.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(crate::attention::view(&upgraded.0).unwrap(), crate::attention::view(&sender.0).unwrap(), "records an older build skipped are recovered");
+        pull_blobs(&upgraded.0, &url, "test", &upgraded.0.machine_file().unwrap()).await.unwrap();
+        assert_eq!(backfills.load(Ordering::Relaxed), 1, "an empty account does not replay on every cycle");
+        server.abort();
     }
 
     #[tokio::test]
@@ -993,7 +1519,7 @@ mod tests {
         let entry = snapshot["devices"].as_array().unwrap().iter().find(|d| d["id"] == silent.as_str()).unwrap();
         assert_eq!((entry["name"].as_str(), entry["os"].as_str(), entry["is_this_device"].as_bool()), (Some(""), Some(""), Some(false)));
 
-        let device = Device { id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), version: String::new(), update: None, updated_at: now };
+        let device = Device { id: silent.clone(), name: "Laptop".into(), model: String::new(), os: "windows".into(), os_version: String::new(), box_pubkey: String::new(), plugins: Vec::new(), channels: Vec::new(), version: String::new(), update: None, updated_at: now };
         upsert_device(&mut app.state.lock().unwrap().devices, device);
         assert!(unknown().is_empty(), "its blob landed");
         assert!(settle_unknown_machines(app));

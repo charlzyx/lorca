@@ -7,18 +7,27 @@ import * as WebBrowser from "expo-web-browser";
 import { AppState, Platform, type AppStateStatus } from "react-native";
 import * as core from "../../modules/lorca-core";
 import { t } from "../i18n";
+import { exactAnswer, ExactNumber, ExactObject, stringifyExact } from "./exactJson";
+import { reviewEditParams } from "./reviewEdit";
 import { hostFacts } from "./host";
-import { providerConnectMethod, type Attachment, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type Message, type ProviderKind, type ProviderStatus } from "./model";
+import { orderProjectEntries, providerConnectMethod, sectionName, withReviewModel, sameDraft, type Section, type PlaybookContent, type PlaybookRecord, type PlaybookScope, type ProjectContext, type ProjectEntry, type ProjectKind, type ProjectSource, type Attachment, type AutoReview, type Bot, type BrowserProfile, type BudgetLimits, type BudgetState, type CallLimits, type Chat, type ChatMeta, type ChatSearchResults, type ChatUsage, type CustomAPI, type CustomModel, type DurableTask, type Message, type MessageDraft, type ReviewItem, type PluginDetail, type PluginStatus, type ProviderKind, type ProviderStatus, type SavedSecret, routinesAwaitingSetup } from "./model";
 import { coreHome, loadPrefs, pathOf, wipePrefs } from "./prefs";
+import type { SharedLink, TemplateContents, TemplateImportPreview, TemplateSelection } from "./templates";
 import { clearPushes, installPushHandlers, registerForPushes } from "./push";
 import {
+  acceptDurableTask,
+  setBudgets,
+  acceptReview,
   applyRoster,
   botById,
   chatById,
   endActivity,
   markFile,
+  markFileError,
   markRead,
   patchRoutine,
+  patchChannel,
+  channelById,
   removeChat,
   removeMessage,
   removeRoutine,
@@ -68,14 +77,23 @@ class Engine {
     if (this.started) return;
     this.started = true;
     const active = AppState.currentState === "active";
-    useStore.setState({ dictation_lang: loadPrefs().dictation_lang, appActive: active, activeSince: active ? Date.now() : 0 });
+    const prefs = loadPrefs();
+    useStore.setState({ dictation_lang: prefs.dictation_lang, showsHidden: !!prefs.shows_hidden, collapsesOthers: !!prefs.collapses_others, appActive: active, activeSince: active ? Date.now() : 0 });
     core.onEvent((frame) => this.receive(frame));
-    core.start(coreHome(), hostFacts());
-    AppState.addEventListener("change", (status) => this.onAppState(status));
-    // Read after every store update, including the roster's unread count that follows a
-    // message event, a backlog snapshot, and returning to a chat already mounted on screen.
-    useStore.subscribe(() => this.readVisibleChat());
-    await this.bootstrap();
+    // The core starts off the JS thread and emits as soon as it runs: what it says before the
+    // first snapshot waits for it, as during any snapshot.
+    this.bootstraps += 1;
+    try {
+      await core.start(coreHome(), hostFacts());
+      AppState.addEventListener("change", (status) => this.onAppState(status));
+      // Read after every store update, including the roster's unread count that follows a
+      // message event, a backlog snapshot, and returning to a chat already mounted on screen.
+      useStore.subscribe(() => this.readVisibleChat());
+      await this.bootstrap();
+    } finally {
+      this.bootstraps -= 1;
+      if (!this.bootstraps) this.applyHeld();
+    }
     installPushHandlers();
     if (useStore.getState().paired) void registerForPushes();
   }
@@ -115,6 +133,8 @@ class Engine {
     useStore.setState({ appActive: true, activeSince: Date.now() });
     // Back in the foreground: the sync socket may have died with the suspension.
     core.wake();
+    // Perhaps from a routine's setup in the browser: what waits on it subscribes again now.
+    for (const id of routinesAwaitingSetup(useStore.getState().routines)) void core.request("routines.subscribe", { id });
     // The token can change, and permission may have been given in Settings meanwhile.
     if (useStore.getState().paired) void registerForPushes();
   }
@@ -142,8 +162,24 @@ class Engine {
 
   private apply(event: string, data: any) {
     switch (event) {
+      case "attention.changed":
+        useStore.setState({ attention: data });
+        break;
       case "snapshot":
         replaceSnapshot(data as Snapshot);
+        break;
+      case "tasks.changed":
+        acceptDurableTask((data as { task: DurableTask }).task);
+        break;
+      case "budgets.changed":
+        setBudgets((data as { budgets: BudgetState[] }).budgets);
+        break;
+      case "reviews.changed":
+        acceptReview((data as { item: ReviewItem }).item);
+        break;
+      case "projects.changed":
+        // Only a group whose details listed its context follows it.
+        if (useStore.getState().projects[data.chat_id]) void this.loadProject(data.chat_id);
         break;
       case "roster.changed": {
         const { removed } = applyRoster(data);
@@ -259,18 +295,326 @@ class Engine {
     return core.request<ChatSearchResults>("chats.search", { query: value, limit: 24 });
   }
 
-  /// The attachment's bytes, from this phone's copy or the relay, as a file URI in the store.
+  /// The attachment's bytes, from this phone's copy or the relay, as a file URI in the store. A
+  /// fetch that failed is not asked again until `retryFile`.
   async fetchFile(attachment: Attachment): Promise<void> {
-    if (useStore.getState().files[attachment.id] || this.fetchingFiles.has(attachment.id)) return;
+    const { files, fileErrors } = useStore.getState();
+    if (files[attachment.id] || fileErrors[attachment.id] || this.fetchingFiles.has(attachment.id)) return;
     this.fetchingFiles.add(attachment.id);
     try {
       const { path } = await core.request<{ path: string }>("files.path", { attachment });
       markFile(attachment.id, `file://${path}`);
     } catch (error) {
-      console.warn("fetching attachment", error instanceof Error ? error.message : error);
+      markFileError(attachment.id, error instanceof Error ? error.message : String(error));
     } finally {
       this.fetchingFiles.delete(attachment.id);
     }
+  }
+
+  retryFile(attachment: Attachment) {
+    markFileError(attachment.id, null);
+    void this.fetchFile(attachment);
+  }
+
+  /// The path of the attachment as a file named for what it is, for Quick Look or another app:
+  /// the bytes under their attachment id carry no extension, so the core keeps a private named
+  /// copy.
+  async namedFile(attachment: Attachment): Promise<string> {
+    const { path } = await core.request<{ path: string }>("files.path", { attachment, named: true });
+    return path;
+  }
+
+  /// A durable task method (`tasks.create`, `tasks.update`, `tasks.run`, `tasks.get`); the core
+  /// sends a write to the task's authority Runner. The task it answers with is kept unless a
+  /// newer revision arrived first.
+  async taskRequest(method: string, params: Record<string, unknown>): Promise<DurableTask> {
+    const task = await core.request<DurableTask>(method, params);
+    acceptDurableTask(task);
+    return task;
+  }
+
+  /// A review item as its Runner keeps it, with its numbers spelled as they were: the review
+  /// screen shows and edits a call's arguments from it, since `JSON.parse` rounds an id past 2^53.
+  async exactReview(id: string): Promise<ExactObject> {
+    const item = exactAnswer(await core.requestText("reviews.get", JSON.stringify({ id })));
+    if (!(item instanceof ExactObject)) throw new Error("No such review");
+    return item;
+  }
+
+  /// Approves the version the user saw. `edited`, the field's text when the user changed it, is
+  /// saved first as the next version, and that version is approved: what runs is what the field
+  /// showed. A command's other arguments and a call's server and tool stay as they were.
+  async approveReview(item: ReviewItem, edited?: string): Promise<ReviewItem> {
+    let shown = item;
+    if (edited !== undefined) {
+      // The edit names the version the user saw; one changed elsewhere is refused.
+      const exact = (await this.exactReview(item.id)).with("version", new ExactNumber(String(item.version)));
+      const params = reviewEditParams(exact, edited, t("The arguments need to be a JSON object."));
+      shown = JSON.parse(stringifyExact(exactAnswer(await core.requestText("reviews.edit", params)))) as ReviewItem;
+      acceptReview(shown);
+    }
+    return this.reviewRequest("reviews.approve", { id: shown.id, expected_version: shown.version });
+  }
+
+  /// Sends a draft card's message as `fields` shows it: an edit first, as the review item's next
+  /// version, then that version approved, which the bot's Runner sends. `always` then turns
+  /// drafts off for the bot, so its next messages go out directly. Rejects with why it was not
+  /// sent, with the card back as it was.
+  async sendDraft(chatId: string, messageId: string, fields: MessageDraft, always: boolean) {
+    const message = chatById(chatId)?.messages.find((m) => m.id === messageId);
+    if (!message || message.body.kind !== "draft") return;
+    const card = message.body;
+    const sending: Message = { ...message, body: { ...card, state: "approved", draft: fields } };
+    this.replaceMessage(chatId, message, sending);
+    try {
+      let version = card.version;
+      if (!sameDraft(fields, card.draft)) {
+        const edited = await this.reviewRequest("reviews.edit", { id: card.review_id, expected_version: version, message: fields });
+        version = edited.version;
+      }
+      await this.reviewRequest("reviews.approve", { id: card.review_id, expected_version: version });
+    } catch (error) {
+      this.replaceMessage(chatId, sending, message);
+      throw error;
+    }
+    if (always && message.author.kind === "bot") {
+      const botId = message.author.bot_id;
+      useStore.setState((s) => ({ bots: s.bots.map((bot) => (bot.id === botId ? { ...bot, permissions: { ...bot.permissions, drafts: false } } : bot)) }));
+      await core.request("bots.update", { id: botId, drafts: false });
+    }
+  }
+
+  /// Discards a draft card's message: nothing is sent.
+  async discardDraft(chatId: string, messageId: string) {
+    const message = chatById(chatId)?.messages.find((m) => m.id === messageId);
+    if (!message || message.body.kind !== "draft") return;
+    const discarded: Message = { ...message, body: { ...message.body, state: "rejected" } };
+    this.replaceMessage(chatId, message, discarded);
+    try {
+      await this.reviewRequest("reviews.reject", { id: message.body.review_id, expected_version: message.body.version });
+    } catch (error) {
+      this.replaceMessage(chatId, discarded, message);
+      throw error;
+    }
+  }
+
+  /// Puts `to` where `from` is in the chat, unless the core changed the message meanwhile.
+  private replaceMessage(chatId: string, from: Message, to: Message) {
+    useStore.setState((s) => ({
+      chats: s.chats.map((c) => (c.id === chatId ? { ...c, messages: c.messages.map((m) => (m === from ? to : m)) } : c)),
+    }));
+  }
+
+  rejectReview(item: ReviewItem): Promise<ReviewItem> {
+    return this.reviewRequest("reviews.reject", { id: item.id, expected_version: item.version });
+  }
+
+  /// A decision goes to the item's Runner through the core; the item it answers with is kept
+  /// unless a newer revision arrived first.
+  private async reviewRequest(method: string, params: { id: string; expected_version: number; message?: MessageDraft }): Promise<ReviewItem> {
+    const item = await core.request<ReviewItem>(method, params);
+    acceptReview(item);
+    return item;
+  }
+
+  /// The skills this phone fetched or drafted, by id, so a screen opens on one at once.
+  readonly skills = new Map<string, PlaybookRecord>();
+
+  /// A skill's body and history.
+  async playbook(scope: PlaybookScope, id: string): Promise<PlaybookRecord> {
+    const record = await core.request<PlaybookRecord>("playbooks.get", { scope, id });
+    this.skills.set(record.id, record);
+    return record;
+  }
+
+  /// Saves a new skill, or a new revision over the one `over` holds; the core refuses it when the
+  /// skill changed since `over` was read.
+  async savePlaybook(scope: PlaybookScope, content: PlaybookContent, over?: PlaybookRecord): Promise<PlaybookRecord> {
+    const record = await core.request<PlaybookRecord>("playbooks.save", {
+      scope,
+      content,
+      expected_revision: over?.revision ?? 0,
+      expected_hash: over?.hash ?? "",
+      ...(over ? { id: over.id, provenance: { kind: "edit" } } : {}),
+    });
+    this.skills.set(record.id, record);
+    return record;
+  }
+
+  async removePlaybook(record: PlaybookRecord): Promise<void> {
+    await core.request("playbooks.remove", { scope: record.scope, id: record.id, expected_revision: record.revision, expected_hash: record.hash });
+    this.skills.delete(record.id);
+  }
+
+  /// Has the bot's Runner write a draft from the picked messages, with the bot's provider. The
+  /// draft is used once it is saved.
+  async draftPlaybook(scope: PlaybookScope, botId: string, chatId: string, kind: "workflow" | "corrections", messageIds: string[]): Promise<PlaybookRecord> {
+    const record = await core.request<PlaybookRecord>("playbooks.draft", { scope, bot_id: botId, chat_id: chatId, kind, message_ids: messageIds });
+    this.skills.set(record.id, record);
+    return record;
+  }
+
+  /// The skill as a portable file's JSON: its content and bundled files, nothing about the account.
+  async exportPlaybook(scope: PlaybookScope, id: string): Promise<string> {
+    return JSON.stringify(await core.request("playbooks.export", { scope, id }), null, 2);
+  }
+
+  // MARK: - Templates
+
+  /// What the bot has that a template can carry, redacted as the template holds it. A bot on a
+  /// Runner asks it for its memories.
+  async templateContents(botId: string): Promise<TemplateContents> {
+    return core.request<TemplateContents>("templates.contents", { bot_id: botId });
+  }
+
+  /// Builds the template first, so the core's objections come before anything leaves, and
+  /// answers what the share or the file must still hold.
+  private async templateDigest(botId: string, selection: TemplateSelection): Promise<string> {
+    const { digest } = await core.request<{ digest: string }>("templates.export.preview", { bot_id: botId, selection });
+    return digest;
+  }
+
+  /// Puts the template on the relay behind a new link, or behind `linkId`'s, which keeps its
+  /// address. The roster brings the link to every Device; this phone lists it at once.
+  async shareTemplate(botId: string, selection: TemplateSelection, linkId?: string): Promise<SharedLink> {
+    const digest = await this.templateDigest(botId, selection);
+    const { link } = await core.request<{ link: SharedLink }>("templates.share", { bot_id: botId, selection, expected_digest: digest, reviewed: true, ...(linkId ? { link_id: linkId } : {}) });
+    useStore.setState((s) => ({ shared_links: [...s.shared_links.filter((each) => each.id !== link.id), link] }));
+    return link;
+  }
+
+  /// Writes the template as a file at `path`, over what is there.
+  async saveTemplateFile(botId: string, selection: TemplateSelection, path: string): Promise<void> {
+    const digest = await this.templateDigest(botId, selection);
+    await core.request("templates.export", { bot_id: botId, selection, path, expected_digest: digest, reviewed: true, overwrite: true });
+  }
+
+  /// Takes the link down: whoever opens it sees that it no longer works.
+  async revokeLink(id: string): Promise<void> {
+    await core.request("templates.unshare", { link_id: id });
+    useStore.setState((s) => ({ shared_links: s.shared_links.filter((link) => link.id !== id) }));
+  }
+
+  /// What a link or a file sets up on the Runner picked, with `mappings` (service → connection)
+  /// for the plugins the user chose.
+  async previewTemplateImport(params: { link?: string; path?: string; runner_id?: string; mappings: Record<string, string> }): Promise<TemplateImportPreview> {
+    return core.request<TemplateImportPreview>("templates.import.preview", params);
+  }
+
+  /// Makes the bot the user reviewed on its Runner and answers its chat, which this phone shows
+  /// ahead of the roster that brings it from the Runner.
+  async importTemplate(params: { link?: string; path?: string; runner_id: string; name: string; provider: string; mappings: Record<string, string>; expected_digest: string }): Promise<string> {
+    const { bot, chat_id } = await core.request<{ bot: Bot; chat_id: string }>("templates.import", { ...params, reviewed: true });
+    useStore.setState((s) => ({
+      bots: s.bots.some((each) => each.id === bot.id) ? s.bots : [...s.bots, bot],
+      chats: s.chats.some((each) => each.id === chat_id)
+        ? s.chats
+        : [{ id: chat_id, kind: "dm", bot_ids: [bot.id], is_pinned: false, created_at: bot.created_at, messages: [], unread_count: 0 }, ...s.chats],
+    }));
+    return chat_id;
+  }
+
+  /// Every output version this phone has synced for the chat, for its details.
+  async listOutputs(chatId: string): Promise<void> {
+    try {
+      const { outputs } = await core.request<{ outputs: Message[] }>("outputs.list", { chat_id: chatId });
+      useStore.setState((s) => ({ outputs: { ...s.outputs, [chatId]: outputs } }));
+    } catch (error) {
+      console.warn("listing outputs", error instanceof Error ? error.message : error);
+    }
+  }
+
+  /// Every page of `projects.get` for the group: its current entries, or with `history` every
+  /// revision.
+  private async projectPages(chatId: string, history: boolean): Promise<ProjectContext> {
+    const entries: ProjectEntry[] = [];
+    let conflicts: string[][] = [];
+    let after: string | undefined;
+    for (;;) {
+      const page = await core.request<{ entries: ProjectEntry[]; has_more: boolean; conflicts: Record<string, string[]> }>("projects.get", { chat_id: chatId, history, limit: 100, ...(after ? { after } : {}) });
+      entries.push(...page.entries);
+      conflicts = Object.values(page.conflicts);
+      if (!page.has_more || page.entries.length === 0) return { entries, conflicts };
+      after = page.entries[page.entries.length - 1].id;
+    }
+  }
+
+  /// The group's project context, for its details. A change while a listing is on its way lists it
+  /// again once that one lands.
+  private projectLoads = new Map<string, boolean>();
+  async loadProject(chatId: string): Promise<void> {
+    if (this.projectLoads.has(chatId)) {
+      this.projectLoads.set(chatId, true);
+      return;
+    }
+    this.projectLoads.set(chatId, false);
+    try {
+      const { entries, conflicts } = await this.projectPages(chatId, false);
+      useStore.setState((s) => ({ projects: { ...s.projects, [chatId]: { entries: orderProjectEntries(entries), conflicts } } }));
+    } catch (error) {
+      console.warn("listing project context", error instanceof Error ? error.message : error);
+    } finally {
+      const again = this.projectLoads.get(chatId);
+      this.projectLoads.delete(chatId);
+      if (again) void this.loadProject(chatId);
+    }
+  }
+
+  /// Adds an entry, or saves a new version of `replacing` and of any other versions of it. What
+  /// the user writes is agreed; a link the user typed becomes its source.
+  async saveProjectEntry(chatId: string, input: { kind: ProjectKind; title: string; text: string; link?: string; replacing?: ProjectEntry; alsoReplacing?: string[] }): Promise<void> {
+    const { replacing, link } = input;
+    let source: ProjectSource | undefined;
+    if (replacing && (replacing.source.url ?? undefined) === link) source = replacing.source;
+    else if (link) {
+      let label = link;
+      try {
+        label = new URL(link).hostname || link;
+      } catch {}
+      source = { kind: "url", label, url: link };
+    }
+    await core.request("projects.save", {
+      chat_id: chatId,
+      kind: input.kind,
+      title: input.title,
+      text: input.text,
+      verification: "agreed",
+      ...(source ? { source } : {}),
+      ...(replacing ? { supersedes: [replacing.id, ...(input.alsoReplacing ?? [])] } : {}),
+    });
+  }
+
+  /// Takes the entry out of the group's context; its history stays.
+  async removeProjectEntry(chatId: string, entry: ProjectEntry): Promise<void> {
+    await core.request("projects.save", { chat_id: chatId, kind: entry.kind, title: entry.title, source: entry.source, supersedes: [entry.id], removed: true });
+  }
+
+  /// What became of an entry another Device changed while it was open here: the current version
+  /// it led to, or undefined when it was removed.
+  async currentProjectEntry(chatId: string, id: string): Promise<ProjectEntry | undefined> {
+    const { entries } = await this.projectPages(chatId, true);
+    const frontier = [id];
+    const seen = new Set([id]);
+    while (frontier.length) {
+      const older = frontier.pop()!;
+      for (const entry of entries) {
+        if (!entry.supersedes?.includes(older) || seen.has(entry.id)) continue;
+        seen.add(entry.id);
+        if (entry.current && !entry.removed) return entry;
+        frontier.push(entry.id);
+      }
+    }
+    return undefined;
+  }
+
+  /// Reads the entry's link again; the answer is its new version, read or not.
+  async checkProjectLink(chatId: string, entryId: string): Promise<ProjectEntry> {
+    return core.request<ProjectEntry>("projects.refresh", { chat_id: chatId, entry_id: entryId });
+  }
+
+  /// Stores and encrypts a picked file for the group.
+  async addProjectFile(chatId: string, file: { uri: string; name: string; mime: string }): Promise<void> {
+    await core.request("projects.asset", { chat_id: chatId, file: { path: pathOf(file.uri), name: file.name, mime: file.mime } });
   }
 
   async createBot(input: { name: string; description: string; symbol_name: string; accent: string; runner_id: string; provider: string; model?: string; thinking?: string }): Promise<{ bot: Bot; chatId: string }> {
@@ -331,9 +675,79 @@ class Engine {
     void core.request("chats.set_description", { chat_id: chatId, description: trimmed });
   }
 
+  /// A pinned chat is back in the list.
   pinChat(chatId: string, pinned: boolean) {
-    this.patchChat(chatId, (meta) => ({ ...meta, is_pinned: pinned }));
+    this.patchChat(chatId, (meta) => ({ ...meta, is_pinned: pinned, is_hidden: pinned ? false : meta.is_hidden }));
     void core.request("chats.pin", { chat_id: chatId, pinned });
+  }
+
+  /// Takes a chat out of the list, or puts it back. A hidden chat is not pinned.
+  hideChat(chatId: string, hidden: boolean) {
+    this.patchChat(chatId, (meta) => ({ ...meta, is_hidden: hidden, is_pinned: hidden ? false : meta.is_pinned }));
+    void core.request("chats.hide", { chat_id: chatId, hidden });
+  }
+
+  /// Turns a chat's alerts off on every Device for `seconds`, or until unmuted when it is 0.
+  muteChat(chatId: string, seconds: number) {
+    const until = seconds > 0 ? Date.now() / 1000 + seconds : null;
+    this.patchChat(chatId, (meta) => ({ ...meta, mute: { until } }));
+    void core.request("chats.mute", { chat_id: chatId, muted: true, ...(until ? { until } : {}) });
+  }
+
+  unmuteChat(chatId: string) {
+    this.patchChat(chatId, (meta) => ({ ...meta, mute: null }));
+    void core.request("chats.mute", { chat_id: chatId, muted: false });
+  }
+
+  /// Lists a chat under a section, or with the chats in no section, where the list shows it:
+  /// off the pinned rows and out of Hidden.
+  moveChat(chatId: string, sectionId: string | null) {
+    this.patchChat(chatId, (meta) => ({ ...meta, section_id: sectionId, is_pinned: false, is_hidden: false }));
+    void core.request("chats.set_section", { chat_id: chatId, section_id: sectionId });
+  }
+
+  // MARK: - Sections
+
+  /// Adds a section after the others, with `chatId` moved into it.
+  createSection(name: string, chatId?: string) {
+    const trimmed = sectionName(name);
+    if (!trimmed) return;
+    const section: Section = { id: `section-${Math.random().toString(16).slice(2, 10)}`, name: trimmed };
+    useStore.setState((s) => ({ sections: [...s.sections, section] }));
+    if (chatId) this.patchChat(chatId, (meta) => ({ ...meta, section_id: section.id, is_pinned: false, is_hidden: false }));
+    void core.request("sections.create", { id: section.id, name: trimmed, ...(chatId ? { chat_id: chatId } : {}) });
+  }
+
+  renameSection(id: string, name: string) {
+    const trimmed = sectionName(name);
+    if (!trimmed) return;
+    useStore.setState((s) => ({ sections: s.sections.map((section) => (section.id === id ? { ...section, name: trimmed } : section)) }));
+    void core.request("sections.rename", { id, name: trimmed });
+  }
+
+  /// Deletes a section; its chats go back to the chats in no section.
+  deleteSection(id: string) {
+    useStore.setState((s) => ({
+      sections: s.sections.filter((section) => section.id !== id),
+      chats: s.chats.map((chat) => (chat.section_id === id ? { ...chat, section_id: null } : chat)),
+    }));
+    void core.request("sections.delete", { id });
+  }
+
+  /// Puts a section at `place` among the sections.
+  moveSection(id: string, place: number) {
+    const sections = [...useStore.getState().sections];
+    const from = sections.findIndex((section) => section.id === id);
+    const to = Math.max(0, Math.min(sections.length - 1, place));
+    if (from < 0 || from === to) return;
+    sections.splice(to, 0, ...sections.splice(from, 1));
+    useStore.setState({ sections });
+    void core.request("sections.reorder", { ids: sections.map((section) => section.id) });
+  }
+
+  setSectionCollapsed(id: string, collapsed: boolean) {
+    useStore.setState((s) => ({ sections: s.sections.map((section) => (section.id === id ? { ...section, collapsed } : section)) }));
+    void core.request("sections.collapse", { id, collapsed });
   }
 
   deleteChat(chatId: string) {
@@ -360,6 +774,27 @@ class Engine {
   setAutoReview(value: AutoReview) {
     useStore.setState({ auto_review: value });
     void core.request("auto_review.set", { is_enabled: value.is_enabled, rules: value.rules });
+  }
+
+  /// Picks the provider whose review model Auto-review runs, or none for the bot's own. Only
+  /// `provider` goes, so the switch, the rules, and the review models stay.
+  setReviewProvider(provider: string | undefined) {
+    const held = useStore.getState().auto_review.provider;
+    useStore.setState((s) => ({ auto_review: { ...s.auto_review, provider } }));
+    core.request("auto_review.set", { provider: provider ?? null }).catch(() => {
+      // The provider disconnected meanwhile: the core kept what it had.
+      useStore.setState((s) => ({ auto_review: { ...s.auto_review, provider: held } }));
+    });
+  }
+
+  /// Picks the model Auto-review runs on a provider, or puts its default back (`undefined`). The
+  /// patch names this provider alone, so the others' review models stay.
+  setReviewModel(kind: string, model: string | undefined) {
+    const held = useStore.getState().auto_review.models?.[kind];
+    useStore.setState((s) => ({ auto_review: withReviewModel(s.auto_review, kind, model) }));
+    core.request("auto_review.set", { models: { [kind]: model ?? null } }).catch(() => {
+      useStore.setState((s) => ({ auto_review: withReviewModel(s.auto_review, kind, held) }));
+    });
   }
 
   // MARK: - Providers
@@ -479,11 +914,108 @@ class Engine {
     }
   }
 
+  /// A plugin on its Runner, with how each of its servers signs in; sealed to another Runner.
+  /// The bot's browser profiles, oldest first, from its Runner through the relay.
+  async browserProfiles(botId: string): Promise<BrowserProfile[]> {
+    const { sessions } = await core.request<{ sessions: BrowserProfile[] }>("browser.sessions", { bot_id: botId });
+    return sessions;
+  }
+
+  /// `browser.create` (`name`), `browser.takeover`, `browser.resume` (`revision`), `browser.stop`,
+  /// `browser.delete`, `browser.screenshot` (`chat_id`), or `browser.record` for one of the bot's
+  /// profiles (`session_id`), on its Runner. Windows open only there, so the phone never sends
+  /// `browser.open`, and records only in a browser already open on the Runner's screen.
+  async browserAction(method: string, botId: string, params: Record<string, string | number>): Promise<void> {
+    await core.request(method, { ...params, bot_id: botId });
+  }
+
+  /// Stops the profile's recording and sends it to the bot in the chat with the user's words.
+  /// False when the user did nothing in the browser, so nothing went.
+  async stopBrowserRecording(botId: string, sessionId: string, chatId: string, text: string): Promise<boolean> {
+    const { message_id } = await core.request<{ message_id?: string | null }>("browser.stop_recording", { bot_id: botId, session_id: sessionId, chat_id: chatId, text });
+    return !!message_id;
+  }
+
+  /// Sets limits on the bot's Runner; what the work used stays. `kind` is `chat` for each new turn
+  /// in the DM, `job` for one turn, `task`, or `routine`.
+  async setBudget(kind: BudgetState["kind"], id: string, limits: BudgetLimits, bot: Bot, chatId: string) {
+    await core.request("budgets.set", { kind, id, limits, bot_id: bot.id, chat_id: chatId, runner_id: bot.runner_id });
+  }
+
+  /// Resumes a stopped turn, task, or routine where it left off; `fresh` grants the limits again
+  /// in full. The request id makes a repeated delivery a no-op on the Runner.
+  async resumeBudget(kind: BudgetState["kind"], id: string, runnerId: string, fresh: boolean) {
+    await core.request("budgets.resume", { kind, id, runner_id: runnerId, renew: fresh, run: true, request_id: `budget-${Date.now()}-${Math.random().toString(36).slice(2)}` });
+  }
+
+  /// A plugin account's call limit on its Runner.
+  callLimits(runnerId: string, pluginId: string): Promise<CallLimits> {
+    return core.request<CallLimits>("connector_limits.get", { runner_id: runnerId, plugin_id: pluginId, scope: "account" });
+  }
+
+  async setCallLimits(runnerId: string, pluginId: string, limits: CallLimits["limits"]): Promise<CallLimits> {
+    return core.request<CallLimits>("connector_limits.set", { runner_id: runnerId, plugin_id: pluginId, scope: "account", limits });
+  }
+
+  pluginDetail(runnerId: string, pluginId: string): Promise<PluginDetail> {
+    return core.request<PluginDetail>("plugins.detail", { runner_id: runnerId, plugin_id: pluginId });
+  }
+
+  /// Signs a plugin in on its Runner. The page opens here (`plugin.auth`) and the Runner keeps the
+  /// tokens; resolves once the sign-in has finished or failed.
+  async connectPlugin(runnerId: string, pluginId: string) {
+    await core.request("plugins.connect", { runner_id: runnerId, plugin_id: pluginId });
+  }
+
+  /// Forgets a plugin's sign-in on its Runner; its next use asks again.
+  async signOutPlugin(runnerId: string, pluginId: string) {
+    await core.request("plugins.sign_out", { runner_id: runnerId, plugin_id: pluginId });
+  }
+
+  /// Renames a named account (Gmail · Work). Its id, sign-in, and tools stay; the answer stands in
+  /// the Runner's list until its next machine blob lists the new name.
+  async renamePluginAccount(runnerId: string, pluginId: string, accountName: string) {
+    const { status } = await core.request<{ status: PluginStatus }>("plugins.rename", { runner_id: runnerId, plugin_id: pluginId, account_name: accountName });
+    useStore.setState((s) => ({
+      devices: s.devices.map((d) => (d.id === runnerId ? { ...d, plugins: (d.plugins ?? []).map((plugin) => (plugin.id === status.id ? status : plugin)) } : d)),
+    }));
+    return status;
+  }
+
   // MARK: - Commands
 
   /// Types the user's answer into a command running in its terminal, then Return. It goes
   /// through the core, sealed to the bot's Runner, and nothing keeps it. Rejects with why it
   /// could not, such as the Runner being offline.
+  /// Answers a secret request with a value for each of its fields, by name. The core seals them to
+  /// the bot's Runner; the card reads Saved once the Runner has them. Rejects with why they did
+  /// not go, such as the Runner being offline.
+  async answerSecret(chatId: string, messageId: string, values: Record<string, string>) {
+    await core.request("chats.permission", { chat_id: chatId, message_id: messageId, decision: "allow", values });
+    useStore.setState((s) => ({
+      chats: s.chats.map((c) =>
+        c.id !== chatId
+          ? c
+          : { ...c, messages: c.messages.map((m) => (m.id === messageId && m.body.kind === "permission" && m.body.decision === "pending" ? { ...m, body: { ...m.body, decision: "allowed" as const } } : m)) },
+      ),
+    }));
+  }
+
+  /// The secrets a Runner keeps for its bots, asked of it through the relay.
+  async secrets(runnerId: string): Promise<SavedSecret[]> {
+    const { secrets } = await core.request<{ secrets: SavedSecret[] }>("secrets.list", { runner_id: runnerId });
+    return secrets;
+  }
+
+  /// A new value for one of a Runner's secrets; it goes sealed to the Runner.
+  async replaceSecret(runnerId: string, id: string, value: string) {
+    await core.request("secrets.set", { runner_id: runnerId, id, value });
+  }
+
+  async deleteSecret(runnerId: string, id: string) {
+    await core.request("secrets.delete", { runner_id: runnerId, id });
+  }
+
   async answerCommand(chatId: string, messageId: string, text: string) {
     await core.request("bash.stdin", { chat_id: chatId, message_id: messageId, text });
   }
@@ -499,11 +1031,35 @@ class Engine {
     await core.request("bash.background", { chat_id: chatId, message_id: messageId });
   }
 
+  // MARK: - Coding agents
+
+  /// Stops a coding agent on its bot's Runner; its card says so once the Runner has.
+  async stopAgent(chatId: string, messageId: string) {
+    await core.request("coding.stop", { chat_id: chatId, message_id: messageId });
+  }
+
+  /// Answers what a coding agent's pane asks with one of the choices it offers.
+  async answerAgentChoice(chatId: string, messageId: string, choice: number) {
+    await core.request("coding.answer", { chat_id: chatId, message_id: messageId, choice });
+  }
+
+  /// Types an answer into what a coding agent's pane asks, then Return.
+  async answerAgentText(chatId: string, messageId: string, text: string) {
+    await core.request("coding.answer", { chat_id: chatId, message_id: messageId, text });
+  }
+
+  /// A coding agent's transcript, from its Runner: what it was sent, said, and did, or what its
+  /// pane shows.
+  async agentTranscript(chatId: string, messageId: string): Promise<string> {
+    const answer = await core.request<{ text: string }>("coding.transcript", { chat_id: chatId, message_id: messageId });
+    return answer.text;
+  }
+
   // MARK: - Routines
 
   /// Pauses or resumes a routine; a resumed schedule counts from now.
   setRoutineEnabled(id: string, enabled: boolean) {
-    patchRoutine(id, (r) => ({ ...r, is_enabled: enabled, paused_reason: undefined, next_run_at: enabled ? r.next_run_at : null }));
+    patchRoutine(id, (r) => ({ ...r, is_enabled: enabled, paused_reason: undefined, state: enabled ? "on" : "paused", next_run_at: enabled ? r.next_run_at : null }));
     void core.request("routines.update", { id, enabled });
   }
 
@@ -513,9 +1069,75 @@ class Engine {
     void core.request("routines.run", { id });
   }
 
+  /// The page that sets a receiver up for this account and what a routine listens to: where the
+  /// Lorca GitHub App installs, or where the user authorizes it when it is installed already.
+  async receiverSetupURL(receiver: string, subject?: string): Promise<string> {
+    const { url } = await core.request<{ url: string }>("receivers.setup", { receiver, subject });
+    return url;
+  }
+
+  /// A new key for a routine's webhook, made on its bot's Runner; the old one stops working.
+  async regenerateRoutineKey(id: string) {
+    await core.request("routines.regenerate_key", { id });
+  }
+
   deleteRoutine(id: string) {
     removeRoutine(id);
     void core.request("routines.delete", { id });
+  }
+
+  // MARK: - Channels
+
+  /// Pauses or resumes a channel on its Runner. Paused, it takes no new messages.
+  setChannelPaused(id: string, paused: boolean) {
+    const found = channelById(id);
+    if (!found) return;
+    patchChannel(id, (c) => ({ ...c, state: paused ? "paused" : "listening" }));
+    void core.request(paused ? "events.pause" : "events.resume", { runner_id: found.runnerId, id });
+  }
+
+  /// Tries the message that holds a channel again, or skips it, which lets the next ones run.
+  settleHeldMessage(id: string, retry: boolean) {
+    const found = channelById(id);
+    const held = found?.channel.held_delivery;
+    if (!found || !held) return;
+    patchChannel(id, (c) => ({ ...c, state: "listening", held_delivery: null, detail: "" }));
+    void core.request(retry ? "events.retry" : "events.discard", { runner_id: found.runnerId, id: held });
+  }
+
+  /// Answers a chat asking a channel's bot: allowed, the channel listens there from now on;
+  /// ignored, the chat doesn't ask again.
+  answerChatRequest(id: string, chatId: string, allow: boolean) {
+    const found = channelById(id);
+    if (!found) return;
+    const request = found.channel.requests?.find((r) => r.id === chatId);
+    patchChannel(id, (c) => ({
+      ...c,
+      requests: c.requests?.filter((r) => r.id !== chatId),
+      chats: allow && request ? [...(c.chats ?? []), { id: request.id, title: request.title }] : c.chats,
+    }));
+    void core.request(allow ? "events.allow_chat" : "events.ignore_chat", { runner_id: found.runnerId, id, chat_id: chatId });
+  }
+
+  /// Lets a chat in by its id, typed by the user: the channel listens there from now on. Rejects
+  /// with the Runner's words when the id isn't one of the service's.
+  async addChat(id: string, chatId: string) {
+    const found = channelById(id);
+    if (!found) return;
+    await core.request("events.allow_chat", { runner_id: found.runnerId, id, chat_id: chatId });
+    patchChannel(id, (c) => ({
+      ...c,
+      requests: c.requests?.filter((r) => r.id !== chatId),
+      chats: c.chats?.some((chat) => chat.id === chatId) ? c.chats : [...(c.chats ?? []), { id: chatId }],
+    }));
+  }
+
+  /// Removes a channel from its Runner; its conversations stay.
+  removeChannel(id: string) {
+    const found = channelById(id);
+    if (!found) return;
+    patchChannel(id, () => null);
+    void core.request("events.delete", { runner_id: found.runnerId, id });
   }
 
   /// The change shows at once; the core's roster event confirms it.
@@ -524,10 +1146,6 @@ class Engine {
   }
 
   // MARK: - This phone
-
-  async renameDevice(name: string) {
-    await core.request("device.rename", { name });
-  }
 
   /// Joins the identity the pairing string names. The core posts the request (`pair.posted`
   /// marks that) and waits for the other Device to accept; `signal` aborts the wait in the core too,
@@ -551,6 +1169,12 @@ class Engine {
     void registerForPushes();
   }
 
+  /// Names a Device, this phone or another, on every paired Device; blank takes back the name its
+  /// machine goes by.
+  async setDeviceName(id: string, name: string) {
+    await core.request("device.set_name", { id, name });
+  }
+
   /// Unpairs another Device. The core has the relay drop its key; the Device wipes its copy
   /// of the account the next time it connects. Rejects when the relay could not be told.
   async unpairDevice(id: string) {
@@ -568,6 +1192,11 @@ class Engine {
     useStore.setState((s) => ({ devices: s.devices.map((d) => (d.id === id && d.update ? { ...d, update: { ...d.update, latest, state: "installing", error: undefined } } : d)) }));
   }
 
+  /// Whether `lorca service` keeps a Runner's CLI running, asked of the Runner through the core.
+  serviceStatus(id: string) {
+    return core.request<{ installed: boolean; running: boolean }>("device.service_status", { id });
+  }
+
   /// Forgets the identity: keys, account key, and everything synced.
   async unpair() {
     await core.request("identity.forget");
@@ -581,7 +1210,7 @@ export const engine = new Engine();
 // MARK: - Helpers
 
 export function chatTitle(chat: ChatMeta): string {
-  if (chat.kind === "group" && chat.title?.trim()) return chat.title.trim();
+  if ((chat.kind === "group" || chat.channel) && chat.title?.trim()) return chat.title.trim();
   const names = chat.bot_ids.map((id) => botById(id)?.name).filter((n): n is string => !!n);
   if (chat.kind === "dm") return names[0] ?? t("Chat");
   return names.length ? names.join(", ") : t("Group");

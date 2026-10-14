@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/egoist/lorca/desktop/model"
 	"github.com/egoist/mygo/ui"
 )
@@ -45,8 +47,32 @@ func (s settingsPane) bots(c *ui.Context, m *mainWindow) {
 	})
 }
 
-// device is the picked Device itself: what it is, whether it is online, its machine key, and
-// Unpair.
+// settingsServiceState is what the picked Runner said of `lorca service`, asked once each time
+// the Devices pane shows it.
+type settingsServiceState struct {
+	asked  string
+	status *model.ServiceStatus
+}
+
+// statusOf asks an online Runner how its service stands, and is what it answered, if it did.
+func (s *settingsServiceState) statusOf(device *model.Device) *model.ServiceStatus {
+	if !device.IsStandaloneRunner() || device.Status != model.StatusOnline {
+		return nil
+	}
+	if s.asked != device.ID {
+		s.asked, s.status = device.ID, nil
+		id := device.ID
+		store.RunnerServiceStatus(id, func(status model.ServiceStatus, err error) {
+			if err == nil && s.asked == id {
+				s.status = &status
+			}
+		})
+	}
+	return s.status
+}
+
+// device is the picked Device itself: what it is, whether it is online, its machine key, whether
+// `lorca service` keeps a Runner's CLI running, and Unpair.
 func (s settingsPane) device(c *ui.Context, m *mainWindow) {
 	p := colors(c)
 	device := store.Device(m.settingsDeviceID)
@@ -54,7 +80,8 @@ func (s settingsPane) device(c *ui.Context, m *mainWindow) {
 		if device == nil {
 			return
 		}
-		settingsDeviceHeader(c, device)
+		service := m.settings.service.statusOf(device)
+		settingsDeviceHeader(c, device, s.w)
 		s.section(c, L("Machine"), nil, func(k *card) {
 			unknown := device.OS == model.OSUnknown
 			if unknown {
@@ -73,6 +100,16 @@ func (s settingsPane) device(c *ui.Context, m *mainWindow) {
 				role = L("Runner · runs bots with its own credentials")
 			}
 			s.mark(c, keyValueRow(c, k, L("Role"), role, false, nil), L("Role"))
+			if service != nil {
+				value := L("Not installed")
+				switch {
+				case service.Running:
+					value = L("Running")
+				case service.Installed:
+					value = L("Installed, not running")
+				}
+				s.mark(c, keyValueRow(c.Key("service"), k, L("Background service"), value, false, nil), L("Background service"))
+			}
 			lastSeen := model.LastSeen(device.LastSeen)
 			if device.Status == model.StatusOnline {
 				lastSeen = L("Active now")
@@ -80,12 +117,15 @@ func (s settingsPane) device(c *ui.Context, m *mainWindow) {
 			s.mark(c, keyValueRow(c, k, L("Last seen"), lastSeen, false, nil), L("Last seen"))
 			s.mark(c, keyValueRow(c, k, L("Relay"), settingsRelayText(), true, nil), L("Relay"))
 			pairing := pairingEntry().row
-			unpairElement, unpair := actionRow(c, k, pairing, actionRowOptions{Value: L("Paired to this account"), Tint: &p.Label2, Action: L("Unpair…")})
+			unpairElement, unpair := actionRow(c.Key("pairing"), k, pairing, actionRowOptions{Value: L("Paired to this account"), Tint: &p.Label2, Action: L("Unpair…")})
 			s.mark(c, unpairElement, pairing)
 			if unpair.Action {
 				s.w.confirmUnpair(device)
 			}
 		})
+		if service != nil && !service.Installed {
+			s.footnote(c, L("Run lorca service install in Terminal on %@ to keep its bots running while Lorca is closed.", device.Name))
+		}
 	})
 }
 
@@ -107,8 +147,8 @@ func settingsRelayText() string {
 }
 
 // settingsDeviceHeader is the Device's symbol beside its name, its model and system, and a dot and
-// words for whether it is online.
-func settingsDeviceHeader(c *ui.Context, device *model.Device) {
+// words for whether it is online. Rename… beside the name asks for a new one.
+func settingsDeviceHeader(c *ui.Context, device *model.Device, w *appWindow) {
 	p := colors(c)
 	status, tint := "", p.Label2
 	switch device.Status {
@@ -139,8 +179,14 @@ func settingsDeviceHeader(c *ui.Context, device *model.Device) {
 		ui.Row(c).Size(44, 44).Margin(4, 0, 0, 0).Center().TextColor(p.Label2).Children(func() {
 			symbol(c, device.Symbol(), 40, 1.4)
 		})
-		ui.Column(c).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-			ui.Text(c, device.Name).FontSize(22).FontWeight(600)
+		ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
+			ui.Row(c).Gap(10).MinWidth(0).Children(func() {
+				ui.Text(c, device.Name).FontSize(22).FontWeight(600).MaxLines(1).Shrink(1).MinWidth(0)
+				// A machine that never said what it is has no name of its own to change.
+				if device.OS != model.OSUnknown && pushButton(c, L("Rename…"), pushOptions{Small: true}).Clicked() {
+					renameDevice(w, device)
+				}
+			})
 			if device.OS != model.OSUnknown {
 				ui.Text(c, device.Model+" · "+device.OSVersion).FontSize(12.5).TextColor(p.Label2)
 			}
@@ -148,6 +194,33 @@ func settingsDeviceHeader(c *ui.Context, device *model.Device) {
 				ui.Box(c).Size(8, 8).Radius(4).Background(dot)
 				ui.Text(c, status).FontSize(11.5).FontWeight(500).TextColor(tint)
 			})
+		})
+	})
+}
+
+// renameDevice asks for the Device's name, which every paired Device shows. A blank name takes back
+// the name the machine goes by.
+func renameDevice(w *appWindow, device *model.Device) {
+	id, value := device.ID, device.Name
+	placeholder := device.MachineName
+	if placeholder == "" {
+		placeholder = device.Name
+	}
+	w.showAlert(alertOptions{
+		Message:     L("Rename Device"),
+		Informative: L("Every paired Device shows this name. Leave it blank to use the name the machine goes by."),
+		Buttons:     []alertButton{{Title: L("Rename")}, {Title: L("Cancel")}},
+		Accessory: func(c *ui.Context) {
+			textField(c, &value, fieldOptions{Placeholder: placeholder, AutoFocus: true, Label: L("Name")})
+		},
+	}, func(answer int) {
+		if answer != 0 || strings.TrimSpace(value) == device.Name {
+			return
+		}
+		store.SetDeviceName(id, value, func(err error) {
+			if err != nil {
+				w.showAlert(alertOptions{Message: L("Couldn't rename it"), Informative: model.ErrorText(err)}, nil)
+			}
 		})
 	})
 }

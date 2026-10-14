@@ -5,9 +5,11 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
-import { runsInTerminal, type AutoReview, type Bot, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine } from "./model";
+import { groupOutputs, reviewIsOpen, runsInTerminal, taskOrder, type AutoReview, type ProjectContext, type BudgetState, type DurableTask, type ReviewItem, type OutputSeries, type PlaybookScope, type PlaybookSummary, type Bot, type ChannelStatus, type Chat, type ChatMeta, type ChatUsage, type Device, type Message, type ProviderModel, type ProviderStatus, type RelayProblem, type Routine, type Section } from "./model";
 import { t } from "../i18n";
-import { savePrefs } from "./prefs";
+import { loadPrefs, savePrefs } from "./prefs";
+import { emptyAttention, type AttentionView } from "./attention";
+import type { SharedLink } from "./templates";
 
 export interface Running {
   chatId: string;
@@ -46,6 +48,7 @@ export interface StoreState {
   routines: Routine[];
   /// Auto-review, from the roster.
   auto_review: AutoReview;
+  attention: AttentionView;
   /// The account's provider credentials, the same on every Device.
   providers: ProviderStatus[];
   /// The models the core's catalog offers, for the Model and Thinking pickers.
@@ -70,6 +73,33 @@ export interface StoreState {
   activeSince: number;
   /// Attachment id → file URI, for the bytes this phone has.
   files: Record<string, string>;
+  /// Attachment id → why its bytes could not be fetched, kept until the user retries, so a
+  /// scroll does not ask again.
+  fileErrors: Record<string, string>;
+  /// Chat id → every version of its outputs the core listed when the chat's details last opened.
+  outputs: Record<string, Message[]>;
+  /// Group chat id → its project context as the core last listed it, from when the group's
+  /// details opened, and again on every `projects.changed` for it.
+  projects: Record<string, ProjectContext>;
+  /// The account's durable tasks, each at the newest revision this phone has.
+  tasks: DurableTask[];
+  /// What the account's bots left for review, each at the newest revision this phone has.
+  reviews: ReviewItem[];
+  /// Every Runner's limits and what its turns, tasks, and routines used of them.
+  budgets: BudgetState[];
+  /// Every bot's and group's skills and drafts, from the roster; a body is fetched when one opens.
+  playbooks: PlaybookSummary[];
+  /// The bots the account shares as links, from the roster.
+  shared_links: SharedLink[];
+  /// The chat list's sections, in order, from the roster.
+  sections: Section[];
+  /// Whether the chat list's Hidden group is open (it starts folded), and whether its group of
+  /// chats in no section is folded: this phone's own, where sections fold on every Device.
+  showsHidden: boolean;
+  collapsesOthers: boolean;
+  /// A shared bot's link the app was opened with (Open in Lorca on lorca.app), kept until there
+  /// is an account to read it with.
+  pendingTemplateLink: string | null;
   dictation_lang?: string;
 }
 
@@ -88,6 +118,7 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
     chats: [],
     routines: [],
     auto_review: { is_enabled: true, rules: [] },
+    attention: emptyAttention(),
     providers: [],
     models: [],
     running: {},
@@ -97,6 +128,18 @@ function empty(): Omit<StoreState, "ready" | "dictation_lang" | "appActive" | "a
     pendingTasks: {},
     openChatId: null,
     files: {},
+    fileErrors: {},
+    outputs: {},
+    projects: {},
+    tasks: [],
+    reviews: [],
+    budgets: [],
+    playbooks: [],
+    shared_links: [],
+    sections: [],
+    showsHidden: false,
+    collapsesOthers: false,
+    pendingTemplateLink: null,
   };
 }
 
@@ -105,12 +148,14 @@ export const useStore = create<StoreState>()(() => ({ ...empty(), ready: false, 
 /// Applies a change to the phone's own prefs and saves them.
 export function mutate(update: (s: StoreState) => Partial<StoreState>) {
   useStore.setState((s) => update(s));
-  savePrefs({ dictation_lang: useStore.getState().dictation_lang });
+  const { dictation_lang, showsHidden, collapsesOthers } = useStore.getState();
+  savePrefs({ ...loadPrefs(), dictation_lang, shows_hidden: showsHidden, collapses_others: collapsesOthers });
 }
 
-/// Back to unpaired: everything the core told us goes; the phone's prefs stay.
+/// Back to unpaired: everything the core told us goes; the phone's prefs stay, and so does a
+/// link waiting for an account.
 export function resetStore() {
-  useStore.setState({ ...empty() });
+  useStore.setState((s) => ({ ...empty(), pendingTemplateLink: s.pendingTemplateLink }));
 }
 
 // MARK: - Lookup
@@ -151,7 +196,14 @@ export function replaceSnapshot(snapshot: {
   bots: Bot[];
   chats: Chat[];
   routines?: Routine[];
+  tasks?: DurableTask[];
+  reviews?: ReviewItem[];
+  budgets?: BudgetState[];
+  playbooks?: PlaybookSummary[];
+  shared_links?: SharedLink[];
+  sections?: Section[];
   auto_review?: AutoReview;
+  attention?: AttentionView;
   providers?: ProviderStatus[];
   models?: ProviderModel[];
   running_turns: { job_id: string; chat_id: string; bot_id: string; routine_id?: string | null }[];
@@ -182,7 +234,14 @@ export function replaceSnapshot(snapshot: {
       return { ...c, ...kept, unread_count: c.unread_count ?? 0 };
     }),
     routines: snapshot.routines ?? [],
+    tasks: snapshot.tasks ?? [],
+    reviews: snapshot.reviews ?? [],
+    budgets: snapshot.budgets ?? [],
+    playbooks: snapshot.playbooks ?? [],
+    shared_links: snapshot.shared_links ?? [],
+    sections: snapshot.sections ?? [],
     auto_review: snapshot.auto_review ?? { is_enabled: true, rules: [] },
+    attention: snapshot.attention ?? emptyAttention(),
     providers: snapshot.providers ?? [],
     models: snapshot.models ?? [],
     running,
@@ -190,6 +249,25 @@ export function replaceSnapshot(snapshot: {
     thinking: pick(thinking, busy),
     retries: pick(retries, busy),
   });
+}
+
+/// The value held, when the incoming one says the same: a roster's lists are small, and a new
+/// identity re-renders everything built from them.
+function same<T>(held: T, incoming: T): T {
+  return held === incoming || JSON.stringify(held) === JSON.stringify(incoming) ? held : incoming;
+}
+
+/// Two chats whose fields hold the same values, compared one level deep (`messages` by identity).
+function sameFields(a: Chat, b: Chat): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<keyof Chat>;
+  for (const key of keys) {
+    const x = a[key];
+    const y = b[key];
+    if (x === y || key === "messages") continue;
+    if (x && y && typeof x === "object" && JSON.stringify(x) === JSON.stringify(y)) continue;
+    return false;
+  }
+  return a.messages === b.messages;
 }
 
 function seenOf(devices: Device[]): Record<string, number> {
@@ -200,17 +278,33 @@ function seenOf(devices: Device[]): Record<string, number> {
 
 /// `roster.changed`: bots replace, chat metadata merges over kept messages, chats not named
 /// are gone.
-export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (ChatMeta & { unread_count: number; usage?: ChatUsage })[]; routines?: Routine[]; auto_review?: AutoReview; providers?: ProviderStatus[]; models?: ProviderModel[] }): { removed: string[] } {
+export function applyRoster(roster: { devices: Device[]; bots: Bot[]; chats: (ChatMeta & { unread_count: number; usage?: ChatUsage })[]; routines?: Routine[]; auto_review?: AutoReview; providers?: ProviderStatus[]; models?: ProviderModel[]; playbooks?: PlaybookSummary[]; shared_links?: SharedLink[]; sections?: Section[] }): { removed: string[] } {
   const removed: string[] = [];
   useStore.setState((s) => {
     const incoming = new Set(roster.chats.map((c) => c.id));
     for (const chat of s.chats) if (!incoming.has(chat.id)) removed.push(chat.id);
     const existing = new Map(s.chats.map((c) => [c.id, c]));
-    const chats: Chat[] = roster.chats.map((meta) => {
+    // The core sends the whole roster after every turn, read and pin. What did not change keeps
+    // its identity, so the screens' memoized rows and lists built from it stay as they are.
+    const next: Chat[] = roster.chats.map((meta) => {
       const old = existing.get(meta.id);
-      return { ...meta, is_pinned: meta.is_pinned ?? false, messages: old?.messages ?? [], has_more: old?.has_more, unread_count: meta.unread_count ?? old?.unread_count ?? 0, usage: meta.usage ?? old?.usage };
+      const chat = { ...meta, is_pinned: meta.is_pinned ?? false, messages: old?.messages ?? [], has_more: old?.has_more, unread_count: meta.unread_count ?? old?.unread_count ?? 0, usage: meta.usage ?? old?.usage };
+      return old && sameFields(old, chat) ? old : chat;
     });
-    return { devices: roster.devices, device_seen: seenOf(roster.devices), bots: roster.bots, chats, routines: roster.routines ?? s.routines, auto_review: roster.auto_review ?? s.auto_review, providers: roster.providers ?? s.providers, models: roster.models ?? s.models };
+    const chats = next.length === s.chats.length && next.every((chat, i) => chat === s.chats[i]) ? s.chats : next;
+    return {
+      devices: same(s.devices, roster.devices),
+      device_seen: same(s.device_seen, seenOf(roster.devices)),
+      bots: same(s.bots, roster.bots),
+      chats,
+      routines: same(s.routines, roster.routines ?? s.routines),
+      auto_review: same(s.auto_review, roster.auto_review ?? s.auto_review),
+      providers: same(s.providers, roster.providers ?? s.providers),
+      models: same(s.models, roster.models ?? s.models),
+      playbooks: same(s.playbooks, roster.playbooks ?? s.playbooks),
+      shared_links: same(s.shared_links, roster.shared_links ?? s.shared_links),
+      sections: same(s.sections, roster.sections ?? s.sections),
+    };
   });
   return { removed };
 }
@@ -222,6 +316,30 @@ export function patchRoutine(id: string, update: (routine: Routine) => Routine) 
 
 export function removeRoutine(id: string) {
   useStore.setState((s) => ({ routines: s.routines.filter((r) => r.id !== id) }));
+}
+
+/// A channel changed or removed here before its Runner says so in its record.
+export function patchChannel(id: string, update: (channel: ChannelStatus) => ChannelStatus | null) {
+  useStore.setState((s) => ({
+    devices: s.devices.map((d) =>
+      d.channels?.some((c) => c.id === id) ? { ...d, channels: d.channels.flatMap((c) => (c.id === id ? [update(c)].filter((u): u is ChannelStatus => !!u) : [c])) } : d,
+    ),
+  }));
+}
+
+/// The bot's channels, as its Runner advertises them.
+export function useChannels(botId: string | undefined): ChannelStatus[] {
+  const runnerId = useStore((s) => s.bots.find((b) => b.id === botId)?.runner_id);
+  return useStore(useShallow((s) => s.devices.find((d) => d.id === runnerId)?.channels?.filter((c) => c.bot_id === botId) ?? []));
+}
+
+/// A channel on any Runner, and the Runner.
+export function channelById(id: string): { channel: ChannelStatus; runnerId: string } | undefined {
+  for (const device of useStore.getState().devices) {
+    const channel = device.channels?.find((c) => c.id === id);
+    if (channel) return { channel, runnerId: device.id };
+  }
+  return undefined;
 }
 
 /// How long a command runs before it counts as a running task.
@@ -270,6 +388,7 @@ export function removeMessage(chatId: string, messageId: string) {
   useStore.setState((s) => ({
     chats: s.chats.map((chat) => (chat.id === chatId ? { ...chat, messages: chat.messages.filter((m) => m.id !== messageId) } : chat)),
     pendingTasks: omit(s.pendingTasks, messageId),
+    outputs: s.outputs[chatId] ? { ...s.outputs, [chatId]: s.outputs[chatId].filter((m) => m.id !== messageId) } : s.outputs,
   }));
 }
 
@@ -279,6 +398,8 @@ export function removeChat(chatId: string) {
     statuses: omit(s.statuses, chatId),
     thinking: omit(s.thinking, chatId),
     retries: omit(s.retries, chatId),
+    outputs: omit(s.outputs, chatId),
+    projects: omit(s.projects, chatId),
   }));
 }
 
@@ -292,11 +413,20 @@ export function markRead(chatId: string) {
   const chat = chatById(chatId);
   if (!chat || chat.unread_count === 0) return;
   useStore.setState((s) => ({ chats: s.chats.map((c) => (c.id === chatId ? { ...c, unread_count: 0 } : c)) }));
-  void import("../../modules/lorca-core").then(({ request }) => request("chats.mark_read", { chat_id: chatId }).catch(() => {}));
+  // Required here rather than at the top, which keeps the store free of the native module until
+  // it is used. A dynamic import() would ask Metro for a separate chunk, which a bundle served
+  // without a page location cannot load: the read never reached the core, and the count came back.
+  const { request } = require("../../modules/lorca-core") as typeof import("../../modules/lorca-core");
+  request("chats.mark_read", { chat_id: chatId }).catch(() => {});
 }
 
 export function markFile(id: string, uri: string) {
-  useStore.setState((s) => (s.files[id] === uri ? s : { files: { ...s.files, [id]: uri } }));
+  useStore.setState((s) => (s.files[id] === uri ? s : { files: { ...s.files, [id]: uri }, fileErrors: omit(s.fileErrors, id) }));
+}
+
+/// The attachment's bytes could not be fetched, or (`null`) may be asked for again.
+export function markFileError(id: string, error: string | null) {
+  useStore.setState((s) => ({ fileErrors: error === null ? omit(s.fileErrors, id) : { ...s.fileErrors, [id]: error } }));
 }
 
 export function setRunning(jobId: string, running: Running | null) {
@@ -353,6 +483,20 @@ export function useChat(id: string): Chat | undefined {
   return useStore((s) => s.chats.find((c) => c.id === id));
 }
 
+/// The chat's outputs, the latest published first: the output messages loaded in the chat and
+/// what `outputs.list` answered for it, one series per output with every version.
+export function useOutputs(chatId: string | undefined): OutputSeries[] {
+  const messages = useStore((s) => (chatId ? s.chats.find((c) => c.id === chatId)?.messages : undefined));
+  const listed = useStore((s) => (chatId ? s.outputs[chatId] : undefined));
+  // The loaded message first: it is the newer copy of one the list also has.
+  return useMemo(() => groupOutputs([...(messages ?? []), ...(listed ?? [])]), [messages, listed]);
+}
+
+/// The group's project context, once its details have listed it.
+export function useProject(chatId: string | undefined): ProjectContext | undefined {
+  return useStore((s) => (chatId ? s.projects[chatId] : undefined));
+}
+
 export function useBots(): Bot[] {
   return useStore((s) => s.bots);
 }
@@ -379,8 +523,18 @@ export function useWorkingBots(chatId: string): string[] {
 /// in the order they started. One that starts while the phone watches counts once it has run for
 /// `TASK_DELAY_MS`; one that was running before counts at once.
 export function runningTasks(s: StoreState, chatId: string): Message[] {
-  return s.chats.find((c) => c.id === chatId)?.messages.filter((m) => runsInTerminal(m) && !s.pendingTasks[m.id]) ?? [];
+  const messages = s.chats.find((c) => c.id === chatId)?.messages;
+  if (!messages) return [];
+  // Asked on every store update while a chat is open; the answer changes only with the chat's
+  // messages or the pending set.
+  const cached = tasksCache.get(messages);
+  if (cached && cached.pending === s.pendingTasks) return cached.tasks;
+  const tasks = messages.filter((m) => runsInTerminal(m) && !s.pendingTasks[m.id]);
+  tasksCache.set(messages, { pending: s.pendingTasks, tasks });
+  return tasks;
 }
+
+const tasksCache = new WeakMap<Message[], { pending: StoreState["pendingTasks"]; tasks: Message[] }>();
 
 /// What the Running tasks button counts and its sheet lists.
 export function useRunningTasks(chatId: string): Message[] {
@@ -401,4 +555,95 @@ export function useRoutines(botId: string | undefined): Routine[] {
   const routines = useStore(useShallow((s) => s.routines.filter((r) => r.bot_id === botId).sort((a, b) => a.created_at - b.created_at)));
   const running = useStore(useShallow((s) => Object.values(s.running).flatMap((r) => (r.routineId ? [r.routineId] : []))));
   return useMemo(() => routines.map((r) => (r.is_running || !running.includes(r.id) ? r : { ...r, is_running: true })), [routines, running]);
+}
+
+/// Every Runner's limits, as `budgets.changed` sends them.
+export function setBudgets(budgets: BudgetState[]) {
+  useStore.setState({ budgets });
+}
+
+/// The allowance of a DM (`chat`), a task, or a routine on its Runner.
+export function useBudget(kind: BudgetState["kind"], id: string | undefined, runnerId: string | undefined): BudgetState | undefined {
+  return useStore((s) => s.budgets.find((b) => b.kind === kind && b.id === id && b.runner_id === runnerId));
+}
+
+/// The DM's newest turn when it stopped at a limit or was interrupted: the one to resume.
+export function useStoppedTurn(chatId: string | undefined, runnerId: string | undefined): BudgetState | undefined {
+  return useStore((s) => {
+    let newest: BudgetState | undefined;
+    for (const b of s.budgets) {
+      if (b.kind === "job" && b.chat_id === chatId && b.runner_id === runnerId && (!newest || b.updated_at > newest.updated_at)) newest = b;
+    }
+    return newest && (newest.state === "budget_exhausted" || newest.state === "interrupted") ? newest : undefined;
+  });
+}
+
+/// Takes a task from a reply or an event unless this phone already has a newer revision of it.
+export function acceptDurableTask(task: DurableTask) {
+  useStore.setState((s) => {
+    const index = s.tasks.findIndex((each) => each.id === task.id);
+    if (index < 0) return { tasks: [...s.tasks, task] };
+    if (s.tasks[index].revision >= task.revision) return {};
+    const tasks = s.tasks.slice();
+    tasks[index] = task;
+    return { tasks };
+  });
+}
+
+/// The chat's durable tasks, what waits on the user first, then open work, each newest first.
+export function useDurableTasks(chatId: string | undefined): DurableTask[] {
+  const tasks = useStore((s) => s.tasks);
+  return useMemo(
+    () =>
+      chatId
+        ? tasks
+            .filter((task) => task.chat_ids.includes(chatId))
+            .sort((a, b) => taskOrder(a.state) - taskOrder(b.state) || b.updated_at - a.updated_at)
+        : [],
+    [tasks, chatId],
+  );
+}
+
+export function useDurableTask(id: string | undefined): DurableTask | undefined {
+  return useStore((s) => s.tasks.find((task) => task.id === id));
+}
+
+/// Takes a review item from a reply or an event unless this phone already has a newer revision.
+export function acceptReview(item: ReviewItem) {
+  useStore.setState((s) => {
+    const index = s.reviews.findIndex((each) => each.id === item.id);
+    if (index < 0) return { reviews: [...s.reviews, item] };
+    if (s.reviews[index].revision > item.revision) return {};
+    const reviews = s.reviews.slice();
+    reviews[index] = item;
+    return { reviews };
+  });
+}
+
+/// What the chat's bots left for the user that waits or runs, oldest first. How each ended stays
+/// in the chat, and a message waits on its draft card there instead.
+export function useOpenReviews(chatId: string | undefined): ReviewItem[] {
+  const reviews = useStore((s) => s.reviews);
+  return useMemo(
+    () => (chatId ? reviews.filter((item) => item.origin.chat_id === chatId && reviewIsOpen(item) && !item.is_message).sort((a, b) => a.created_at - b.created_at) : []),
+    [reviews, chatId],
+  );
+}
+
+export function useReview(id: string | undefined): ReviewItem | undefined {
+  return useStore((s) => s.reviews.find((item) => item.id === id));
+}
+
+/// A bot's or a group's skills: drafts waiting for review first, then the latest changed.
+export function useSkills(scope: PlaybookScope | undefined): PlaybookSummary[] {
+  const playbooks = useStore((s) => s.playbooks);
+  return useMemo(
+    () =>
+      scope
+        ? playbooks
+            .filter((skill) => skill.scope.kind === scope.kind && skill.scope.id === scope.id)
+            .sort((a, b) => (a.status === "draft") !== (b.status === "draft") ? (a.status === "draft" ? -1 : 1) : b.updated_at - a.updated_at)
+        : [],
+    [playbooks, scope?.kind, scope?.id],
+  );
 }

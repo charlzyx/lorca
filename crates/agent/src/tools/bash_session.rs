@@ -10,9 +10,10 @@
 //! does not hold the turn: its call returns with the session id, and the session lives on with
 //! the host, which decides when it ends.
 //!
-//! The pty is a Unix thing. On Windows `bash` keeps pi's pipes and no session ever starts.
+//! On Windows the terminal is a pseudo console ([`super::conpty`]), Windows 10 1809 and later;
+//! before that `bash` keeps pi's pipes and no session ever starts ([`terminals`]).
 
-#![cfg_attr(not(unix), allow(dead_code))]
+#![cfg_attr(not(any(unix, windows)), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -74,6 +75,12 @@ pub trait BashSessions: Send + Sync {
     fn get(&self, id: &str) -> Option<Arc<BashSession>>;
     /// The model has read how the session ended; the host may let it go.
     fn remove(&self, id: &str);
+    /// The user has written something the model has yet to read. A `bash_output` wait on a
+    /// command in the background gives way to it, so the model reads the message first; the
+    /// host wakes the wait with [`BashSession::nudge`] when the message arrives.
+    fn user_wrote(&self) -> bool {
+        false
+    }
 }
 
 /// How a session ended.
@@ -131,6 +138,12 @@ pub struct BashSession {
     changed: watch::Sender<u64>,
     #[cfg(unix)]
     master: Mutex<Option<Arc<tokio::io::unix::AsyncFd<std::os::fd::OwnedFd>>>>,
+    /// The console the command runs in, until it closes.
+    #[cfg(windows)]
+    console: Mutex<Option<Arc<super::conpty::Console>>>,
+    /// The job the command's processes run in, which stopping it terminates.
+    #[cfg(windows)]
+    job: super::conpty::Job,
     /// Cancelled when the terminal closes: the reader lets go of it.
     closed: CancellationToken,
 }
@@ -255,6 +268,8 @@ pub(crate) enum Stop {
     Deadline,
     /// The command was sent to the background while the call waited on it.
     Backgrounded,
+    /// The user wrote while the call waited on a command in the background.
+    UserWrote,
     Cancelled,
 }
 
@@ -288,6 +303,12 @@ impl BashSession {
             self.changed.send_modify(|version| *version += 1);
         }
         true
+    }
+
+    /// Wakes the calls waiting on it to look again at what ends their wait: the user wrote
+    /// ([`BashSessions::user_wrote`]).
+    pub fn nudge(&self) {
+        self.changed.send_modify(|version| *version += 1);
     }
 
     /// How it ended, or `None` while it runs.
@@ -382,8 +403,8 @@ impl BashSession {
         }
     }
 
-    /// Ends the session: kills the command's process group and closes the terminal, which
-    /// hangs up what else holds it. `reason` is how the model and the user read the end. A
+    /// Ends the session: kills the command's processes (its process group, or its job on
+    /// Windows) and closes the terminal, which hangs up what else holds it. `reason` is how the model and the user read the end. A
     /// session that already ended keeps its end.
     pub fn stop(&self, reason: impl Into<String>) {
         {
@@ -393,7 +414,7 @@ impl BashSession {
             }
             state.end = Some(SessionEnd::Stopped(reason.into()));
         }
-        super::bash::kill_group(self.pid);
+        self.kill();
         self.close();
         self.changed.send_modify(|version| *version += 1);
     }
@@ -432,7 +453,19 @@ impl BashSession {
             .await;
             result.map_err(|_| "The command is not taking input".to_string())?
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let console = self.console.lock().unwrap().clone().ok_or("The command has ended")?;
+            self.state.lock().unwrap().last_input = Instant::now();
+            self.changed.send_modify(|version| *version += 1);
+            let keys = console_keys(text);
+            match tokio::time::timeout(WRITE_TIMEOUT, tokio::task::spawn_blocking(move || console.write(&keys))).await {
+                Ok(Ok(written)) => written.map_err(|error| error.to_string()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(_) => Err("The command is not taking input".into()),
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = text;
             Err("Interactive input is not available on this platform".into())
@@ -442,7 +475,9 @@ impl BashSession {
     /// Waits until the command ends, goes quiet (at a prompt, or past `idle`), `until`
     /// passes, it is sent to the background, or `cancel` fires. `base` is how much output there was when the wait began and
     /// `since` when it began: silence counts from the later of `since` and the last output,
-    /// and only output past `base` counts as new. `on_output` runs after each chunk.
+    /// and only output past `base` counts as new. `on_output` runs after each chunk. A wait on
+    /// a command in the background also ends once `user_wrote` says so.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn wait(
         &self,
         base: u64,
@@ -450,6 +485,7 @@ impl BashSession {
         idle: Idle,
         until: Option<Instant>,
         cancel: &CancellationToken,
+        user_wrote: impl Fn() -> bool,
         mut on_output: impl FnMut(&BashSession),
     ) -> Stop {
         let mut changes = self.changed.subscribe();
@@ -465,6 +501,9 @@ impl BashSession {
             };
             if ended {
                 return Stop::Ended;
+            }
+            if in_background && user_wrote() {
+                return Stop::UserWrote;
             }
             if until.is_some_and(|until| now >= until) {
                 return Stop::Deadline;
@@ -533,7 +572,44 @@ impl BashSession {
     fn close(&self) {
         #[cfg(unix)]
         self.master.lock().unwrap().take();
+        #[cfg(windows)]
+        if let Some(console) = self.console.lock().unwrap().take() {
+            console.close();
+        }
         self.closed.cancel();
+    }
+
+    /// Kills every process the command started: its process group, or on Windows its job.
+    fn kill(&self) {
+        #[cfg(unix)]
+        super::bash::kill_group(self.pid);
+        #[cfg(windows)]
+        self.job.terminate();
+    }
+
+    /// Follows the shell until `exit` says how it ended, stopping it once it has run `timeout`
+    /// seconds, and records the end.
+    fn follow_exit(self: &Arc<Self>, timeout: Option<f64>, exit: impl std::future::Future<Output = SessionEnd> + Send + 'static) {
+        let weak = Arc::downgrade(self);
+        let deadline = timeout.map(|seconds| (self.started + Duration::from_secs_f64(seconds), seconds));
+        tokio::spawn(async move {
+            tokio::pin!(exit);
+            let end = match deadline {
+                Some((at, seconds)) => tokio::select! {
+                    end = &mut exit => end,
+                    _ = tokio::time::sleep_until(at) => {
+                        if let Some(session) = weak.upgrade() {
+                            session.stop(format!("Command timed out after {seconds} seconds"));
+                        }
+                        exit.await
+                    }
+                },
+                None => exit.await,
+            };
+            if let Some(session) = weak.upgrade() {
+                session.exited(end).await;
+            }
+        });
     }
 
     fn push_output(&self, bytes: &[u8]) {
@@ -573,10 +649,10 @@ impl BashSession {
 
 impl Drop for BashSession {
     fn drop(&mut self) {
-        let state = self.state.get_mut().unwrap();
-        if state.end.is_none() {
-            super::bash::kill_group(self.pid);
+        if self.state.get_mut().unwrap().end.is_none() {
+            self.kill();
         }
+        let state = self.state.get_mut().unwrap();
         self.closed.cancel();
         if let Some(spill) = state.output.spill.take().filter(|spill| !spill.shown) {
             drop(spill.file);
@@ -697,43 +773,123 @@ impl BashSession {
             }
         });
 
-        let weak = Arc::downgrade(&session);
-        let deadline = timeout.map(|seconds| (now + Duration::from_secs_f64(seconds), seconds));
-        tokio::spawn(async move {
-            let status = match deadline {
-                Some((at, seconds)) => tokio::select! {
-                    status = child.wait() => status,
-                    _ = tokio::time::sleep_until(at) => {
-                        if let Some(session) = weak.upgrade() {
-                            session.stop(format!("Command timed out after {seconds} seconds"));
-                        }
-                        child.wait().await
-                    }
+        session.follow_exit(timeout, async move {
+            use std::os::unix::process::ExitStatusExt;
+            match child.wait().await {
+                Ok(status) => match (status.code(), status.signal()) {
+                    (Some(code), _) => SessionEnd::Exited(code),
+                    (None, Some(signal)) => SessionEnd::Signaled(signal),
+                    (None, None) => SessionEnd::Exited(0),
                 },
-                None => child.wait().await,
-            };
-            if let Some(session) = weak.upgrade() {
-                use std::os::unix::process::ExitStatusExt;
-                let end = match status {
-                    Ok(status) => match (status.code(), status.signal()) {
-                        (Some(code), _) => SessionEnd::Exited(code),
-                        (None, Some(signal)) => SessionEnd::Signaled(signal),
-                        (None, None) => SessionEnd::Exited(0),
-                    },
-                    Err(error) => SessionEnd::Stopped(format!("Lost track of the command: {error}")),
-                };
-                session.exited(end).await;
+                Err(error) => SessionEnd::Stopped(format!("Lost track of the command: {error}")),
             }
         });
         Ok(session)
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+impl BashSession {
+    /// Starts `command` under `shell -c` in `cwd`, in a new pseudo console of its own, inside a
+    /// job that stopping it terminates. `timeout` (seconds) kills it when it runs that long.
+    /// `background` marks a command the model means to leave running ([`BashSession::background`]).
+    pub async fn spawn(shell: &str, command: &str, cwd: &Path, timeout: Option<f64>, background: bool, extras: &crate::login_shell::Extras) -> std::io::Result<Arc<BashSession>> {
+        let mut cmd = crate::login_shell::command(shell).await;
+        extras.apply(&mut cmd);
+        // Echo off first, as on a Unix terminal: what is typed (a `y`) does not come back as
+        // output, so an answered question stays answered. Git Bash's programs keep the setting
+        // for the console; one of Windows' own that reads a line may still echo it.
+        cmd.arg("-c")
+            .arg(format!("stty -echo 2>/dev/null; {command}"))
+            .current_dir(cwd)
+            .env("TERM", "xterm-256color")
+            .env("PAGER", "cat")
+            .env("GIT_PAGER", "cat")
+            .env_remove("COLUMNS")
+            .env_remove("LINES");
+        let spawned = super::conpty::spawn(cmd.as_std(), COLUMNS, ROWS)?;
+        let now = Instant::now();
+        let session = Arc::new(BashSession {
+            id: new_id(),
+            command: command.to_string(),
+            pid: spawned.pid,
+            started: now,
+            background: background.into(),
+            state: Mutex::new(SessionState { output: Output::new(), last_output: now, last_input: now, end: None, read: 0, drained: false }),
+            changed: watch::channel(0).0,
+            console: Mutex::new(Some(Arc::new(spawned.console))),
+            job: spawned.job,
+            closed: CancellationToken::new(),
+        });
+
+        // The console's output ends once it closes. It is read to that end even after the
+        // session goes, as closing the console waits for what it holds to be read.
+        let weak = Arc::downgrade(&session);
+        let output = spawned.output;
+        std::thread::spawn(move || {
+            super::conpty::read_until_closed(output, |chunk| {
+                if let Some(session) = weak.upgrade() {
+                    session.push_output(chunk);
+                }
+            });
+            if let Some(session) = weak.upgrade() {
+                session.state.lock().unwrap().drained = true;
+                session.changed.send_modify(|version| *version += 1);
+            }
+        });
+
+        let (exited, exit) = tokio::sync::oneshot::channel();
+        let process = spawned.process;
+        std::thread::spawn(move || {
+            let _ = exited.send(super::conpty::wait(&process));
+        });
+        session.follow_exit(timeout, async move {
+            match exit.await {
+                Ok(Ok(code)) => SessionEnd::Exited(code as i32),
+                Ok(Err(error)) => SessionEnd::Stopped(format!("Lost track of the command: {error}")),
+                Err(_) => SessionEnd::Stopped("Lost track of the command".into()),
+            }
+        });
+        Ok(session)
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 impl BashSession {
     pub async fn spawn(_shell: &str, _command: &str, _cwd: &Path, _timeout: Option<f64>, _background: bool, _extras: &crate::login_shell::Extras) -> std::io::Result<Arc<BashSession>> {
         Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "interactive terminals are not available on this platform"))
     }
+}
+
+/// Whether commands run in terminals of their own here, which a session keeps: on Unix, and on
+/// Windows with a pseudo console (10 1809 and later). Elsewhere `bash` runs them on pipes.
+pub fn terminals() -> bool {
+    #[cfg(windows)]
+    {
+        super::conpty::supported()
+    }
+    #[cfg(not(windows))]
+    {
+        cfg!(unix)
+    }
+}
+
+/// What typing `text` sends a Windows console: Enter is a carriage return there, so a line feed
+/// is one (a CRLF only one), and Backspace is DEL.
+#[cfg(any(windows, test))]
+fn console_keys(text: &[u8]) -> Vec<u8> {
+    let mut keys = Vec::with_capacity(text.len());
+    let mut after_return = false;
+    for &byte in text {
+        match byte {
+            b'\n' if after_return => {}
+            b'\n' => keys.push(b'\r'),
+            0x08 => keys.push(0x7f),
+            byte => keys.push(byte),
+        }
+        after_return = byte == b'\r';
+    }
+    keys
 }
 
 /// A new pseudo-terminal pair, `COLUMNS` by `ROWS`, with echo off: what the user or the model
@@ -841,6 +997,10 @@ fn running_note(session: &BashSession, stop: Stop, idle: Duration) -> String {
             "[The user sent the command to the background, where it runs on as session {id}: go on with your work. Read what it \
              prints with bash_output, or stop it with bash_input \"\\u0003\".]"
         ),
+        (Stop::UserWrote, _) => format!(
+            "[The user wrote while you waited: answer their message, which follows. The command runs on in the background as \
+             session {id}: read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
+        ),
         // Quiet, or in raw mode for its own keys (a dev server's shortcuts), is how a server waits.
         _ if session.background() => format!(
             "[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]"
@@ -919,11 +1079,14 @@ pub fn session_of(details: &Value) -> Option<&str> {
 pub struct BashInputTool {
     sessions: Arc<dyn BashSessions>,
     waiting_after: Duration,
+    /// The longest the call waits on a command that keeps printing, so never goes quiet:
+    /// `bash_output`'s longest wait.
+    longest_wait: Duration,
 }
 
 impl BashInputTool {
     pub fn new(sessions: Arc<dyn BashSessions>) -> Self {
-        BashInputTool { sessions, waiting_after: WAITING_AFTER }
+        BashInputTool { sessions, waiting_after: WAITING_AFTER, longest_wait: MAX_OUTPUT_WAIT }
     }
 
     /// How long the command may stay silent after the input before the call returns.
@@ -940,7 +1103,8 @@ impl Tool for BashInputTool {
     }
     fn description(&self) -> &str {
         "Type into a command that bash left running, by its session id: the text, then Enter unless enter is false. Returns \
-         what the command printed since you last read it, once it ends, asks again, or goes quiet. Keys are control \
+         what the command printed since you last read it, once it ends, asks again, or goes quiet, or at most 2 seconds \
+         later for a command in the background and 5 minutes for any other. Keys are control \
          characters: \\u0003 is Ctrl-C (interrupts the command), \\u0004 is Ctrl-D (ends input), \\u001b is Escape. What you \
          type is not echoed back."
     }
@@ -975,7 +1139,11 @@ impl Tool for BashInputTool {
         }
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: false };
-        let stop = session.wait(base, since, idle, None, &cancel, |_| {}).await;
+        // A command that keeps printing never goes quiet, nor does one that took no notice of a
+        // Ctrl-C: the call returns what it printed by then, with where it stands. One in the
+        // background waits as long as starting it there does.
+        let longest = if session.background() { BACKGROUND_SETTLE } else { self.longest_wait };
+        let stop = session.wait(base, since, idle, Some(since + longest), &cancel, || false, |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1026,7 +1194,7 @@ impl Tool for BashOutputTool {
         let from = session.read_mark();
         let (base, since) = (session.total(), Instant::now());
         let idle = Idle { after: self.waiting_after, needs_output: true };
-        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, |_| {}).await;
+        let stop = session.wait(base, since, idle, Some(since + wait.min(MAX_OUTPUT_WAIT)), &cancel, || self.sessions.user_wrote(), |_| {}).await;
         session_result(&session, self.sessions.as_ref(), from, stop, self.waiting_after, false)
     }
 }
@@ -1059,7 +1227,7 @@ pub(crate) async fn run(
     // Sent to the background before the wait began, it waits as one started there.
     let until = session.background().then(|| session.started + BACKGROUND_SETTLE);
     let stop = session
-        .wait(0, session.started, idle, until, &cancel, |session| {
+        .wait(0, session.started, idle, until, &cancel, || false, |session| {
             if last_update.elapsed() >= Duration::from_millis(super::bash::UPDATE_THROTTLE_MS) {
                 last_update = Instant::now();
                 on_update(ToolResult::text(session.preview()));
@@ -1075,9 +1243,9 @@ mod tests {
     use crate::tools::BashTool;
     use std::collections::HashMap;
 
-    /// Sessions kept in a map, as a host would.
+    /// Sessions kept in a map, as a host would, and whether the user wrote.
     #[derive(Default)]
-    struct Host(Mutex<HashMap<String, Arc<BashSession>>>);
+    struct Host(Mutex<HashMap<String, Arc<BashSession>>>, std::sync::atomic::AtomicBool);
 
     impl BashSessions for Host {
         fn insert(&self, _call_id: &str, session: Arc<BashSession>) {
@@ -1088,6 +1256,9 @@ mod tests {
         }
         fn remove(&self, id: &str) {
             self.0.lock().unwrap().remove(id);
+        }
+        fn user_wrote(&self) -> bool {
+            self.1.load(std::sync::atomic::Ordering::Relaxed)
         }
     }
 
@@ -1109,12 +1280,47 @@ mod tests {
         }
     }
 
+    /// A call, failed after a minute: a hang here fails the test instead of holding the run.
     async fn call(tool: &dyn Tool, args: Value) -> Result<ToolResult, ToolError> {
-        tool.execute("call", args, CancellationToken::new(), Arc::new(|_| {})).await
+        let name = tool.name().to_string();
+        tokio::time::timeout(Duration::from_secs(60), tool.execute("call", args, CancellationToken::new(), Arc::new(|_| {})))
+            .await
+            .unwrap_or_else(|_| panic!("{name} did not return within a minute"))
+    }
+
+    /// Reads the session until it ends, as the model would after a Ctrl-C: `result` is the call
+    /// that typed it, and bash_output waits for the rest. How it ended, or the last read when it
+    /// is still running after 30 s.
+    async fn until_ended(t: &Tools, id: &str, mut result: Result<ToolResult, ToolError>) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match result {
+                Ok(running) if session_of(&running.details).is_some() => {
+                    if Instant::now() >= deadline {
+                        return running.text_content();
+                    }
+                    result = call(&t.output, json!({"session_id": id, "wait_seconds": 5})).await;
+                }
+                Ok(ended) => return ended.text_content(),
+                Err(ended) => return ended.0,
+            }
+        }
     }
 
     fn session_id(result: &ToolResult) -> String {
         session_of(&result.details).expect("a session id").to_string()
+    }
+
+    /// Waits until the command has printed `text`: a step keyed on what it printed, never on a
+    /// clock, since a shell starts slowly on a busy machine (Git Bash on Windows above all).
+    async fn printed(session: &BashSession, text: &str) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !session.preview().contains(text) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the command printed {text:?}: {:?}", session.preview()));
     }
 
     #[cfg(unix)]
@@ -1122,7 +1328,7 @@ mod tests {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn results_read_as_they_did_on_pipes() {
         let t = tools(WAITING_AFTER);
@@ -1145,7 +1351,7 @@ mod tests {
         assert_eq!(result.text_content(), "tty\nhas-tty\n24 80\nxterm-256color cat\n");
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_command_that_reads_waits_and_takes_an_answer() {
         let t = tools(Duration::from_millis(400));
@@ -1176,7 +1382,7 @@ mod tests {
         // The user answers on the side: nobody holds a call, and a later read has the reply.
         let session = t.host.get(&id).unwrap();
         session.write(b"hunter2\r").await.unwrap();
-        session.ended().await;
+        tokio::time::timeout(Duration::from_secs(20), session.ended()).await.expect("it ended");
         let done = call(&t.output, json!({"session_id": id})).await.unwrap();
         assert_eq!(done.text_content(), "\nlength:7\n\n\nCommand exited with code 0");
         assert!(!done.text_content().contains("hunter2"));
@@ -1196,7 +1402,7 @@ mod tests {
         assert!(!session.asks() && session.prompt().is_none());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_yes_no_question_is_answered_by_the_model() {
         let t = tools(Duration::from_secs(30));
@@ -1262,7 +1468,10 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         });
-        let aborted = t.bash.execute("call", json!({"command": "sleep 300 & echo $!; wait"}), cancel, Arc::new(|_| {})).await.unwrap_err();
+        let aborted = tokio::time::timeout(Duration::from_secs(60), t.bash.execute("call", json!({"command": "sleep 300 & echo $!; wait"}), cancel, Arc::new(|_| {})))
+            .await
+            .expect("the call returned")
+            .unwrap_err();
         assert!(aborted.0.ends_with("Command aborted"), "{}", aborted.0);
         let pid: i32 = aborted.0.lines().next().unwrap().trim().parse().unwrap();
         let gone = async {
@@ -1285,7 +1494,7 @@ mod tests {
     }
 
     /// A server prints as long as it runs, so only `background` returns its call before it ends.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_background_command_returns_while_it_prints() {
         let t = tools(WAITING_AFTER);
@@ -1298,15 +1507,22 @@ mod tests {
         assert!(elapsed >= BACKGROUND_SETTLE && elapsed < BACKGROUND_SETTLE + Duration::from_secs(2), "{elapsed:?}");
         let text = running.text_content();
         let id = session_id(&running);
-        assert!(text.starts_with("listening\ntick\n"), "{text}");
+        // What it printed in those 2 s; Git Bash on a busy Windows machine may still be starting.
+        if cfg!(unix) {
+            assert!(text.starts_with("listening\ntick\n"), "{text}");
+        }
         assert!(text.ends_with(&format!("[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]")), "{text}");
         assert_eq!(running.details["summary"], "Running");
         assert!(t.host.get(&id).unwrap().background());
 
+        printed(&t.host.get(&id).unwrap(), "tick").await;
         let more = call(&t.output, json!({"session_id": id, "wait_seconds": 0.3})).await.unwrap();
-        assert!(more.text_content().starts_with("tick\n"), "{}", more.text_content());
-        let stopped = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await.unwrap();
-        assert!(stopped.text_content().ends_with("Command terminated by signal 2"), "{}", stopped.text_content());
+        assert!(more.text_content().contains("tick\n"), "{}", more.text_content());
+        // The ticks never stop for a quiet spell: the end is waited for with bash_output, since
+        // Git Bash on Windows may take the Ctrl-C after bash_input's 2 s.
+        let typed = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await;
+        let stopped = until_ended(&t, &id, typed).await;
+        assert!(stopped.contains(if cfg!(unix) { "Command terminated by signal 2" } else { "Command exited with code" }), "{stopped}");
         assert!(t.host.0.lock().unwrap().is_empty());
 
         // One that ends first reads as it would have without it.
@@ -1316,9 +1532,40 @@ mod tests {
         assert_eq!(quick.text_content(), "done\n");
     }
 
+    /// Typing into a command that keeps printing returns what it printed, never waiting for a
+    /// quiet spell that does not come: at once for one in the background, at the longest wait
+    /// otherwise. A Ctrl-C it takes no notice of reads the same.
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn input_returns_while_the_command_keeps_printing() {
+        let mut t = tools(Duration::from_millis(400));
+        t.input.longest_wait = Duration::from_secs(2);
+        let ticks = "while true; do echo tick; sleep 0.1; done";
+
+        let background = call(&t.bash, json!({"command": ticks, "background": true})).await.unwrap();
+        let id = session_id(&background);
+        let started = Instant::now();
+        let typed = call(&t.input, json!({"session_id": id, "text": "x"})).await.unwrap();
+        assert!(started.elapsed() < BACKGROUND_SETTLE + Duration::from_secs(2), "{:?}", started.elapsed());
+        let text = typed.text_content();
+        assert!(text.ends_with(&format!("[Running in the background as session {id}. Read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]")), "{text}");
+        t.host.get(&id).unwrap().stop("Stopped");
+
+        // Answered, it prints on and on.
+        let asking = call(&t.bash, json!({"command": format!("echo ready; read -r x; {ticks}")})).await.unwrap();
+        let id = session_id(&asking);
+        printed(&t.host.get(&id).unwrap(), "ready").await;
+        let started = Instant::now();
+        let typed = call(&t.input, json!({"session_id": id, "text": "go"})).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(4), "{:?}", started.elapsed());
+        let text = typed.text_content();
+        assert!(text.ends_with(&format!("[Still running as session {id}. Wait for more with bash_output, or answer it with bash_input.]")), "{text}");
+        t.host.get(&id).unwrap().stop("Stopped");
+    }
+
     /// The user sends a command the model is waiting on to the background: the call returns and
     /// the command runs on.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_command_sent_to_the_background_returns_its_call() {
         let t = Arc::new(tools(WAITING_AFTER));
@@ -1336,7 +1583,7 @@ mod tests {
         })
         .await
         .unwrap();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        printed(&session, "tick").await;
         assert!(!running.is_finished(), "it prints, so the call waits");
 
         assert!(session.send_to_background());
@@ -1354,7 +1601,7 @@ mod tests {
 
     /// Send now sends the command to the background and cancels the step at once: the call reads
     /// as sent there, whichever it saw first, and the command runs on.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn a_command_sent_to_the_background_outlives_its_cancelled_call() {
         let t = Arc::new(tools(WAITING_AFTER));
@@ -1363,7 +1610,7 @@ mod tests {
             let (t, cancel) = (t.clone(), cancel.clone());
             async move { t.bash.execute("call", json!({"command": "echo building; while true; do echo tick; sleep 0.1; done"}), cancel, Arc::new(|_| {})).await }
         });
-        let session = tokio::time::timeout(Duration::from_secs(5), async {
+        let session = tokio::time::timeout(Duration::from_secs(20), async {
             loop {
                 if let Some(session) = t.host.0.lock().unwrap().values().next().cloned().filter(|s| s.preview().contains("tick")) {
                     return session;
@@ -1380,6 +1627,98 @@ mod tests {
         assert!(result.text_content().contains("The user sent the command to the background"), "{}", result.text_content());
         assert!(session.end().is_none(), "it runs on");
         session.stop("Stopped");
+    }
+
+    /// The user writes while the model waits on a command in the background: the wait gives way
+    /// so the model reads the message, and the command runs on. A wait on any other command
+    /// does not.
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn a_wait_on_a_background_command_gives_way_to_the_user() {
+        let t = Arc::new(tools(Duration::from_millis(400)));
+        let ticks = "while true; do echo tick; sleep 0.1; done";
+        let background = call(&t.bash, json!({"command": ticks, "background": true})).await.unwrap();
+        let session = t.host.get(&session_id(&background)).unwrap();
+        let waiting = tokio::spawn({
+            let (t, id) = (t.clone(), session.id().to_string());
+            async move { call(&t.output, json!({"session_id": id, "wait_seconds": 30})).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!waiting.is_finished(), "it waits");
+
+        t.host.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        session.nudge();
+        let result = tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("the wait gave way").unwrap().unwrap();
+        let text = result.text_content();
+        assert!(text.ends_with(&format!("[The user wrote while you waited: answer their message, which follows. The command runs on in the background as session {}: read what it prints with bash_output, or stop it with bash_input \"\\u0003\".]", session.id())), "{text}");
+        assert!(session.end().is_none(), "it runs on");
+        let started = Instant::now();
+        call(&t.output, json!({"session_id": session.id(), "wait_seconds": 30})).await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "a wait that starts with the message unread returns at once");
+
+        let foreground = call(&t.bash, json!({"command": "sleep 30"})).await;
+        let foreground = t.host.get(&session_id(&foreground.unwrap())).unwrap();
+        let started = Instant::now();
+        call(&t.output, json!({"session_id": foreground.id(), "wait_seconds": 0.5})).await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500), "only a background command gives way");
+        session.stop("Stopped");
+        foreground.stop("Stopped");
+    }
+
+    /// Stop ends every process the command started, its own children's children too: its process
+    /// group, or on Windows its job, where Git Bash's processes stay.
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn stop_ends_every_process_the_command_started() {
+        let dir = std::env::temp_dir().join(format!("lorca-session-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = Arc::new(Host::default());
+        let bash = BashTool::with_sessions(dir.clone(), host.clone()).waiting_after(Duration::from_millis(400));
+        let waiting = call(&bash, json!({"command": "(sleep 3; echo late > marker) & (sleep 3; echo late > marker2) | cat; echo started; wait"})).await.unwrap();
+        let session = host.get(&session_id(&waiting)).unwrap();
+        session.stop("Stopped");
+        tokio::time::timeout(Duration::from_secs(5), session.ended()).await.expect("it ended");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!dir.join("marker").exists() && !dir.join("marker2").exists(), "a process outlived the stop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A command runs in a console of its own on Windows: a terminal to Git Bash's programs, the
+    /// size of the Unix one, with echo off.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn commands_get_a_console() {
+        let t = tools(WAITING_AFTER);
+        let result = call(&t.bash, json!({"command": "[ -t 0 ] && echo tty; stty size; stty -a | grep -o -- '-echo ' | head -1; echo \"$TERM $PAGER\""})).await.unwrap();
+        assert_eq!(result.text_content(), "tty\n24 80\n-echo \nxterm-256color cat\n");
+    }
+
+    /// Ctrl-C in the console ends what runs there. The key goes in once the command prints,
+    /// since the call returns after 0.4 s of silence and Git Bash may still be starting then.
+    /// Git Bash's programs take the console's Ctrl-C as a signal from a thread of their own, a
+    /// moment later on a busy machine, so the end is waited for as the model would wait for it,
+    /// with bash_output, not within the 0.4 s bash_input waits.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ctrl_c_ends_the_command() {
+        let t = tools(Duration::from_millis(400));
+        let waiting = call(&t.bash, json!({"command": "echo ready; sleep 60; echo after"})).await.unwrap();
+        let id = session_id(&waiting);
+        let session = t.host.get(&id).unwrap();
+        printed(&session, "ready").await;
+        let typed = call(&t.input, json!({"session_id": id, "text": "\u{3}", "enter": false})).await;
+        let ended = until_ended(&t, &id, typed).await;
+        assert!(ended.contains("Command exited with code") && !ended.contains("after"), "{ended}");
+        assert!(t.host.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn keys_reach_a_console_as_it_takes_them() {
+        assert_eq!(console_keys(b"hello\r"), b"hello\r");
+        assert_eq!(console_keys(b"one\ntwo\r\n"), b"one\rtwo\r", "a line feed is Enter, a CRLF one Enter");
+        assert_eq!(console_keys(b"ab\x08c"), b"ab\x7fc", "Backspace is DEL");
+        assert_eq!(console_keys(b"\x03"), b"\x03");
     }
 
     #[cfg(unix)]

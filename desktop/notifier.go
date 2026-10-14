@@ -9,8 +9,8 @@ import (
 
 // System notifications for replies, failed responses, and questions, after the macOS app's Notifier
 // and ChatNotification: posted unless the message was read on a paired Device first, and a click
-// brings the app forward on the chat. The same "looking at" fact goes to the CLI (`ui.watching`),
-// so a Runner does not push a reply the user is watching arrive to their phone.
+// brings the app forward on the chat; a muted chat posts none. The same "looking at" fact goes to
+// the CLI (`ui.watching`), so no Runner pushes a reply the user is watching arrive to their phone.
 
 type notificationKind int
 
@@ -18,6 +18,8 @@ const (
 	notifyReply notificationKind = iota
 	notifyPermission
 	notifyFailure
+	notifySummary
+	notifyUrgent
 )
 
 // chatNotification is the message behind an alert, kept so a delayed delivery can check its
@@ -30,17 +32,34 @@ type chatNotification struct {
 }
 
 func notificationFor(message *model.Message) *chatNotification {
-	if message.Author.Kind != model.AuthorBot {
+	if message.Author.Kind != model.AuthorBot || message.Notification == model.NotificationQuiet {
 		return nil
 	}
 	base := chatNotification{messageID: message.ID, botID: message.Author.BotID}
 	body := message.Body
 	switch {
-	case body.Kind == model.BodyPermission && body.Request.IsPending():
+	// An access request is the bot's to explain in its reply, which notifies on its own.
+	case body.Kind == model.BodyPermission && body.Request.IsPending() && body.Request.IsSecret():
+		base.kind, base.body = notifyPermission, L("Asks for %@", body.Request.Summary)
+		return &base
+	case body.Kind == model.BodyPermission && body.Request.IsPending() && !body.Request.IsAccess():
 		base.kind, base.body = notifyPermission, L("Confirmation needed: %@", body.Request.Summary)
 		return &base
 	case body.Kind == model.BodyTool && body.Tool.Run != nil && body.Tool.Run.State == model.CommandAsking:
 		base.kind, base.body = notifyPermission, L("Confirmation needed: %@", "$ "+model.FirstLine(body.Tool.Run.Command))
+		return &base
+	case body.Kind == model.BodyTool && body.Tool.Agent != nil && body.Tool.Agent.State == model.AgentAsking && body.Tool.Agent.Question != nil:
+		agent := body.Tool.Agent
+		base.kind = notifyPermission
+		switch q := agent.Question; q.Kind {
+		case "start":
+			base.body = L("Confirmation needed: %@", L("Start %@", agent.Name()))
+		case "command":
+			base.body = L("Confirmation needed: %@", agent.Name()+": $ "+model.FirstLine(q.Command))
+		default:
+			lines := strings.Split(strings.TrimSpace(q.Text), "\n")
+			base.body = L("%@ asks", agent.Name()) + ": " + strings.TrimSpace(lines[len(lines)-1])
+		}
 		return &base
 	case body.Kind == model.BodyText:
 		if message.State.Kind == model.StateFailed {
@@ -49,6 +68,12 @@ func notificationFor(message *model.Message) *chatNotification {
 		}
 		if message.State.Kind == model.StateComplete && strings.TrimSpace(body.Text) != "" {
 			base.kind, base.body = notifyReply, body.Text
+			switch message.Notification {
+			case model.NotificationSummary:
+				base.kind = notifySummary
+			case model.NotificationUrgent:
+				base.kind = notifyUrgent
+			}
 			return &base
 		}
 	}
@@ -60,7 +85,7 @@ func notificationFor(message *model.Message) *chatNotification {
 func finishedTurn(chat *model.Chat, botID string, startedAt time.Time) *chatNotification {
 	for i := len(chat.Messages) - 1; i >= 0; i-- {
 		message := chat.Messages[i]
-		if message.Author.Kind != model.AuthorBot || message.Author.BotID != botID || message.CreatedAt.Before(startedAt.Add(-5*time.Second)) || message.Body.Kind != model.BodyText {
+		if message.Author.Kind != model.AuthorBot || message.Author.BotID != botID || message.CreatedAt.Before(startedAt.Add(-5*time.Second)) || message.Body.Kind != model.BodyText || message.Notification != "" {
 			continue
 		}
 		if notification := notificationFor(message); notification != nil {
@@ -70,10 +95,10 @@ func finishedTurn(chat *model.Chat, botID string, startedAt time.Time) *chatNoti
 	return nil
 }
 
-// canDeliver is a notification still unread, not on screen, and its message still saying what
-// the alert would.
+// canDeliver is a notification still unread, not on screen, in a chat that is not muted, and its
+// message still saying what the alert would.
 func canDeliver(notification *chatNotification, chat *model.Chat, watched string) bool {
-	if watched == chat.ID || chat.UnreadCount <= 0 {
+	if watched == chat.ID || chat.UnreadCount <= 0 || chat.IsMuted(time.Now()) {
 		return false
 	}
 	message := chat.Message(notification.messageID)
@@ -86,10 +111,11 @@ func canDeliver(notification *chatNotification, chat *model.Chat, watched string
 
 type notifier struct {
 	pendingPermissions map[string]bool
+	announcedAttention map[string]bool
 }
 
 func newNotifier() *notifier {
-	return &notifier{pendingPermissions: map[string]bool{}}
+	return &notifier{pendingPermissions: map[string]bool{}, announcedAttention: map[string]bool{}}
 }
 
 // started is notifications going out: once the first connection settles.
@@ -129,6 +155,7 @@ func (n *notifier) storeChanged(event model.Event) {
 		n.watchingChanged()
 	case model.EventMessageAdded, model.EventMessageChanged:
 		n.permissionChanged(event.ChatID, event.MessageID)
+		n.attentionChanged(event.ChatID, event.MessageID)
 	case model.EventMessageRemoved:
 		n.clearPermission(event.MessageID)
 	case model.EventTurnFinished:
@@ -136,10 +163,47 @@ func (n *notifier) storeChanged(event model.Event) {
 	}
 }
 
+// Structured summaries/escalations alert on arrival, once per message, separately from
+// the generic turn-finished path. Preferences and read state are checked after the grace.
+func (n *notifier) attentionChanged(chatID, messageID string) {
+	chat := store.Chat(chatID)
+	if chat == nil {
+		return
+	}
+	message := chat.Message(messageID)
+	if message == nil {
+		return
+	}
+	notification := notificationFor(message)
+	if notification == nil || notification.kind != notifySummary && notification.kind != notifyUrgent || n.announcedAttention[messageID] {
+		return
+	}
+	n.announcedAttention[messageID] = true
+	identity := store.IdentityID
+	time.AfterFunc(3*time.Second, func() {
+		post(func() {
+			if store.IdentityID == identity && n.started() {
+				n.post(notification, chatID)
+			}
+		})
+	})
+}
+
+func allowsNotification(notification *chatNotification) bool {
+	switch notification.kind {
+	case notifySummary:
+		return store.Attention.Preferences.Summaries
+	case notifyUrgent:
+		return store.Attention.Preferences.UrgentDirect
+	}
+	return true
+}
+
 func asks(message *model.Message) bool {
 	body := message.Body
 	return body.Kind == model.BodyPermission && body.Request.IsPending() ||
-		body.Kind == model.BodyTool && body.Tool.Run != nil && body.Tool.Run.State == model.CommandAsking
+		body.Kind == model.BodyTool && body.Tool.Run != nil && body.Tool.Run.State == model.CommandAsking ||
+		body.Kind == model.BodyTool && body.Tool.Agent != nil && body.Tool.Agent.State == model.AgentAsking
 }
 
 func (n *notifier) rememberPermissions() {
@@ -222,7 +286,7 @@ func (n *notifier) turnFinished(chatID, botID string, startedAt time.Time) {
 
 func (n *notifier) post(notification *chatNotification, chatID string) {
 	chat := store.Chat(chatID)
-	if chat == nil || !canDeliver(notification, chat, n.watchedChat()) {
+	if chat == nil || !allowsNotification(notification) || !canDeliver(notification, chat, n.watchedChat()) {
 		return
 	}
 	title := store.Title(chat)
@@ -230,7 +294,7 @@ func (n *notifier) post(notification *chatNotification, chatID string) {
 		title = bot.Name
 	}
 	subtitle := ""
-	if !chat.IsDM() {
+	if !chat.IsBotDM() {
 		subtitle = store.Title(chat)
 	}
 	body := strings.Join(strings.FieldsFunc(notification.body, func(r rune) bool { return r == '\n' || r == '\r' }), " ")

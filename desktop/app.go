@@ -144,12 +144,17 @@ func (a *appDelegate) didFinishLaunching() {
 // storeChanged keeps what the app shows outside its windows in step with the store: the unread
 // badge and the tray's words.
 func (a *appDelegate) storeChanged(event model.Event) {
+	a.presentPendingTemplateLink()
 	switch event.Kind {
 	case model.EventIdentityChanged, model.EventSnapshotReplaced, model.EventChatsChanged:
 		count := 0
 		if store.HasIdentity == nil || *store.HasIdentity {
+			// A muted chat keeps its count in the sidebar but leaves the badge alone.
+			now := time.Now()
 			for _, chat := range store.Chats {
-				count += chat.UnreadCount
+				if !chat.IsMuted(now) {
+					count += chat.UnreadCount
+				}
 			}
 		}
 		setBadge(count)
@@ -324,6 +329,8 @@ func (a *appDelegate) showMainWindow() {
 			if id := m.selectedChatID(); id != "" {
 				store.MarkRead(id)
 			}
+			// Back from the browser, perhaps from a routine's setup: what waits on it tries now.
+			store.ResubscribeAwaitingSetup()
 		})
 		win.OnClose(func(e *mygo.CloseEvent) {
 			if a.quitting || !a.keepsRunning() || a.main == nil || win.ID() != a.main.win.ID() {

@@ -193,6 +193,11 @@ final class RootSplitViewController: NSSplitViewController {
     private func makeInspector() -> InspectorViewController {
         let controller = InspectorViewController()
         controller.onOpenDevice = { [weak self] id in self?.openDevice(id) }
+        controller.onOpenChat = { [weak self] chatID in self?.open(chatID) }
+        controller.onShowMessage = { [weak self] chatID, messageID in
+            self?.open(chatID)
+            self?.chatController?.reveal(loading: messageID)
+        }
         controller.onRemoveBot = { [weak self] botID in
             guard case let .chat(chatID) = self?.selection else { return }
             self?.store.removeBot(botID, from: chatID)
@@ -436,10 +441,12 @@ final class RootSplitViewController: NSSplitViewController {
             switch pane {
             case .general: GeneralSettingsViewController()
             case .autoReview: AutoReviewSettingsViewController()
+            case .sharedLinks: SharedLinksSettingsViewController()
             case .advanced: AdvancedSettingsViewController()
             case .bots: BotsSettingsViewController()
             case .providers: ProvidersSettingsViewController()
             case .plugins: PluginsSettingsViewController()
+            case .secrets: SecretsSettingsViewController()
             case .device: AboutDeviceSettingsViewController()
             }
         if let controller = controller as? DevicePaneViewController {
@@ -481,6 +488,12 @@ final class RootSplitViewController: NSSplitViewController {
         presentAsSheet(sheet)
     }
 
+    /// A task for the chat on screen; there is nothing to add it to anywhere else.
+    func presentNewTask() {
+        guard case let .chat(chatID) = selection else { return }
+        presentAsSheet(DurableTaskViewController(chatID: chatID, task: nil))
+    }
+
     /// Every bot has a direct chat, so creating one lands in that chat right away.
     func presentNewBot() {
         let sheet = NewBotViewController { [weak self] botID in
@@ -490,9 +503,21 @@ final class RootSplitViewController: NSSplitViewController {
         presentAsSheet(sheet)
     }
 
+    /// New Bot from Template, on a shared bot's link when one opened the app.
+    func presentTemplateImport(link: String? = nil) {
+        presentAsSheet(TemplateImportViewController(source: link.map { .link($0) }) { [weak self] chatID in self?.open(chatID) })
+    }
+
     func open(_ chatID: Chat.ID) {
         select(.chat(chatID))
+        sidebar.reveal(chatID)
         chatController?.focusComposer()
+    }
+
+    /// A review's sheet, to approve or reject it, unless one is already up.
+    func presentReview(_ item: ReviewItem) {
+        guard presentedViewControllers?.isEmpty != false else { return }
+        presentAsSheet(ReviewViewController(item: item))
     }
 
     /// The marketplace, as a sheet sized to the window: Grok Bot's is 800 by 700. From a bot's
@@ -539,6 +564,17 @@ final class RootSplitViewController: NSSplitViewController {
         presentAsSheet(sheet)
     }
 
+    /// A new skill for the bot in the DM on screen, or for the group.
+    @objc func newSkill(_ sender: Any?) {
+        guard case let .chat(chatID) = selection, let chat = store.chat(chatID),
+            let scope = InspectorViewController.skillScope(of: chat, members: store.bots(in: chat))
+        else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(PlaybookViewController(scope: scope))
+    }
+
     @objc func renameChat(_ sender: Any?) {
         guard case let .chat(chatID) = selection, let chat = store.chat(chatID), chat.isGroup else {
             NSSound.beep()
@@ -572,9 +608,62 @@ final class RootSplitViewController: NSSplitViewController {
         sidebar.scrollSelectionToVisible()
     }
 
+    /// The bot of the direct chat that is showing, shared as a template.
+    @objc func shareBotTemplate(_ sender: Any?) {
+        guard let bot = selectedDMBot else {
+            NSSound.beep()
+            return
+        }
+        presentAsSheet(TemplateShareViewController(bot: bot))
+    }
+
+    private var selectedDMBot: Bot? {
+        guard case let .chat(chatID) = selection, let chat = store.chat(chatID), chat.isDM else { return nil }
+        return store.bots(in: chat).first
+    }
+
     @objc func togglePinChat(_ sender: Any?) {
         guard case let .chat(chatID) = selection else { return }
         store.togglePin(chatID)
+    }
+
+    @objc func toggleHideChat(_ sender: Any?) {
+        guard case let .chat(chatID) = selection, let chat = store.chat(chatID) else { return }
+        store.setHidden(chatID, !chat.isHidden)
+    }
+
+    /// The menu item's tag is how long, in seconds; zero mutes the chat until it is unmuted.
+    @objc func muteChat(_ sender: NSMenuItem) {
+        guard case let .chat(chatID) = selection else { return }
+        store.mute(chatID, until: sender.tag > 0 ? Date().addingTimeInterval(TimeInterval(sender.tag)) : nil)
+    }
+
+    @objc func unmuteChat(_ sender: Any?) {
+        guard case let .chat(chatID) = selection else { return }
+        store.unmute(chatID)
+    }
+
+    /// The menu item names the section; one without lists the chat with the chats in none.
+    @objc func moveChatToSection(_ sender: NSMenuItem) {
+        guard case let .chat(chatID) = selection else { return }
+        store.moveChat(chatID, toSection: sender.representedObject as? String)
+    }
+
+    @objc func moveChatToNewSection(_ sender: Any?) {
+        guard case let .chat(chatID) = selection, let window = view.window else {
+            NSSound.beep()
+            return
+        }
+        SectionPrompt.name(title: L("New Section"), button: L("Create"), in: window) { [weak self] name in
+            self?.store.createSection(named: name, moving: chatID)
+        }
+    }
+
+    @objc func newSection(_ sender: Any?) {
+        guard let window = view.window else { return }
+        SectionPrompt.name(title: L("New Section"), button: L("Create"), in: window) { [weak self] name in
+            self?.store.createSection(named: name)
+        }
     }
 
     @objc func deleteChat(_ sender: Any?) {
@@ -586,7 +675,7 @@ final class RootSplitViewController: NSSplitViewController {
         }
         let alert = NSAlert()
         alert.messageText = L("Delete \"%@\"?", store.title(for: chat))
-        let deletesBot = chat.isDM && chat.botIDs.first.flatMap(store.bot) != nil
+        let deletesBot = chat.isBotDM && chat.botIDs.first.flatMap(store.bot) != nil
         alert.informativeText = deletesBot
             ? L("The bot, its routines, and this direct chat are removed from this Device and from paired Devices.")
             : L("The transcript is removed from this Device and from paired Devices.")
@@ -635,19 +724,40 @@ extension RootSplitViewController: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(deleteChat(_:)) {
             guard case let .chat(id) = selection, let chat = store.chat(id) else { return false }
-            menuItem.title = chat.isDM ? L("Delete Bot") : L("Delete Chat")
+            menuItem.title = chat.isBotDM ? L("Delete Bot") : L("Delete Chat")
             return true
         }
         if menuItem.action == #selector(addBotToChat(_:)) {
             guard case let .chat(id) = selection, let chat = store.chat(id) else { return false }
             return !botsAvailableToAdd(to: chat).isEmpty
         }
+        if menuItem.action == #selector(newSkill(_:)) {
+            guard case let .chat(id) = selection, let chat = store.chat(id) else { return false }
+            return InspectorViewController.skillScope(of: chat, members: store.bots(in: chat)) != nil
+        }
         if menuItem.action == #selector(renameChat(_:)) {
             guard case let .chat(id) = selection, let chat = store.chat(id) else { return false }
             return chat.isGroup
         }
+        if menuItem.action == #selector(shareBotTemplate(_:)) {
+            return selectedDMBot != nil
+        }
         if menuItem.action == #selector(goToChat(_:)) {
             return sidebar.chatSelection(forShortcut: menuItem.tag) != nil
+        }
+        let chatActions: [Selector] = [
+            #selector(togglePinChat(_:)), #selector(toggleHideChat(_:)), #selector(muteChat(_:)), #selector(unmuteChat(_:)),
+            #selector(moveChatToSection(_:)), #selector(moveChatToNewSection(_:)),
+        ]
+        if let action = menuItem.action, chatActions.contains(action) {
+            guard case let .chat(id) = selection, let chat = store.chat(id) else { return false }
+            // The Chat menu says what its items will do; a row's menu words them itself.
+            if menuItem.menu?.supermenu === NSApp.mainMenu {
+                if action == #selector(togglePinChat(_:)) { menuItem.title = chat.isPinned ? L("Unpin Chat") : L("Pin Chat") }
+                if action == #selector(toggleHideChat(_:)) { menuItem.title = chat.isHidden ? L("Show in Sidebar") : L("Hide Chat") }
+            }
+            if action == #selector(unmuteChat(_:)) { return chat.mute != nil }
+            return true
         }
         return true
     }

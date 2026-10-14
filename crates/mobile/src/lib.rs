@@ -45,7 +45,9 @@ pub struct PushNotice {
 #[uniffi::export]
 pub fn push_open(home: String, sealed: String) -> Option<PushNotice> {
     let machine: lorca::keys::MachineFile = lorca::config::read_json(&Config { home: PathBuf::from(home), port: 0 }.machine_path())?;
-    let notice = lorca::push::open(&machine.dek().ok()?, &lorca::keys::unb64(&sealed).ok()?).ok()?;
+    // Only the newest key's push key, as on an iPhone: a Device that kept an older key cannot
+    // make a notification show here.
+    let notice = lorca::push::open(machine.dek().ok()?.newest(), &lorca::keys::unb64(&sealed).ok()?).ok()?;
     Some(PushNotice { title: notice.title, subtitle: notice.subtitle, body: notice.body, chat_id: notice.chat_id })
 }
 
@@ -103,10 +105,11 @@ impl Core {
         response.to_string()
     }
 
-    /// The key pushes are sealed under, for the iOS notification service extension, which
-    /// runs outside the app and reads it from the shared keychain. `None` until paired.
+    /// The key pushes are sealed under, that of the newest account key, for the iOS
+    /// notification service extension, which runs outside the app and reads it from the shared
+    /// keychain. `None` until paired.
     pub fn push_key(&self) -> Option<Vec<u8>> {
-        self.app.dek().map(|dek| lorca::keys::push_key(&dek).to_vec())
+        self.app.dek().map(|keys| lorca::keys::push_key(keys.newest()).to_vec())
     }
 
     /// The app came to the foreground: sync now rather than after the backoff.
@@ -241,7 +244,11 @@ mod tests {
                 owner_bot_id: None,
                 description: None,
                 is_pinned: false,
+                section_id: None,
+                is_hidden: false,
+                mute: None,
                 created_at: 1.0,
+                channel: None,
             },
             unread_count: 0,
             usage: None,
@@ -263,6 +270,7 @@ mod tests {
                 target_bot_id: None,
                 script_command: None,
                 run: None,
+                agent: None,
             },
         );
         let tool_id = tool.id.clone();

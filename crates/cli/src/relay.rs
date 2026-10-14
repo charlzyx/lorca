@@ -81,7 +81,6 @@ pub struct BlobIn {
 #[allow(dead_code)]
 pub struct MachineIn {
     pub machine_pubkey: String,
-    pub box_pubkey: String,
     pub last_seen: i64,
     pub created_at: i64,
     /// The machine has a sync socket open on the relay.
@@ -89,21 +88,42 @@ pub struct MachineIn {
     pub online: bool,
 }
 
-/// What the relay says over the sync socket. It carries no data: a Device pulls after it.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Signal {
+/// What the relay said over the sync socket since the caller last looked. It carries no data:
+/// a Device pulls after it.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Signals {
     /// The identity has a blob this machine may read.
-    Blobs,
+    pub blobs: bool,
     /// The machine list or a machine's presence changed.
-    Machines,
+    pub machines: bool,
 }
 
-/// This machine's sync socket. It is online on the relay while this is open.
+/// This machine's sync socket. It is online on the relay while this is open. A task of its own
+/// reads it, so the relay's pings are answered and its close is noticed while a sync round runs:
+/// a busy turn writes a blob a second, the relay signals each one, and a socket read once per
+/// round fell behind until the relay heard no pong and showed this Device offline. Dropping it
+/// closes the socket.
 pub struct SyncSocket {
-    stream: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    /// When the relay has to have said something, a ping of its own or the answer to a probe.
-    due: tokio::time::Instant,
+    shared: Arc<SocketShared>,
+    reader: tokio::task::JoinHandle<()>,
 }
+
+#[derive(Default)]
+struct SocketShared {
+    heard: Mutex<Heard>,
+    /// Something was heard, or the socket ended.
+    changed: tokio::sync::Notify,
+    /// The caller asked for a probe.
+    probe: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct Heard {
+    signals: Signals,
+    ended: Option<String>,
+}
+
+type SocketStream = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// The relay pings every 25 s. A socket silent for this long is dead: the computer slept, the
 /// phone changed networks.
@@ -112,41 +132,98 @@ const SOCKET_SILENCE: std::time::Duration = std::time::Duration::from_secs(70);
 const PROBE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl SyncSocket {
-    /// The next signal. An error means the socket is gone and the caller connects again.
-    pub async fn next(&mut self) -> RelayResult<Signal> {
-        use futures::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::Message;
+    fn start(stream: SocketStream) -> SyncSocket {
+        let shared = Arc::new(SocketShared::default());
+        let reader = tokio::spawn(read_socket(stream, shared.clone()));
+        SyncSocket { shared, reader }
+    }
+
+    /// Every signal since the last call, once there is one. An error means the socket is gone
+    /// and the caller connects again.
+    pub async fn next(&mut self) -> RelayResult<Signals> {
         loop {
-            let message = tokio::time::timeout_at(self.due, self.stream.next())
-                .await
-                .map_err(|_| RelayError { status: None, message: "the sync socket went silent".into() })?
-                .ok_or_else(|| RelayError { status: None, message: "the relay closed the sync socket".into() })?
-                .map_err(socket_error)?;
-            self.due = tokio::time::Instant::now() + SOCKET_SILENCE;
-            match message {
-                Message::Text(text) => match serde_json::from_str::<Value>(&text).ok().as_ref().and_then(|v| v["type"].as_str()) {
-                    Some("blobs") => return Ok(Signal::Blobs),
-                    Some("machines") => return Ok(Signal::Machines),
-                    _ => {}
-                },
-                // The pong has to be flushed by hand when nothing else is written.
-                Message::Ping(_) => self.stream.flush().await.map_err(socket_error)?,
-                Message::Close(_) => return Err(RelayError { status: None, message: "the relay closed the sync socket".into() }),
-                _ => {}
+            let changed = self.shared.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            {
+                let mut heard = self.shared.heard.lock().unwrap();
+                let signals = std::mem::take(&mut heard.signals);
+                if signals != Signals::default() {
+                    return Ok(signals);
+                }
+                if let Some(message) = &heard.ended {
+                    return Err(RelayError { status: None, message: message.clone() });
+                }
             }
+            changed.await;
         }
     }
 
     /// Pings the relay, which has `PROBE_WAIT` to answer before `next` gives the socket up: a
     /// phone's may have died while the app was suspended, with nothing said on it since.
-    pub async fn probe(&mut self) -> RelayResult<()> {
-        use futures::SinkExt;
-        use tokio_tungstenite::tungstenite::Message;
-        self.due = self.due.min(tokio::time::Instant::now() + PROBE_WAIT);
-        tokio::time::timeout_at(self.due, self.stream.send(Message::Ping(Default::default())))
-            .await
-            .map_err(|_| RelayError { status: None, message: "the sync socket took no ping".into() })?
-            .map_err(socket_error)
+    pub fn probe(&self) {
+        self.shared.probe.notify_one();
+    }
+}
+
+impl Drop for SyncSocket {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+/// Reads the socket until it ends, answering pings as they come.
+async fn read_socket(mut stream: SocketStream, shared: Arc<SocketShared>) {
+    let ended = read_until_end(&mut stream, &shared).await;
+    shared.heard.lock().unwrap().ended = Some(ended);
+    shared.changed.notify_one();
+}
+
+/// Why the socket ended.
+async fn read_until_end(stream: &mut SocketStream, shared: &SocketShared) -> String {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    // When the relay has to have said something, a ping of its own or the answer to a probe.
+    let mut due = tokio::time::Instant::now() + SOCKET_SILENCE;
+    loop {
+        let message = tokio::select! {
+            message = tokio::time::timeout_at(due, stream.next()) => message,
+            _ = shared.probe.notified() => {
+                due = due.min(tokio::time::Instant::now() + PROBE_WAIT);
+                match tokio::time::timeout_at(due, stream.send(Message::Ping(Default::default()))).await {
+                    Ok(Ok(())) => continue,
+                    Ok(Err(error)) => return socket_error(error).message,
+                    Err(_) => return "the sync socket took no ping".into(),
+                }
+            }
+        };
+        let message = match message {
+            Err(_) => return "the sync socket went silent".into(),
+            Ok(None) => return "the relay closed the sync socket".into(),
+            Ok(Some(Err(error))) => return socket_error(error).message,
+            Ok(Some(Ok(message))) => message,
+        };
+        due = tokio::time::Instant::now() + SOCKET_SILENCE;
+        let signal = match message {
+            Message::Text(text) => serde_json::from_str::<Value>(&text).ok().and_then(|v| v["type"].as_str().map(str::to_string)),
+            // The pong has to be flushed by hand when nothing else is written.
+            Message::Ping(_) => {
+                if let Err(error) = stream.flush().await {
+                    return socket_error(error).message;
+                }
+                None
+            }
+            Message::Close(_) => return "the relay closed the sync socket".into(),
+            _ => None,
+        };
+        let mut heard = shared.heard.lock().unwrap();
+        match signal.as_deref() {
+            Some("blobs") => heard.signals.blobs = true,
+            Some("machines") => heard.signals.machines = true,
+            _ => continue,
+        }
+        drop(heard);
+        shared.changed.notify_one();
     }
 }
 
@@ -166,8 +243,17 @@ fn tls() -> Arc<rustls::ClientConfig> {
 
 /// The relay protocol this client speaks, sent as `Lorca-Protocol` with every request. A
 /// relay may refuse one it no longer serves with `426`. 1: group paging, `DELETE /v1/identity`.
-/// 2: `POST /v1/machines`.
-pub const PROTOCOL: u32 = 2;
+/// 2: `POST /v1/machines`. 3: durable subject records (tasks, reviews, attention, shared project context) and sealed event envelopes.
+/// 4: signed envelopes between Devices and generations of the account key, which a Device before
+/// them can neither open nor read.
+pub const PROTOCOL: u32 = 4;
+
+/// What a relay's auth challenge looks like: base64url, as long as a nonce is. Nothing else is
+/// signed in answer, so the challenge cannot get the machine key to sign an envelope or anything
+/// else that begins with a `/` or a NUL.
+pub fn is_challenge_nonce(nonce: &str) -> bool {
+    (16..=128).contains(&nonce.len()) && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
 
 const FILE_TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -264,6 +350,10 @@ impl RelayClient {
         )
         .await?;
         let nonce = challenge["nonce"].as_str().ok_or_else(|| RelayError { status: None, message: "no nonce".into() })?;
+        // The relay picks what the machine key signs here, and that key signs envelopes too.
+        if !is_challenge_nonce(nonce) {
+            return Err(RelayError { status: None, message: "the relay's challenge is not a nonce".into() });
+        }
         let verified = Self::check(
             self.http()
                 .post(format!("{url}/v1/auth/verify"))
@@ -341,7 +431,7 @@ impl RelayClient {
             .await
             .map_err(|_| RelayError { status: None, message: "the sync socket timed out connecting".into() })?
             .map_err(socket_error)?;
-        Ok(SyncSocket { stream, due: tokio::time::Instant::now() + SOCKET_SILENCE })
+        Ok(SyncSocket::start(stream))
     }
 
     pub async fn list_blobs(&self, url: &str, token: &str, since: i64, kinds: &str) -> RelayResult<(Vec<BlobIn>, i64)> {
@@ -411,6 +501,64 @@ impl RelayClient {
     pub async fn delete_group(&self, url: &str, token: &str, group: &str) -> RelayResult<()> {
         Self::check(self.http().delete(format!("{url}/v1/groups/{group}")).bearer_auth(token).send().await?).await?;
         Ok(())
+    }
+
+    // MARK: - Shared links
+
+    /// Puts a shared link's ciphertext under `id`, replacing what the id held.
+    pub async fn put_share(&self, url: &str, token: &str, id: &str, ciphertext: Vec<u8>) -> RelayResult<()> {
+        let request = self.http().put(format!("{url}/v1/shares/{id}")).bearer_auth(token);
+        Self::check(request.header(reqwest::header::CONTENT_TYPE, "application/octet-stream").body(ciphertext).send().await?).await?;
+        Ok(())
+    }
+
+    /// A shared link's ciphertext, which anyone may read; `None` when the relay holds nothing
+    /// under `id`.
+    pub async fn get_share(&self, url: &str, id: &str) -> RelayResult<Option<Vec<u8>>> {
+        let mut response = self.http().get(format!("{url}/v1/shares/{id}")).send().await?;
+        if !response.status().is_success() {
+            let error = Self::check(response).await.err().unwrap_or_else(|| RelayError { status: None, message: "Unexpected answer".into() });
+            // A relay older than shared links has no such route and says so without a word.
+            return if error.status == Some(404) && error.message == "No such link" { Ok(None) } else { Err(error) };
+        }
+        let max = crate::templates::format::MAX_BYTES + crate::crypto::ENVELOPE_OVERHEAD;
+        let too_large = || RelayError { status: None, message: "The shared link is larger than a template".into() };
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if chunk.len() > max - bytes.len() {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(Some(bytes))
+    }
+
+    pub async fn delete_share(&self, url: &str, token: &str, id: &str) -> RelayResult<()> {
+        Self::check(self.http().delete(format!("{url}/v1/shares/{id}")).bearer_auth(token).send().await?).await?;
+        Ok(())
+    }
+
+    /// The link a user follows to set a receiver up for this account: where the GitHub App
+    /// installs, or where they authorize it when it is installed on `subject`'s repository. A
+    /// relay without the receiver answers 404.
+    pub async fn receiver_setup(&self, url: &str, token: &str, receiver: &str, subject: Option<&str>) -> RelayResult<Value> {
+        Self::check(self.http().post(format!("{url}/v1/receivers/{receiver}/setup")).bearer_auth(token).json(&json!({ "subject": subject })).send().await?).await
+    }
+
+    /// Asks a receiver to seal its events about `subject` to this machine under a subscription's
+    /// secret. Answers `status`: `subscribed`, `needs_setup` (with `setup_url`), or `refused`
+    /// (with `message`). A relay without the receiver answers 404.
+    pub async fn receiver_subscribe(&self, url: &str, token: &str, receiver: &str, body: &Value) -> RelayResult<Value> {
+        Self::check(self.http().post(format!("{url}/v1/receivers/{receiver}/subscriptions")).bearer_auth(token).json(body).send().await?).await
+    }
+
+    /// Replaces the hash of the key a receiver's senders include.
+    pub async fn receiver_key(&self, url: &str, token: &str, receiver: &str, id: &str, key_hash: &str) -> RelayResult<()> {
+        Self::check(self.http().post(format!("{url}/v1/receivers/{receiver}/subscriptions/{id}/key")).bearer_auth(token).json(&json!({ "key_hash": key_hash })).send().await?).await.map(|_| ())
+    }
+
+    pub async fn receiver_unsubscribe(&self, url: &str, token: &str, receiver: &str, id: &str) -> RelayResult<()> {
+        Self::check(self.http().delete(format!("{url}/v1/receivers/{receiver}/subscriptions/{id}")).bearer_auth(token).send().await?).await.map(|_| ())
     }
 
     pub async fn machines(&self, url: &str, token: &str) -> RelayResult<(Vec<MachineIn>, i64)> {
@@ -513,5 +661,58 @@ fn decode_optional(value: &Value) -> RelayResult<Option<Vec<u8>>> {
             .map(Some)
             .map_err(|e| RelayError { status: None, message: format!("bad ciphertext: {e}") }),
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    /// A relay that floods the socket with signals while the sync round is busy elsewhere still
+    /// gets its pong, and the round then takes every signal at once.
+    #[tokio::test]
+    async fn a_flooded_socket_answers_pings_while_the_round_is_busy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let relay = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+            for _ in 0..2000 {
+                socket.send(Message::Text(r#"{"type":"blobs"}"#.into())).await.unwrap();
+            }
+            socket.send(Message::Text(r#"{"type":"machines"}"#.into())).await.unwrap();
+            socket.send(Message::Ping(Default::default())).await.unwrap();
+            let mut ponged = false;
+            let mut probed = false;
+            let waited = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while let Some(Ok(message)) = socket.next().await {
+                    match message {
+                        Message::Pong(_) => ponged = true,
+                        // The Device's probe.
+                        Message::Ping(_) => probed = true,
+                        _ => {}
+                    }
+                    if ponged && probed {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(waited.is_ok(), "pong {ponged}, probe {probed}");
+            socket.close(None).await.unwrap();
+        });
+
+        let (stream, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/sync")).await.unwrap();
+        let mut socket = SyncSocket::start(stream);
+        // The round is busy and reads no signal until the relay has said all it had to.
+        while !socket.shared.heard.lock().unwrap().signals.machines {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        socket.probe();
+        assert_eq!(socket.next().await.unwrap(), Signals { blobs: true, machines: true });
+        relay.await.unwrap();
+        assert!(socket.next().await.is_err());
     }
 }

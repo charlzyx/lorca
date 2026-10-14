@@ -6,6 +6,69 @@ Sparkle shows it in the update window. The Windows and Linux app's are in
 
 ## [Unreleased]
 
+## [1.0.17]
+
+- Right-click a brief in Attention and choose Dismiss to take it off the list on every Device; the coordinator's next brief shows again. A brief also leaves once every item it is about is resolved.
+- A bot resolves an Attention item it alone reported as soon as it sees the work is done, such as a run it approved or a pull request that merged, so you no longer clear them by hand.
+- A bot listening on Telegram sees the photos people send it, with a caption or without one, and an album's photos together as one message. The photo shows in the conversation on every Device.
+- Several outputs in a row from one bot, such as the proof files a coding agent saves, show as one list with a line each.
+- Auto-review allows an action by default, and holds only one it can name a rule for. A held action goes back to the bot before it reaches you.
+- The Mac app no longer updates itself. When a newer Lorca is out, it says so, and Download opens the desktop app's disk image in your browser.
+
+## [1.0.16]
+
+- While a bot's turn runs for a message a Telegram channel took, that chat shows the bot typing, and the reply stops it.
+- A custom provider's model offers the thinking levels its own list declares, `xhigh` and `max` included, and sends them as written.
+- Every bot has a built-in `lorca` skill that points at the docs on lorca.app, so it looks up how Lorca works instead of guessing.
+
+## [1.0.15]
+
+- A chat that asks for a channel gets one reply, "Pending approval", and once you allow it, the bot answers what people asked while it waited. A chat that never asks, such as a group where the bot only hears replies to it, can be added by its id with Add… on the channel's Chats row.
+- Conversations a Telegram or Slack channel keeps show the service's mark on their avatar, so they read apart from the bot's own DM.
+
+## [1.0.14]
+
+- A channel answers only in the chats you allow. Anyone can message a Telegram bot or add it to their group, so a chat you haven't allowed now asks first: the channel's row says A chat is waiting, and its sheet lists it under Asking to Chat with Allow and Ignore. Until you allow it, the bot does nothing there. A channel that listened in every chat its bot was in now listens nowhere until you allow its chats, and each chat asks once someone writes there.
+- Clicking an item in the Attention list that waits on a review opens its chat with the review on top, so you can approve or reject it right away.
+
+## [1.0.13]
+
+- A Telegram channel that listens for mentions or hashtags tells you when it can't hear them. While the Telegram bot's privacy mode is on, Telegram sends it only replies and commands in groups. The channel's row in the bot's Details now says Privacy mode on, its sheet says what it misses and how to turn privacy mode off, and the bot tells you when it sets up or changes such a channel.
+
+## [1.0.12]
+
+- Update Lorca on every Device: the Mac app, the phone app, the Windows and Linux app, and each computer that runs the command line. Devices now sign what they send each other through the relay, so a relay can no longer send work to your Runners in another Device's name, and unpairing a Device gives your account a new key, so the Device you unpaired cannot read what your account writes after that. An older Lorca cannot read what an updated Device sends, and once your Devices have updated, Lorca's relay asks older versions to update before they sync.
+- Each bot has Access, which only you change: how far it may use each plugin (Read only, Read and draft, Read and write, or No access), which of its tools it may call, and whether it may read or change files and run commands on its Runner. When a bot reaches a limit, the chat offers Edit Access… to change it. A bot you never set keeps full access.
+- A bot writes an email or a Slack message as a draft card in the chat, with its recipients, subject, text, and attachments editable in place, and nothing goes out until you press Send. Access › Messages turns drafts off for a bot, as Always Send does on a Slack card.
+- Routines no longer refuse what Auto-review would ask you about: they leave it for your review. The chat says so, the inspector lists what waits, and Approve runs exactly what the sheet shows, edits included.
+- Bots publish what they make, such as a report, a screenshot, or a chart, with what they checked: Passed, Failed, or Not verified, and the command they ran. An output shows as a card of its own in the chat, and the inspector lists a chat's outputs.
+- Tasks: work that outlasts one turn, with an owning bot, what done looks like, the next step, and the evidence once it's done. A chat with tasks has a Tasks section in the inspector, and File › New Task… adds one.
+- A bot that hands work to a teammate gets the result back in its chat when the teammate finishes, gets stuck, or is stopped, also from a Runner that was offline when it asked.
+- One list of what needs you: the coordinating bot keeps the reviews, blockers, and promises your bots report, with a short brief, behind a toolbar button that appears while something waits.
+- A group chat keeps a shared project context beside its transcript: a brief, goals, constraints, decisions, facts, links, and files, which every bot in the group reads. It's the Project section of the group's inspector.
+- Skills: Save as Skill… on a bot's reply, or Save as Standing Instruction… on your own message, writes a reusable instruction from the messages you pick, and it is used once you save it. Give Feedback… on a bot's message teaches the bot, which suggests changes to its routines and skills for you to accept.
+- Workflows set up an outcome in one place, such as meeting preparation, inbox triage, or watching a repository: the bot, the accounts it needs, and a sample run before it runs on a schedule. They're first in the marketplace, and on onboarding's last page.
+- Share a bot as a link: File › Share as Template… shows exactly what the template holds, keys and passwords removed, and the link opens a page that shows the bot and opens it in Lorca. Neither the relay nor lorca.app can read it.
+- Limits on a bot's turns, a routine's runs, and a task: spending, tokens, run time, retries, and plugin calls, with Resume when work stopped at one. Each plugin account has a call limit all bots share.
+- Browser profiles keep a bot's sign-ins on its Runner. Take Over gives you the bot's browser and Return to Bot hands it back, and Record teaches the bot a browser workflow by doing it once.
+- Gmail, Google Calendar, Google Drive, and Slack are in the marketplace, each with as many named accounts as you want, such as a Work Gmail beside a Personal one.
+- A bot asks for a password, a key, or a code on a card, and the value goes sealed to its Runner. It never enters the chat or the model. Settings › Secrets lists them, without their values.
+- Routines keep their timezone, run once when their Runner comes back from missed times (or skip them), and say when they need you. A bot can also set a one-time reminder, watch a pull request, run around your calendar's events, or run on a webhook, hosted on Lorca's relay.
+- A bot can listen on a Telegram or Slack account and answer people in their thread. The Feedback collector workflow files community feedback as GitHub issues.
+- A bot can run Claude Code or Codex on its Runner and supervise it, and the chat shows the run as a card with its transcript and its questions.
+- Sidebar sections, and Hide and Mute in a chat's menu. A muted chat sends no notification and stays out of the Dock badge, and the phone gets no push for the chat you have in front on a computer.
+- Stop also stops the work a turn handed off, and ends a turn within about 15 seconds whatever its tools do.
+- Any Device renames any Device: Rename… in its Settings › Devices pane.
+- A message you send while a bot waits on a background command, or on a browser you took over, reaches the bot at once.
+- On a Windows Runner, a bot's commands run in a terminal, so they can go to the background, take an answer, and show in Running tasks, and Stop ends one that held the turn.
+- Claude Haiku 5.5, and Sonnet 5.5's lower cache read price.
+- Only an app on this Mac that holds Lorca's token can connect to its command line.
+- Switching the language in Settings no longer quits the app.
+- Pick the model Auto-review runs: Settings › Providers › Review Models has each provider's, a small, fast one unless you pick another, including a decision model such as OpenCode Zen's Jev 1.13, which only allows an action or names what it could harm. Settings › Auto-review › Reviews with picks another provider to review for every bot.
+- Add Provider… offers decision APIs for Auto-review: OpenRouter Decisions, OpenAI Decisions, and TypeSafe, and a custom provider can speak System One or OpenAI Decisions. Bots never run on them.
+
+## [1.0.11]
+
 - A computer that runs the Lorca command line without the app keeps it up to date by itself: it installs each new release, signed by Lorca, and restarts into it once no bot is working there. Settings › Devices shows the version it runs, and Update when a newer one is out, so you can update it from this Mac. `lorca service install` keeps `lorca serve` running on such a computer, from login on.
 
 ## [0.1.10]

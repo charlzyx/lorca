@@ -30,6 +30,16 @@ func marketplaceTester(t *testing.T, loaded bool) (*mainWindow, *ui.Tester) {
 // marketClick clicks the element with `text`, runs what the store posted, and settles.
 func marketClick(t *testing.T, tt *ui.Tester, text string) {
 	t.Helper()
+	// New leading sections can put a catalog entry below the viewport. Scroll the
+	// actual native sheet before clicking, as a user does.
+	for range 16 {
+		rect, found := tt.Find(text)
+		if !found || (rect.Y >= 100 && rect.Y+rect.H <= 700) {
+			break
+		}
+		tt.Scroll(590, 380, 0, rect.Y-340)
+		tt.Frame()
+	}
 	if err := tt.Click(text); err != nil {
 		t.Fatalf("click %q: %v; texts %q", text, err, tt.Texts())
 	}
@@ -49,23 +59,32 @@ func wantText(t *testing.T, tt *ui.Tester, texts ...string) {
 
 func TestRenderMarketplace(t *testing.T) {
 	_, tt := marketplaceTester(t, true)
-	wantText(t, tt, L("Featured Plugins"), L("Featured Bots"), L("Productivity"), L("%d installed", 5))
+	wantText(t, tt, L("Featured Plugins"), L("Featured Bots"), L("Productivity"), L("%d installed", 6))
 	if !tt.Focused(L("Search plugins and bots")) {
 		t.Errorf("the search does not have the keyboard as the sheet opens")
 	}
 	renderBoth(t, tt, "market-home")
 
+	// The curated index can add featured entries ahead of GitHub. Find the installed plugin
+	// through the same search users have, rather than depending on the first preview rows.
+	marketClick(t, tt, L("Search plugins and bots"))
+	tt.Type("github")
+	tt.Frame()
 	marketClick(t, tt, "GitHub")
 	wantText(t, tt, L("Manage…"), L("On %@", "Workbench"), L("Servers"), L("Information"))
 	renderBoth(t, tt, "market-plugin-github")
 	marketClick(t, tt, L("Back"))
+	marketClick(t, tt, L("Search plugins and bots"))
+	tt.Key(ui.Cmd, ui.KeyA)
+	tt.Key(0, ui.KeyBackspace)
+	tt.Frame()
 
 	marketClick(t, tt, L("View all"))
 	wantText(t, tt, L("Plugins"), "Granola")
 	renderBoth(t, tt, "market-list")
 	marketClick(t, tt, L("Back"))
 
-	marketClick(t, tt, L("%d installed", 5))
+	marketClick(t, tt, L("%d installed", 6))
 	wantText(t, tt, L("Plugins on %@", "Workbench"), "deepwiki")
 	renderBoth(t, tt, "market-installed")
 	marketClick(t, tt, L("Back"))
@@ -123,7 +142,7 @@ func TestMarketplaceInstall(t *testing.T) {
 	wantText(t, tt, L("Manage…"), L("Added %@. Every bot on %@ can use it.", "notion", "Workbench"))
 	renderBoth(t, tt, "market-installed-notice")
 	marketClick(t, tt, L("Back"))
-	if _, ok := tt.Find(L("%d installed", 6)); !ok {
+	if _, ok := tt.Find(L("%d installed", 7)); !ok {
 		t.Errorf("the install is not counted; texts %q", tt.Texts())
 	}
 }

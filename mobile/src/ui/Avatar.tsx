@@ -1,11 +1,12 @@
 // Bot avatars: an accent gradient disc with the bot's SF Symbol, or the bot's own image once
 // this phone has it, a breathing green dot while the bot works (as in Grok Bot: 7 px,
-// bottom-right, scale 1 → 0.8 over 2.4 s), and a cluster for group chats.
+// bottom-right, scale 1 → 0.8 over 2.4 s), a cluster for group chats, and a channel
+// conversation's service mark on its corner.
 
 import { Image } from "expo-image";
 import { LinearGradient } from "expo-linear-gradient";
-import { useEffect } from "react";
-import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
+import { memo, useEffect } from "react";
+import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from "react-native-reanimated";
 import { engine } from "../core/engine";
 import type { Bot } from "../core/model";
@@ -42,14 +43,49 @@ export function AvatarDisc({ symbol, accent, uri, size, style }: { symbol: strin
   );
 }
 
-export function BotAvatar({ bot, size = 40, working = false, style }: { bot: Bot | undefined; size?: number; working?: boolean; style?: StyleProp<ViewStyle> }) {
+export const BotAvatar = memo(function BotAvatar({ bot, size = 40, working = false, service, style }: { bot: Bot | undefined; size?: number; working?: boolean; service?: string; style?: StyleProp<ViewStyle> }) {
   const p = usePalette();
   const uri = useBotAvatarUri(bot);
   return (
     <View style={[{ width: size, height: size }, style]}>
       <AvatarDisc symbol={bot?.symbol_name ?? "sparkles"} accent={bot?.accent ?? "indigo"} uri={uri} size={size} />
-      {working && <PresenceDot size={size} ring={p.background} />}
+      {service && <ServiceBadge service={service} size={size} ring={p.background} />}
+      {working && <PresenceDot size={size} ring={p.background} top={!!service} />}
     </View>
+  );
+});
+
+/// The services' real marks as round badges, rendered from the Mac's PluginLogo SVGs:
+/// Telegram's disc as it is, Slack's mark on white.
+const SERVICE_MARKS: Record<string, number> = {
+  telegram: require("../../assets/services/telegram.png"),
+  slack: require("../../assets/services/slack.png"),
+};
+
+/// A channel conversation's service mark over the avatar's bottom-right edge, ringed in the
+/// surface color.
+function ServiceBadge({ service, size, ring }: { service: string; size: number; ring: any }) {
+  const mark = SERVICE_MARKS[service];
+  if (!mark) return null;
+  const badge = Math.round(size * 0.4);
+  const ringWidth = Math.max(1.5, badge * 0.1);
+  const outer = badge + ringWidth * 2;
+  return (
+    <View style={[styles.badge, { width: outer, height: outer, borderRadius: outer / 2, backgroundColor: ring, right: -ringWidth, bottom: -ringWidth }]}>
+      <Image source={mark} style={{ width: badge, height: badge }} />
+    </View>
+  );
+}
+
+/// Someone outside Lorca: the first letter of their name on gray.
+export function ContactAvatar({ name, size = 40 }: { name: string; size?: number }) {
+  const initial = Array.from(name.trim())[0]?.toUpperCase() ?? "?";
+  return (
+    <LinearGradient colors={["#B0B0B5", "#8E8E93"]} style={[styles.disc, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={{ color: "#FFFFFF", fontSize: Math.round(size * 0.46), fontWeight: "600" }} allowFontScaling={false}>
+        {initial}
+      </Text>
+    </LinearGradient>
   );
 }
 
@@ -62,8 +98,10 @@ export function YouAvatar({ size = 40 }: { size?: number }) {
   );
 }
 
-/// The presence dot: a green disc with a ring in the surface color, pulsing while working.
-export function PresenceDot({ size, ring }: { size: number; ring: any }) {
+/// The presence dot: a green disc with a ring in the surface color, pulsing while working, at the
+/// top-right when a service's mark holds the bottom-right.
+/// Memoized: an animated style re-rendered reads its shared values back from the UI thread.
+export const PresenceDot = memo(function PresenceDot({ size, ring, top = false }: { size: number; ring: any; top?: boolean }) {
   const p = usePalette();
   const scale = useSharedValue(1);
   useEffect(() => {
@@ -83,20 +121,21 @@ export function PresenceDot({ size, ring }: { size: number; ring: any }) {
           borderRadius: (dot + ringWidth * 2) / 2,
           backgroundColor: ring,
           right: -ringWidth * 0.6,
-          bottom: -ringWidth * 0.6,
+          ...(top ? { top: -ringWidth * 0.6 } : { bottom: -ringWidth * 0.6 }),
         },
       ]}
     >
       <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: p.green }} />
     </Animated.View>
   );
-}
+});
 
 /// One to six members. One shows its avatar; two sit diagonally; more stack the first two
 /// with the rest implied, the way the Mac sidebar clusters them.
-export function AvatarCluster({ bots, size = 40, working = false }: { bots: Bot[]; size?: number; working?: boolean }) {
+/// `service` is a channel conversation's (telegram, slack), whose mark the avatar wears.
+export const AvatarCluster = memo(function AvatarCluster({ bots, size = 40, working = false, service }: { bots: Bot[]; size?: number; working?: boolean; service?: string }) {
   const p = usePalette();
-  if (bots.length <= 1) return <BotAvatar bot={bots[0]} size={size} working={working} />;
+  if (bots.length <= 1) return <BotAvatar bot={bots[0]} size={size} working={working} service={service} />;
   const small = size * 0.66;
   return (
     <View style={{ width: size, height: size }}>
@@ -107,9 +146,10 @@ export function AvatarCluster({ bots, size = 40, working = false }: { bots: Bot[
       {working && <PresenceDot size={size} ring={p.background} />}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   disc: { alignItems: "center", justifyContent: "center" },
   presence: { position: "absolute", alignItems: "center", justifyContent: "center" },
+  badge: { position: "absolute", alignItems: "center", justifyContent: "center" },
 });

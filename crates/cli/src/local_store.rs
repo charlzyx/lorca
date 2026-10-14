@@ -11,8 +11,15 @@ use serde::de::DeserializeOwned;
 use crate::app::{OutboxItem, SentJob, Slot, State};
 use crate::model::{Author, Body, LiveTurn, Message};
 
+/// The most blobs held for a sender or a key to land; what a relay delivers beyond it pushes the
+/// oldest out.
+const MAX_HELD_BLOBS: i64 = 1_000;
+/// How many opened envelopes and cancelled jobs are remembered past their expiry, newest first:
+/// the record of what a Device did does not hang on its clock alone.
+const KEPT_RECORDS: i64 = 20_000;
+
 pub struct LocalStore {
-    connection: Mutex<Connection>,
+    pub(crate) connection: Mutex<Connection>,
 }
 
 pub struct Upsert {
@@ -41,6 +48,10 @@ impl LocalStore {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
              PRAGMA journal_size_limit = 16777216;
+             CREATE TABLE IF NOT EXISTS runner_limits (
+                 purpose TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS metadata (
                  id                       INTEGER PRIMARY KEY CHECK (id = 1),
                  auto_review_json         TEXT NOT NULL,
@@ -53,6 +64,10 @@ impl LocalStore {
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS attention (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS bots (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL,
@@ -63,10 +78,40 @@ impl LocalStore {
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS workflow_setups (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS routines (
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL,
                  json     TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS shared_links (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS sidebar_sections (
+                 id       TEXT PRIMARY KEY NOT NULL,
+                 position INTEGER NOT NULL,
+                 json     TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS event_subscriptions (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS event_inbox (
+                 position INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT UNIQUE NOT NULL,
+                 subscription_id TEXT NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS event_inbox_subscription ON event_inbox(subscription_id, position);
+             CREATE TABLE IF NOT EXISTS channel_accounts (
+                 id TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS group_deletes (
                  id       TEXT PRIMARY KEY NOT NULL,
@@ -76,9 +121,32 @@ impl LocalStore {
                  id       TEXT PRIMARY KEY NOT NULL,
                  position INTEGER NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS device_names (
+                 id   TEXT PRIMARY KEY NOT NULL,
+                 name TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS device_seen (
                  id      TEXT PRIMARY KEY NOT NULL,
                  seen_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS unpaired_machines (
+                 id TEXT PRIMARY KEY NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS held_blobs (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 kind       TEXT NOT NULL,
+                 ciphertext BLOB NOT NULL,
+                 held_at    INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS cancelled_jobs (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 expires_at INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS opened_envelopes (
+                 sender     TEXT NOT NULL,
+                 id         TEXT NOT NULL,
+                 expires_at INTEGER NOT NULL,
+                 PRIMARY KEY (sender, id)
              );
              CREATE TABLE IF NOT EXISTS applied_blobs (
                  id       TEXT PRIMARY KEY NOT NULL,
@@ -127,9 +195,19 @@ impl LocalStore {
                  json    TEXT NOT NULL,
                  PRIMARY KEY (chat_id, bot_id, key)
              );
+             CREATE TABLE IF NOT EXISTS project_entries (
+                 chat_id TEXT NOT NULL,
+                 id TEXT NOT NULL,
+                 ciphertext BLOB NOT NULL,
+                 PRIMARY KEY (chat_id, id)
+             );
              CREATE TABLE IF NOT EXISTS device_turns (
                  id   TEXT PRIMARY KEY NOT NULL,
                  json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS device_watching (
+                 id      TEXT PRIMARY KEY NOT NULL,
+                 chat_id TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS sent_jobs (
                  id         TEXT PRIMARY KEY NOT NULL,
@@ -139,8 +217,17 @@ impl LocalStore {
                  runner_id  TEXT NOT NULL,
                  sent_at    REAL NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS handoffs (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS review_items (
+                 id         TEXT PRIMARY KEY NOT NULL,
+                 ciphertext BLOB NOT NULL
+             );
              PRAGMA user_version = 1;",
         )?;
+        crate::tasks::storage::initialize(&connection)?;
         crate::config::set_private(path)?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -170,8 +257,13 @@ impl LocalStore {
             devices: load_json_table(&connection, "devices")?,
             bots: load_json_table(&connection, "bots")?,
             chats: load_json_table(&connection, "chats")?,
+            sections: load_json_table(&connection, "sidebar_sections")?,
             routines: load_json_table(&connection, "routines")?,
+            workflows: load_json_table(&connection, "workflow_setups")?,
             auto_review,
+            shared_links: load_json_table(&connection, "shared_links")?,
+            device_names: load_device_names(&connection)?,
+            unpaired: load_id_set(&connection, "unpaired_machines")?,
             last_seq,
             group_deletes: load_ordered_ids(&connection, "group_deletes")?,
             blob_deletes: load_ordered_ids(&connection, "blob_deletes")?,
@@ -181,6 +273,7 @@ impl LocalStore {
             device_online: Default::default(),
             turns_online: Default::default(),
             device_turns: load_device_turns(&connection)?,
+            device_watching: load_device_watching(&connection)?,
             applied_blob_ids: load_ordered_ids(&connection, "applied_blobs")?,
             listed_machines: Default::default(),
             unknown_machines: Default::default(),
@@ -208,6 +301,7 @@ impl LocalStore {
             tx.execute("DELETE FROM messages WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM chat_history WHERE chat_id = ?1", [chat_id])?;
             tx.execute("DELETE FROM codemode_store WHERE chat_id = ?1", [chat_id])?;
+            tx.execute("DELETE FROM project_entries WHERE chat_id = ?1", [chat_id])?;
             tx.execute(
                 "DELETE FROM outbox WHERE group_name = ?1",
                 [crate::model::relay_name(chat_id)],
@@ -380,6 +474,19 @@ impl LocalStore {
         collect_messages(rows)
     }
 
+    /// Immutable output-version rows, without materializing unrelated tool transcripts.
+    pub fn outputs(&self, chat_id: &str, task_id: Option<&str>) -> anyhow::Result<Vec<Message>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT message_json FROM messages WHERE chat_id = ?1
+             AND json_type(message_json, '$.output') = 'object'
+             AND (?2 IS NULL OR json_extract(message_json, '$.output.task_id') = ?2)
+             ORDER BY position",
+        )?;
+        let rows = statement.query_map(params![chat_id, task_id], |row| row.get::<_, String>(0))?;
+        collect_messages(rows)
+    }
+
     /// The model-visible ordering, with a valid compaction cursor taking precedence over the
     /// fallback limit. Without a valid cursor only the newest `limit` rows are materialized.
     pub fn context(
@@ -491,6 +598,20 @@ impl LocalStore {
         messages.reverse();
         let left_out = (total as usize).saturating_sub(messages.len());
         Ok((messages, left_out))
+    }
+
+    /// The chat's newest messages, oldest first: at least the newest `scan`, from a position
+    /// rounded down to a multiple of `align`, so that the window starts at the same message
+    /// while the chat grows by up to `align` and a provider's prompt cache keeps its prefix.
+    pub fn recent(&self, chat_id: &str, scan: usize, align: usize) -> anyhow::Result<Vec<Message>> {
+        let connection = self.connection.lock().unwrap();
+        let newest: Option<i64> = connection.query_row("SELECT MAX(position) FROM messages WHERE chat_id = ?1", params![chat_id], |row| row.get(0))?;
+        let Some(newest) = newest else { return Ok(Vec::new()) };
+        let align = align.max(1) as i64;
+        let start = (newest - scan as i64).max(0) / align * align;
+        let mut statement = connection.prepare("SELECT message_json FROM messages WHERE chat_id = ?1 AND position >= ?2 ORDER BY position")?;
+        let messages = collect_messages(statement.query_map(params![chat_id, start], |row| row.get::<_, String>(0))?);
+        messages
     }
 
     pub fn messages_after(&self, chat_id: &str, message_id: &str) -> anyhow::Result<Vec<Message>> {
@@ -857,6 +978,16 @@ impl LocalStore {
                 tx.execute("DELETE FROM codemode_store WHERE chat_id = ?1", [&chat_id])?;
             }
         }
+        let project_chats: Vec<String> = {
+            let mut statement = tx.prepare("SELECT DISTINCT chat_id FROM project_entries")?;
+            let rows = statement.query_map([], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for chat_id in project_chats {
+            if !valid.contains(chat_id.as_str()) {
+                tx.execute("DELETE FROM project_entries WHERE chat_id = ?1", [&chat_id])?;
+            }
+        }
         let queued_groups: Vec<String> = {
             let mut statement =
                 tx.prepare("SELECT DISTINCT group_name FROM outbox WHERE group_name IS NOT NULL")?;
@@ -910,6 +1041,36 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Project payloads are already encrypted. A local revision and its upload commit together.
+    /// Existing ids are immutable, including across replay and remote echoes.
+    pub fn insert_project_entry(&self, chat_id: &str, id: &str, ciphertext: &[u8], upload: Option<&OutboxItem>) -> anyhow::Result<bool> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        let inserted = tx.execute(
+            "INSERT OR IGNORE INTO project_entries (chat_id, id, ciphertext) VALUES (?1, ?2, ?3)",
+            params![chat_id, id, ciphertext],
+        )? > 0;
+        if inserted {
+            if let Some(upload) = upload {
+                queue_outbox_tx(&tx, upload)?;
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    pub fn has_project_entries(&self) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM project_entries)", [], |row| row.get(0))?)
+    }
+
+    pub fn project_entries(&self, chat_id: &str) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM project_entries WHERE chat_id = ?1 ORDER BY id")?;
+        let rows = statement.query_map([chat_id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn remove_outbox_with_state(&self, id: &str, state: &State) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
@@ -961,6 +1122,20 @@ impl LocalStore {
         Ok(())
     }
 
+    /// The chat another computer's latest machine blob says it shows, or none.
+    pub fn set_device_watching(&self, device_id: &str, chat_id: Option<&str>) -> anyhow::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        match chat_id {
+            Some(chat_id) => connection.execute(
+                "INSERT INTO device_watching (id, chat_id) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET chat_id = excluded.chat_id",
+                params![device_id, chat_id],
+            )?,
+            None => connection.execute("DELETE FROM device_watching WHERE id = ?1", [device_id])?,
+        };
+        Ok(())
+    }
+
     /// Keeps a job sealed to another Runner until its wait ends.
     pub fn insert_sent_job(&self, job: &SentJob) -> anyhow::Result<()> {
         let connection = self.connection.lock().unwrap();
@@ -1009,24 +1184,169 @@ impl LocalStore {
             .map_err(Into::into)
     }
 
+    /// Handoff contracts and reports stay encrypted even in the local database. Queue the
+    /// corresponding relay update and job in the same transaction as admission.
+    pub fn save_handoff(&self, id: &str, ciphertext: &[u8], outbox: &[OutboxItem]) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute("INSERT INTO handoffs (id, ciphertext) VALUES (?1, ?2)
+                    ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext", params![id, ciphertext])?;
+        for item in outbox {
+            queue_outbox_tx(&tx, item)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn handoff(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.connection.lock().unwrap().query_row("SELECT ciphertext FROM handoffs WHERE id = ?1", [id], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
+    pub fn handoffs(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM handoffs ORDER BY id")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
+    /// Review contents and state are encrypted. Comparing the previous ciphertext makes a
+    /// claim atomic even when another CLI process has opened the same database.
+    pub fn save_review(&self, id: &str, previous: Option<&[u8]>, ciphertext: &[u8], upload: Option<&OutboxItem>) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        let changed = match previous {
+            Some(previous) => tx.execute("UPDATE review_items SET ciphertext = ?1 WHERE id = ?2 AND ciphertext = ?3", params![ciphertext, id, previous])?,
+            None => tx.execute("INSERT OR IGNORE INTO review_items (id, ciphertext) VALUES (?1, ?2)", params![id, ciphertext])?,
+        };
+        anyhow::ensure!(changed == 1, "This changed on another Device. Review it again.");
+        if let Some(item) = upload {
+            queue_outbox_tx(&tx, item)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn review(&self, id: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.connection.lock().unwrap().query_row("SELECT ciphertext FROM review_items WHERE id = ?1", [id], |row| row.get(0)).optional().map_err(Into::into)
+    }
+
+    pub fn reviews(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT ciphertext FROM review_items ORDER BY id")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Records an envelope another Device sealed to this one as opened, until it is too old to
+    /// open anyway. The newest `KEPT_RECORDS` stay past that, so a clock that jumps ahead and
+    /// back does not make one new again. False when it was opened before, under whatever blob id.
+    pub fn remember_envelope(&self, sender: &str, id: &str, expires_at: i64) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "DELETE FROM opened_envelopes WHERE expires_at < ?1 AND rowid NOT IN (SELECT rowid FROM opened_envelopes ORDER BY rowid DESC LIMIT ?2)",
+            params![crate::config::now_unix(), KEPT_RECORDS],
+        )?;
+        let added = connection.execute(
+            "INSERT OR IGNORE INTO opened_envelopes (sender, id, expires_at) VALUES (?1, ?2, ?3)",
+            params![sender, id, expires_at],
+        )?;
+        Ok(added == 1)
+    }
+
+    /// Keeps a blob this Device cannot take yet, by its blob id, to apply when it can: an
+    /// envelope from a Device it has no record of, or a record under an account key it does not
+    /// hold yet. One held already stays as it was; the oldest go past `MAX_HELD_BLOBS`.
+    pub fn hold_blob(&self, id: &str, kind: &str, ciphertext: &[u8]) -> anyhow::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "INSERT OR IGNORE INTO held_blobs (id, kind, ciphertext, held_at) VALUES (?1, ?2, ?3, ?4)",
+            params![id, kind, ciphertext, crate::config::now_unix()],
+        )?;
+        connection.execute(
+            "DELETE FROM held_blobs WHERE id NOT IN (SELECT id FROM held_blobs ORDER BY held_at DESC, rowid DESC LIMIT ?1)",
+            [MAX_HELD_BLOBS],
+        )?;
+        Ok(())
+    }
+
+    /// The blobs held, oldest first, without those held longer than `max_age`.
+    pub fn held_blobs(&self, max_age: i64) -> anyhow::Result<Vec<(String, String, Vec<u8>)>> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute("DELETE FROM held_blobs WHERE held_at < ?1", [crate::config::now_unix() - max_age])?;
+        let mut statement = connection.prepare("SELECT id, kind, ciphertext FROM held_blobs ORDER BY held_at, rowid")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+    }
+
+    pub fn release_blob(&self, id: &str) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute("DELETE FROM held_blobs WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Records that another Device stopped `job_id`, so the job does not start when the relay
+    /// delivers it after its cancellation.
+    pub fn cancel_job(&self, job_id: &str, expires_at: i64) -> anyhow::Result<()> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "DELETE FROM cancelled_jobs WHERE expires_at < ?1 AND rowid NOT IN (SELECT rowid FROM cancelled_jobs ORDER BY rowid DESC LIMIT ?2)",
+            params![crate::config::now_unix(), KEPT_RECORDS],
+        )?;
+        connection.execute(
+            "INSERT INTO cancelled_jobs (id, expires_at) VALUES (?1, ?2) ON CONFLICT(id) DO UPDATE SET expires_at = excluded.expires_at",
+            params![job_id, expires_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn job_cancelled(&self, job_id: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        Ok(connection.query_row("SELECT 1 FROM cancelled_jobs WHERE id = ?1", [job_id], |_| Ok(())).optional()?.is_some())
+    }
+
+    /// Whether a version of `slot` waits in the outbox.
+    pub fn outbox_has_slot(&self, slot: &str) -> anyhow::Result<bool> {
+        let connection = self.connection.lock().unwrap();
+        Ok(connection.query_row("SELECT 1 FROM outbox WHERE slot_name = ?1", [slot], |_| Ok(())).optional()?.is_some())
+    }
+
     pub fn clear(&self) -> anyhow::Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let tx = connection.transaction()?;
         for table in [
+            "runner_limits",
             "metadata",
+            "attention",
             "devices",
             "bots",
             "chats",
             "routines",
+            "workflow_setups",
+            "shared_links",
+            "sidebar_sections",
+            "event_subscriptions",
+            "event_inbox",
+            "channel_accounts",
             "group_deletes",
             "blob_deletes",
             "device_seen",
+            "device_names",
+            "unpaired_machines",
+            "opened_envelopes",
+            "held_blobs",
+            "cancelled_jobs",
             "applied_blobs",
             "messages",
             "chat_history",
             "outbox",
             "sent_jobs",
             "device_turns",
+            "device_watching",
+            "handoffs",
+            "review_items",
+            "durable_tasks",
+            "task_receipts",
+            "task_runs",
+            "project_entries",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -1034,9 +1354,56 @@ impl LocalStore {
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     }
+
+    /// Attention contents stay encrypted at rest, including resolutions and preferences.
+    pub fn attention_rows(&self) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id, ciphertext FROM attention ORDER BY id")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn put_attention(&self, id: &str, ciphertext: &[u8]) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        Ok(())
+    }
+
+    /// Local content and its encrypted relay write commit together, so a crash cannot leave
+    /// a successfully saved attention update without a durable upload.
+    pub fn queue_attention(&self, id: &str, ciphertext: &[u8], item: &OutboxItem) -> anyhow::Result<()> {
+        let mut connection = self.connection.lock().unwrap();
+        let tx = connection.transaction()?;
+        tx.execute(
+            "INSERT INTO attention (id, ciphertext) VALUES (?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![id, ciphertext],
+        )?;
+        queue_outbox_tx(&tx, item)?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Runner accounting/configuration is authenticated account ciphertext, including its
+    /// resumable Job payloads. The purpose is bound as AEAD associated data by the caller.
+    pub fn runner_limits(&self, purpose: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Ok(self.connection.lock().unwrap().query_row(
+            "SELECT ciphertext FROM runner_limits WHERE purpose = ?1", [purpose], |row| row.get(0),
+        ).optional()?)
+    }
+
+    pub fn set_runner_limits(&self, purpose: &str, ciphertext: &[u8]) -> anyhow::Result<()> {
+        self.connection.lock().unwrap().execute(
+            "INSERT INTO runner_limits (purpose, ciphertext) VALUES (?1, ?2) ON CONFLICT(purpose) DO UPDATE SET ciphertext = excluded.ciphertext",
+            params![purpose, ciphertext],
+        )?;
+        Ok(())
+    }
 }
 
-fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
+pub(crate) fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()> {
     let waiting: Option<i64> = match item.slot.as_ref() {
         Some(slot) => tx
             .query_row(
@@ -1049,6 +1416,20 @@ fn queue_outbox_tx(tx: &Transaction<'_>, item: &OutboxItem) -> anyhow::Result<()
     };
     let slot_name = item.slot.as_ref().map(|slot| slot.name.as_str());
     let keep_first = item.slot.as_ref().is_some_and(|slot| slot.keep_first);
+    // The account's keyrings go ahead of everything waiting, so another Device reads one before
+    // what its newest key encrypts.
+    if item.kind == "key" {
+        if waiting.is_some() {
+            tx.execute("DELETE FROM outbox WHERE slot_name = ?1", [slot_name])?;
+        }
+        let front: i64 = tx.query_row("SELECT COALESCE(MIN(position), 1) - 1 FROM outbox", [], |row| row.get(0))?;
+        tx.execute(
+            "INSERT INTO outbox (position, id, kind, recipient, ciphertext, slot_name, slot_keep_first, group_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![front, item.id, item.kind, item.recipient, item.ciphertext, slot_name, keep_first, item.group],
+        )?;
+        return Ok(());
+    }
     match waiting {
         Some(position) => {
             tx.execute(
@@ -1107,10 +1488,32 @@ fn save_state_tx(tx: &Transaction<'_>, state: &State) -> anyhow::Result<()> {
             .map(|routine| (routine.id.clone(), serde_json::to_string(routine)))
             .collect::<Vec<_>>(),
     )?;
+    sync_json_table(
+        tx, "workflow_setups",
+        state.workflows.iter().map(|setup| (setup.id.clone(), serde_json::to_string(setup))).collect::<Vec<_>>(),
+    )?;
+    sync_json_table(
+        tx,
+        "sidebar_sections",
+        state.sections.iter().map(|section| (section.id.clone(), serde_json::to_string(section))).collect::<Vec<_>>(),
+    )?;
+    sync_json_table(
+        tx,
+        "shared_links",
+        state
+            .shared_links
+            .iter()
+            .map(|link| (link.id.clone(), serde_json::to_string(link)))
+            .collect::<Vec<_>>(),
+    )?;
     sync_ordered_ids(tx, "group_deletes", &state.group_deletes)?;
     sync_ordered_ids(tx, "blob_deletes", &state.blob_deletes)?;
     sync_ordered_ids(tx, "applied_blobs", &state.applied_blob_ids)?;
     sync_device_seen(tx, &state.device_seen)?;
+    sync_device_names(tx, &state.device_names)?;
+    for id in &state.unpaired {
+        tx.execute("INSERT OR IGNORE INTO unpaired_machines (id) VALUES (?1)", [id])?;
+    }
     Ok(())
 }
 
@@ -1158,6 +1561,7 @@ fn message_search_text(message: &Message) -> Option<String> {
         Body::Handoff { reason, .. } => reason.clone(),
         Body::Notice { text, .. } => text.clone(),
         Body::Permission { summary, .. } => summary.clone(),
+        Body::Draft { draft, .. } => format!("{} {} {}", draft.to.join(" "), draft.subject, draft.body),
         Body::Tool { .. } => return None,
     };
     let text = text.trim().to_string();
@@ -1297,6 +1701,24 @@ fn sync_device_seen(
     delete_missing_from(tx, "device_seen", existing.keys(), &retained)
 }
 
+fn sync_device_names(tx: &Transaction<'_>, names: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+    let existing: std::collections::HashMap<String, String> = {
+        let mut statement = tx.prepare("SELECT id, name FROM device_names")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, name) in names {
+        if existing.get(id) != Some(name) {
+            tx.execute(
+                "INSERT INTO device_names (id, name) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+                params![id, name],
+            )?;
+        }
+    }
+    delete_missing_from(tx, "device_names", existing.keys(), &names.keys().cloned().collect())
+}
+
 fn delete_missing_from<'a>(
     tx: &Transaction<'_>,
     table: &str,
@@ -1346,6 +1768,24 @@ fn load_device_turns(
     .collect()
 }
 
+fn load_device_watching(connection: &Connection) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut statement = connection.prepare("SELECT id, chat_id FROM device_watching")?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+fn load_id_set(connection: &Connection, table: &str) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let mut statement = connection.prepare(&format!("SELECT id FROM {table}"))?;
+    let rows = statement.query_map([], |row| row.get(0))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
+fn load_device_names(connection: &Connection) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+    let mut statement = connection.prepare("SELECT id, name FROM device_names")?;
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect::<rusqlite::Result<_>>().map_err(Into::into)
+}
+
 fn load_device_seen(
     connection: &Connection,
 ) -> anyhow::Result<std::collections::HashMap<String, i64>> {
@@ -1369,6 +1809,7 @@ fn author_columns(author: &Author) -> (&'static str, Option<&str>) {
         Author::You => ("you", None),
         Author::Bot { bot_id } => ("bot", Some(bot_id)),
         Author::System => ("system", None),
+        Author::Contact { .. } => ("contact", None),
     }
 }
 
@@ -1379,6 +1820,7 @@ fn body_kind(body: &Body) -> &'static str {
         Body::Handoff { .. } => "handoff",
         Body::Notice { .. } => "notice",
         Body::Permission { .. } => "permission",
+        Body::Draft { .. } => "draft",
     }
 }
 

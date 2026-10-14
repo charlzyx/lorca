@@ -42,6 +42,12 @@ enum Theme {
         dark: { NSColor(calibratedWhite: 1, alpha: 0.06) }
     )
 
+    /// Fills a published output's card in the transcript, apart from the bubbles.
+    static let outputCard = dynamic(
+        light: { .white },
+        dark: { NSColor(calibratedWhite: 1, alpha: 0.05) }
+    )
+
     /// Sits inside a bubble, so it has to stay legible against the bubble fill
     /// rather than the transcript behind it.
     static let codeBackground = dynamic(

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"runtime"
 	"slices"
 	"strings"
 
+	"github.com/egoist/lorca/desktop/model"
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
@@ -39,6 +41,26 @@ func chatSelected() bool {
 	return m != nil && m.selection.ChatID != "" && store.Chat(m.selection.ChatID) != nil
 }
 
+// selectedDMBot is the bot of the direct chat that is showing.
+func selectedDMBot() *model.Bot {
+	if !chatSelected() {
+		return nil
+	}
+	chat := store.Chat(app.main.selection.ChatID)
+	if !chat.IsDM() || len(chat.BotIDs) == 0 {
+		return nil
+	}
+	return store.Bot(chat.BotIDs[0])
+}
+
+// selectedChat is the chat that is showing, or nil.
+func selectedChat() *model.Chat {
+	if !chatSelected() {
+		return nil
+	}
+	return store.Chat(app.main.selection.ChatID)
+}
+
 func selectedChatIsGroup() bool {
 	if !chatSelected() {
 		return false
@@ -49,7 +71,10 @@ func selectedChatIsGroup() bool {
 // commandTable is every command, in menu order.
 var commandTable = []command{
 	{id: "newBot", title: func() string { return L("New Bot…") }, accelerator: "CmdOrCtrl+N", opensMain: true},
+	{id: "importBotTemplate", title: func() string { return L("New Bot from Template…") }, opensMain: true},
 	{id: "newGroupChat", title: func() string { return L("New Group Chat…") }, accelerator: "CmdOrCtrl+Shift+N", opensMain: true},
+	{id: "shareBotTemplate", title: func() string { return L("Share as Template…") }, enabled: func() bool { return selectedDMBot() != nil }},
+	{id: "newTask", title: func() string { return L("New Task…") }, enabled: chatSelected},
 	{id: "marketplace", title: func() string { return L("Marketplace…") }, accelerator: "CmdOrCtrl+Shift+M", opensMain: true},
 	{id: "pairDevice", title: func() string { return L("Pair a Device…") }, accelerator: "CmdOrCtrl+Shift+P", opensMain: true},
 	{id: "settings", title: func() string { return L("Settings…") }, accelerator: "CmdOrCtrl+,"},
@@ -57,6 +82,7 @@ var commandTable = []command{
 	{id: "quit", title: func() string { return L("Quit %@", appName()) }, accelerator: "CmdOrCtrl+Q", role: mygo.RoleQuit},
 	{id: "find", title: func() string { return L("Find…") }, accelerator: "CmdOrCtrl+F", opensMain: true},
 	{id: "palette", title: func() string { return L("Command Palette…") }, accelerator: "CmdOrCtrl+K", opensMain: true},
+	{id: "attention", title: func() string { return L("Attention") }, accelerator: "CmdOrCtrl+Shift+A", opensMain: true, enabled: func() bool { return app.main == nil || !app.main.isSettings() }},
 	{id: "toggleSidebar", title: func() string { return L("Toggle Sidebar") }, accelerator: "CmdOrCtrl+B"},
 	{id: "toggleInspector", title: func() string { return L("Toggle Inspector") }, accelerator: "CmdOrCtrl+Shift+B"},
 	{id: "scrollToLatest", title: func() string { return L("Scroll to Latest") }, accelerator: "CmdOrCtrl+J", enabled: chatSelected},
@@ -70,7 +96,37 @@ var commandTable = []command{
 		return chatSelected() && len(botsAvailableToAdd(app.main.selection.ChatID)) > 0
 	}},
 	{id: "renameChat", title: func() string { return L("Rename Chat…") }, accelerator: "CmdOrCtrl+R", enabled: selectedChatIsGroup},
-	{id: "pinChat", title: func() string { return L("Pin Chat") }, accelerator: "CmdOrCtrl+P", enabled: chatSelected},
+	{id: "pinChat", title: func() string {
+		if chat := selectedChat(); chat != nil && chat.IsPinned {
+			return L("Unpin Chat")
+		}
+		return L("Pin Chat")
+	}, accelerator: "CmdOrCtrl+P", enabled: chatSelected},
+	// Mute Chat's spans, in its submenu, for a chat with its alerts on; Unmute Chat for a muted one.
+	{id: "muteHour", title: func() string { return L("For 1 Hour") }, enabled: chatSelected},
+	{id: "muteEightHours", title: func() string { return L("For 8 Hours") }, enabled: chatSelected},
+	{id: "muteWeek", title: func() string { return L("For 1 Week") }, enabled: chatSelected},
+	{id: "muteAlways", title: func() string { return L("Always") }, enabled: chatSelected},
+	{id: "unmuteChat", title: func() string { return L("Unmute Chat") }, enabled: func() bool {
+		chat := selectedChat()
+		return chat != nil && chat.Mute != nil
+	}},
+	{id: "moveToNewSection", title: func() string { return L("New Section…") }, enabled: chatSelected},
+	{id: "hideChat", title: func() string {
+		if chat := selectedChat(); chat != nil && chat.IsHidden {
+			return L("Show in Sidebar")
+		}
+		return L("Hide Chat")
+	}, enabled: chatSelected},
+	{id: "newSection", title: func() string { return L("New Section…") }, opensMain: true},
+	{id: "newSkill", title: func() string { return L("New Skill…") }, enabled: func() bool {
+		if !chatSelected() {
+			return false
+		}
+		chat := store.Chat(app.main.selection.ChatID)
+		_, ok := model.SkillScope(chat, store.BotsIn(chat))
+		return ok
+	}},
 	{id: "stopResponding", title: func() string { return L("Stop Responding") }, accelerator: "CmdOrCtrl+.", enabled: chatSelected},
 	{
 		// The Mac's ⌃B has no counterpart here: Ctrl+B toggles the sidebar.
@@ -78,7 +134,7 @@ var commandTable = []command{
 		enabled: func() bool { return chatSelected() && len(store.ForegroundCommands(app.main.selection.ChatID)) > 0 },
 	},
 	{id: "deleteChat", title: func() string {
-		if chatSelected() && store.Chat(app.main.selection.ChatID).IsDM() {
+		if chatSelected() && store.Chat(app.main.selection.ChatID).IsBotDM() {
 			return L("Delete Bot")
 		}
 		return L("Delete Chat")
@@ -286,7 +342,7 @@ func windowMenuBar(kind windowKind) *mygo.Menu {
 	}
 	help = append(help, sep(), at("about"))
 	return mygo.NewMenu([]*mygo.MenuItem{
-		submenu(L("File"), at("newBot"), at("newGroupChat"), sep(), at("marketplace"), sep(), at("pairDevice"), sep(), at("settings"), sep(), at("closeWindow"), at("quit")),
+		submenu(L("File"), at("newBot"), at("importBotTemplate"), at("newGroupChat"), at("newTask"), at("newSection"), sep(), at("shareBotTemplate"), sep(), at("marketplace"), sep(), at("pairDevice"), sep(), at("settings"), sep(), at("closeWindow"), at("quit")),
 		submenu(L("Edit"),
 			&mygo.MenuItem{Role: mygo.RoleUndo, Label: L("Undo")},
 			&mygo.MenuItem{Role: mygo.RoleRedo, Label: L("Redo")},
@@ -299,18 +355,79 @@ func windowMenuBar(kind windowKind) *mygo.Menu {
 			sep(),
 			at("find"),
 		),
-		submenu(L("View"), at("palette"), sep(), at("toggleSidebar"), at("toggleInspector"), sep(), at("scrollToLatest"), sep(), at("fullScreen")),
-		submenu(L("Chat"), at("addBot"), at("renameChat"), at("pinChat"), sep(), at("stopResponding"), at("runInBackground"), sep(), at("deleteChat")),
+		submenu(L("View"), at("palette"), at("attention"), sep(), at("toggleSidebar"), at("toggleInspector"), sep(), at("scrollToLatest"), sep(), at("fullScreen")),
+		submenu(L("Chat"), at("addBot"), at("renameChat"), at("pinChat"), muteMenu(at), at("unmuteChat"), sectionMenu(kind), at("hideChat"), at("newSkill"), sep(), at("stopResponding"), at("runInBackground"), sep(), at("deleteChat")),
 		submenu(L("Window"), &mygo.MenuItem{Role: mygo.RoleMinimize, Label: L("Minimize")}, &mygo.MenuItem{Role: mygo.RoleZoom, Label: L("Zoom")}),
 		submenu("Debug", at("simulateOffline"), at("replayMock"), sep(), at("showOnboarding")),
 		submenu(L("Help"), help...),
 	})
 }
 
+// muteMenu is Mute Chat and its spans; the menu bar shows it for a chat with its alerts on, and
+// Unmute Chat in its place for a muted one.
+func muteMenu(at func(id string) *mygo.MenuItem) *mygo.MenuItem {
+	item := submenu(L("Mute Chat"), at("muteHour"), at("muteEightHours"), at("muteWeek"), at("muteAlways"))
+	item.ID = "muteChat"
+	return item
+}
+
+// sectionMenu is Move to Section: each section, checked where the chat on screen is, then Chats for
+// no section, then New Section…. The menu bar is built again when the sections or the chat's
+// place among them change (chatMenuKey).
+func sectionMenu(kind windowKind) *mygo.MenuItem {
+	chat := selectedChat()
+	current := ""
+	if chat != nil && store.Section(chat.SectionID) != nil {
+		current = chat.SectionID
+	}
+	var items []*mygo.MenuItem
+	move := func(label, sectionID string) *mygo.MenuItem {
+		return &mygo.MenuItem{
+			Label: label, Type: mygo.MenuItemCheckbox, Checked: chat != nil && current == sectionID, Disabled: chat == nil,
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				if chat := selectedChat(); chat != nil {
+					store.MoveChat(chat.ID, sectionID)
+				}
+			},
+		}
+	}
+	for _, section := range store.Sections {
+		items = append(items, move(section.Name, section.ID))
+	}
+	if len(store.Sections) > 0 {
+		items = append(items, move(Lc("Chats", "no section"), ""), mygo.Separator())
+	}
+	items = append(items, menuItem("moveToNewSection", kind))
+	return submenu(L("Move to Section"), items...)
+}
+
+// chatMenuKey is what the Chat menu's Mute and Move to Section items are built from: whether a
+// chat shows, its section, whether it is muted, and the sections.
+func chatMenuKey() string {
+	var key strings.Builder
+	if chat := selectedChat(); chat != nil {
+		fmt.Fprintf(&key, "chat|%s|%t|", chat.SectionID, chat.Mute != nil)
+	}
+	for _, section := range store.Sections {
+		key.WriteString(section.ID + "=" + section.Name + ";")
+	}
+	return key.String()
+}
+
+// builtChatMenuKey is the chatMenuKey the menu bar was last built for.
+var builtChatMenuKey string
+
 // installMenuBar puts the main window's menu bar up as the app's, which every window without one
 // of its own shares, in the language in force.
 func installMenuBar() {
 	appMenu = windowMenuBar(windowMain)
+	builtChatMenuKey = chatMenuKey()
+	if item := appMenu.ItemByID("muteChat"); item != nil {
+		item.Hidden = selectedChat() != nil && selectedChat().Mute != nil
+	}
+	if item := appMenu.ItemByID("unmuteChat"); item != nil {
+		item.Hidden = selectedChat() == nil || selectedChat().Mute == nil
+	}
 	clear(menuStates)
 	for i := range commandTable {
 		menuStates[commandTable[i].id] = commandTable[i].state()
@@ -330,6 +447,10 @@ func (cmd *command) state() menuState {
 // and the selection, after a frame of the main window.
 func refreshMenuBar() {
 	if appMenu == nil {
+		return
+	}
+	if chatMenuKey() != builtChatMenuKey {
+		installMenuBar()
 		return
 	}
 	for i := range commandTable {

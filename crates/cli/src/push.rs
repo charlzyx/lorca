@@ -39,8 +39,9 @@ pub struct Notice {
     pub chat_id: String,
 }
 
-pub fn seal(dek: &[u8; 32], notice: &Notice) -> anyhow::Result<Vec<u8>> {
-    let cipher = ChaCha20Poly1305::new((&crate::keys::push_key(dek)).into());
+/// Seals a notice under the push key of the newest account key.
+pub fn seal(keys: &(impl crate::crypto::Keys + ?Sized), notice: &Notice) -> anyhow::Result<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new((&crate::keys::push_key(keys.newest())).into());
     let mut nonce = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ciphertext = cipher
@@ -49,13 +50,20 @@ pub fn seal(dek: &[u8; 32], notice: &Notice) -> anyhow::Result<Vec<u8>> {
     Ok([nonce.as_slice(), &ciphertext].concat())
 }
 
-pub fn open(dek: &[u8; 32], envelope: &[u8]) -> anyhow::Result<Notice> {
+/// Opens a notice under the push key of whichever account key sealed it.
+pub fn open(keys: &(impl crate::crypto::Keys + ?Sized), envelope: &[u8]) -> anyhow::Result<Notice> {
     if envelope.len() <= NONCE_LEN {
         anyhow::bail!("envelope too short");
     }
-    let cipher = ChaCha20Poly1305::new((&crate::keys::push_key(dek)).into());
     let (nonce, ciphertext) = envelope.split_at(NONCE_LEN);
-    let plaintext = cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: AAD }).map_err(|_| anyhow::anyhow!("decryption failed"))?;
+    let plaintext = keys
+        .each()
+        .iter()
+        .find_map(|key| {
+            let cipher = ChaCha20Poly1305::new((&crate::keys::push_key(key)).into());
+            cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: AAD }).ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("decryption failed"))?;
     Ok(serde_json::from_slice(&plaintext)?)
 }
 
@@ -86,11 +94,31 @@ pub fn permission(app: &Arc<App>, message: &Message) {
     let Author::Bot { bot_id } = &message.author else { return };
     let Some(summary) = message.confirmation() else { return };
     let (Some(chat), Some(bot)) = (app.chat(&message.chat_id), app.bot(bot_id)) else { return };
-    send(app, &chat, &bot, &format!("Confirmation needed: {summary}"), Some(message.id.clone()));
+    let asks_for_secret = matches!(&message.body, crate::model::Body::Permission { tool, .. } if tool == "secret");
+    let text = if asks_for_secret { format!("Asks for {summary}") } else { format!("Confirmation needed: {summary}") };
+    send(app, &chat, &bot, &text, Some(message.id.clone()));
+}
+
+/// A structured coordinator brief or urgent specialist escalation, each with its own
+/// synced preference. Quiet updates never reach the push transport.
+pub fn attention(app: &Arc<App>, message: &Message) {
+    let Some(notification) = message.notification else { return };
+    if !crate::attention::allows(app, notification) { return }
+    let Author::Bot { bot_id } = &message.author else { return };
+    let (Some(chat), Some(bot)) = (app.chat(&message.chat_id), app.bot(bot_id)) else { return };
+    let crate::model::Body::Text { text, .. } = &message.body else { return };
+    send_inner(app, &chat, &bot, text, None, Some(message.id.clone()));
 }
 
 fn send(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Option<String>) {
-    if !should_notify(app, &chat.meta.id, permission_id.as_deref()) {
+    send_inner(app, chat, bot, text, permission_id, None);
+}
+
+fn send_inner(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Option<String>, attention_id: Option<String>) {
+    let eligible = |app: &App| should_notify(app, &chat.meta.id, permission_id.as_deref()) && attention_id.as_deref().is_none_or(|id| {
+        app.message(&chat.meta.id, id).and_then(|message| message.notification).is_some_and(|kind| crate::attention::allows(app, kind))
+    });
+    if !eligible(app) {
         return;
     }
     let (Some(dek), Some(url), Some(machine)) = (app.dek(), app.relay_url(), app.machine_file().and_then(|m| m.machine().ok())) else { return };
@@ -111,20 +139,27 @@ fn send(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Optio
         }
     }
     let app = app.clone();
+    let chat_id = chat.meta.id.clone();
+    // The account the push belongs to: its first key, whichever is newest by then.
+    let account = |app: &App| app.machine_file().map(|machine| machine.account_dek);
+    let sealed_for = account(&app);
     tokio::spawn(async move {
+        let eligible = |app: &App| should_notify(app, &chat_id, permission_id.as_deref()) && attention_id.as_deref().is_none_or(|id| {
+            app.message(&chat_id, id).and_then(|message| message.notification).is_some_and(|kind| crate::attention::allows(app, kind))
+        });
         tokio::time::sleep(READ_GRACE).await;
         let give_up = tokio::time::Instant::now() + RETRY_FOR;
         let mut wait = FIRST_RETRY;
         loop {
             // A read mark is about a reply that arrived, so a phone left open or disconnected
             // before the reply finished cannot suppress future notifications.
-            if app.dek() != Some(dek) || !should_notify(&app, &notice.chat_id, permission_id.as_deref()) {
+            if account(&app) != sealed_for || !eligible(&app) {
                 return;
             }
             let result = match crate::sync::token_or_register(&app, &url, &machine).await {
                 Ok(token) => {
                     // Authentication may have taken longer than the read mark.
-                    if app.dek() != Some(dek) || !should_notify(&app, &notice.chat_id, permission_id.as_deref()) {
+                    if account(&app) != sealed_for || !eligible(&app) {
                         return;
                     }
                     app.relay.push(&url, &token, &crate::keys::b64(&sealed)).await
@@ -155,8 +190,11 @@ fn send(app: &Arc<App>, chat: &Chat, bot: &Bot, text: &str, permission_id: Optio
     });
 }
 
+/// A muted chat never alerts, and neither does one the user looks at here or on another
+/// computer that is online.
 fn should_notify(app: &App, chat_id: &str, permission_id: Option<&str>) -> bool {
-    !app.is_watching(chat_id) && app.chat(chat_id).is_some_and(|chat| chat.unread_count > 0)
+    !app.is_watched_anywhere(chat_id)
+        && app.chat(chat_id).is_some_and(|chat| chat.unread_count > 0 && !chat.meta.is_muted(crate::config::now_secs()))
         && permission_id.is_none_or(|id| {
             app.message(chat_id, id).is_some_and(|message| message.confirmation().is_some())
         })
@@ -165,6 +203,52 @@ fn should_notify(app: &App, chat_id: &str, permission_id: Option<&str>) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn attention_pushes_honor_preferences_and_recheck_during_the_read_grace() {
+        use axum::{routing::post, Json, Router};
+        use crate::model::*;
+        use crate::attention::Notification;
+        let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel();
+        let server = Router::new()
+            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({"nonce":"a-challenge-nonce-from-the-test-relay"})) }))
+            .route("/v1/auth/verify", post(|| async { Json(serde_json::json!({"token":"test"})) }))
+            .route("/v1/push", post(move |Json(body): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move { sent.send(body).unwrap(); Json(serde_json::json!({"queued":1})) }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let dek = crate::keys::random_32();
+        let (app, bot, home) = runner(&url, &dek);
+        let chat = Chat {
+            meta: ChatMeta { id: "attention-chat".into(), kind: "dm".into(), title: None,
+                bot_ids: vec![bot.id.clone()], owner_bot_id: None, description: None,
+                is_pinned: false, section_id: None, is_hidden: false, mute: None, created_at: 1.0, channel: None },
+            unread_count: 0, usage: None, compactions: vec![],
+        };
+        app.state.lock().unwrap().chats.push(chat.clone());
+        crate::attention::dispatch(&app, "attention.preferences", serde_json::json!({"summaries":false}), None).unwrap();
+        for (body, notification) in [("Summary", Notification::Summary), ("Urgent", Notification::Urgent), ("Quiet", Notification::Quiet)] {
+            let mut message = Message::new(&chat.meta.id, Author::Bot { bot_id: bot.id.clone() }, Body::text(body));
+            message.notification = Some(notification);
+            app.upsert_message(message.clone(), false);
+            attention(&app, &message);
+        }
+        let pushed = tokio::time::timeout(READ_GRACE + Duration::from_secs(2), pushes.recv()).await.unwrap().unwrap();
+        assert_eq!(open(&dek, &crate::keys::unb64(pushed["ciphertext"].as_str().unwrap()).unwrap()).unwrap().body, "Urgent");
+        assert!(tokio::time::timeout(Duration::from_millis(150), pushes.recv()).await.is_err());
+        crate::attention::dispatch(&app, "attention.preferences", serde_json::json!({"summaries":true}), None).unwrap();
+        let mut message = Message::new(&chat.meta.id, Author::Bot { bot_id: bot.id }, Body::text("New summary"));
+        message.notification = Some(Notification::Summary);
+        app.upsert_message(message.clone(), false);
+        attention(&app, &message);
+        crate::attention::dispatch(&app, "attention.preferences", serde_json::json!({"summaries":false}), None).unwrap();
+        assert!(tokio::time::timeout(READ_GRACE + Duration::from_millis(200), pushes.recv()).await.is_err(), "preferences changing before delivery cancel the alert");
+        server.abort(); drop(app); let _ = std::fs::remove_dir_all(home);
+    }
 
     #[test]
     fn a_notice_round_trips_and_binds_the_key() {
@@ -198,13 +282,13 @@ mod tests {
             machine_secret: crate::keys::b64(&crate::keys::random_32()), identity_pubkey: "identity".into(),
             content_pubkey: "content".into(), account_dek: crate::keys::b64(dek), name: "Runner".into(),
             os: "macos".into(), os_version: String::new(), model: String::new(), registered: true,
-            relay_url: Some(url.into()), created_at: 1,
+            relay_url: Some(url.into()), created_at: 1, keyrings: Vec::new(),
         });
         app.settings.lock().unwrap().relay_url = Some(url.into());
         let bot = Bot {
             id: "bot".into(), name: "Chef".into(), description: String::new(), symbol_name: "sparkles".into(),
             accent: "indigo".into(), avatar: None, runner_id: "runner".into(), provider: "deepseek".into(),
-            model: None, thinking: None, legacy_instructions: String::new(), workdir: None, created_at: 1.0,
+            model: None, thinking: None, legacy_instructions: String::new(), workdir: None, permissions: None, created_at: 1.0,
         };
         app.state.lock().unwrap().bots.push(bot.clone());
         (app, bot, home)
@@ -217,7 +301,7 @@ mod tests {
 
         let chat = Chat {
             meta: ChatMeta { id: id.into(), kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()],
-                owner_bot_id: None, description: None, is_pinned: false, created_at: 1.0 },
+                owner_bot_id: None, description: None, is_pinned: false, section_id: None, is_hidden: false, mute: None, created_at: 1.0, channel: None },
             unread_count: 0, usage: None, compactions: vec![],
         };
         app.state.lock().unwrap().chats.push(chat.clone());
@@ -233,7 +317,7 @@ mod tests {
 
         let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel();
         let server = Router::new()
-            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "test" })) }))
+            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "a-challenge-nonce-from-the-test-relay" })) }))
             .route("/v1/auth/verify", post(|| async { Json(serde_json::json!({ "token": "test" })) }))
             .route("/v1/push", post(move |Json(body): Json<serde_json::Value>| {
                 let sent = sent.clone();
@@ -282,7 +366,7 @@ mod tests {
             let mut message = Message::new(id, Author::Bot { bot_id: bot.id.clone() }, Body::Permission {
                 plugin_id: "computer".into(), plugin_name: "Mac".into(), tool: "bash".into(),
                 summary: "Deploy the app".into(), arguments: serde_json::Value::Null,
-                decision: "pending".into(), reason: Some("Needs confirmation".into()), rule: None, command: None, link: None, code: None,
+                decision: "pending".into(), reason: Some("Needs confirmation".into()), rule: None, command: None, link: None, code: None, secret: None,
             });
             if id == "failed" || id == "read-error" {
                 message.body = Body::text("Partial output");
@@ -323,6 +407,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(home);
     }
 
+    /// A muted chat alerts no phone, unless its mute has run out, and neither does a chat the
+    /// user has in front on another computer while the relay lists that computer online.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn muted_chats_and_chats_in_front_on_a_computer_do_not_push() {
+        use axum::{routing::post, Json, Router};
+        use crate::model::*;
+
+        let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel();
+        let server = Router::new()
+            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "a-challenge-nonce-from-the-test-relay" })) }))
+            .route("/v1/auth/verify", post(|| async { Json(serde_json::json!({ "token": "test" })) }))
+            .route("/v1/push", post(move |Json(body): Json<serde_json::Value>| {
+                let sent = sent.clone();
+                async move {
+                    sent.send(body).unwrap();
+                    Json(serde_json::json!({ "queued": 1 }))
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+        let dek = crate::keys::random_32();
+        let (app, bot, home) = runner(&url, &dek);
+        let now = crate::config::now_secs();
+        {
+            let mut state = app.state.lock().unwrap();
+            state.device_online.insert("mac".into());
+        }
+        app.set_device_watching("mac", Some("in-front".into()));
+        app.set_device_watching("offline-mac", Some("in-front-offline".into()));
+        for id in ["muted", "muted-for-now", "mute-ran-out", "in-front", "in-front-offline"] {
+            let chat = Chat {
+                meta: ChatMeta { id: id.into(), kind: "dm".into(), title: None, bot_ids: vec![bot.id.clone()],
+                    owner_bot_id: None, description: None, is_pinned: false, section_id: None, is_hidden: false, mute: None, created_at: 1.0, channel: None },
+                unread_count: 0, usage: None, compactions: vec![],
+            };
+            app.state.lock().unwrap().chats.push(chat);
+        }
+        app.mute_chat("muted", Some(Mute { until: None })).unwrap();
+        app.mute_chat("muted-for-now", Some(Mute { until: Some(now + 3600.0) })).unwrap();
+        app.mute_chat("mute-ran-out", Some(Mute { until: Some(now - 1.0) })).unwrap();
+        for id in ["muted", "muted-for-now", "mute-ran-out", "in-front", "in-front-offline"] {
+            app.upsert_message(Message::new(id, Author::Bot { bot_id: bot.id.clone() }, Body::text("Done")), false);
+            reply(&app, &app.chat(id).unwrap(), &bot, "Done");
+        }
+        assert_eq!(app.chat("muted").unwrap().unread_count, 1, "a muted chat keeps its unread count");
+        let mut pushed = Vec::new();
+        for _ in 0..2 {
+            let push = tokio::time::timeout(READ_GRACE + Duration::from_secs(2), pushes.recv()).await.unwrap().unwrap();
+            pushed.push(open(&dek, &crate::keys::unb64(push["ciphertext"].as_str().unwrap()).unwrap()).unwrap().chat_id);
+        }
+        pushed.sort();
+        assert_eq!(pushed, ["in-front-offline", "mute-ran-out"]);
+        assert!(tokio::time::timeout(Duration::from_millis(150), pushes.recv()).await.is_err());
+
+        // The computer left the chat: the next reply pushes.
+        app.set_device_watching("mac", None);
+        app.upsert_message(Message::new("in-front", Author::Bot { bot_id: bot.id.clone() }, Body::text("Again")), false);
+        reply(&app, &app.chat("in-front").unwrap(), &bot, "Again");
+        let push = tokio::time::timeout(READ_GRACE + Duration::from_secs(2), pushes.recv()).await.unwrap().unwrap();
+        assert_eq!(open(&dek, &crate::keys::unb64(push["ciphertext"].as_str().unwrap()).unwrap()).unwrap().chat_id, "in-front");
+        server.abort();
+        drop(app);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
     /// A relay that restarts as a turn ends does not take the push. The push goes again until
     /// the relay takes it, unless the relay refused it for good or the reply was read meanwhile.
     #[cfg(feature = "server")]
@@ -349,7 +500,7 @@ mod tests {
         let issued = Arc::new(AtomicUsize::new(0));
         let (sent, mut pushes) = tokio::sync::mpsc::unbounded_channel::<Push>();
         let server = Router::new()
-            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "test" })) }))
+            .route("/v1/auth/challenge", post(|| async { Json(serde_json::json!({ "nonce": "a-challenge-nonce-from-the-test-relay" })) }))
             .route("/v1/auth/verify", post(move || {
                 let token = format!("token-{}", issued.fetch_add(1, Ordering::Relaxed));
                 async move { Json(serde_json::json!({ "token": token })) }

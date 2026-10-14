@@ -18,7 +18,8 @@ enum MockData {
                 status: .online,
                 lastSeen: Date(),
                 machineKey: "mk_7c41…a09f",
-                plugins: plugins()
+                plugins: plugins(),
+                channels: channels()
             ),
             Device(
                 id: "dev-studio",
@@ -60,22 +61,39 @@ enum MockData {
 
     static func providers() -> [ProviderCredential] {
         [
-            ProviderCredential(kind: .deepseek, isConnected: true, detail: "sk-live…4f2c"),
-            ProviderCredential(kind: .anthropic, isConnected: true, detail: "sk-ant…8d1a"),
-            ProviderCredential(kind: .opencode, isConnected: false, detail: "Not connected"),
-            ProviderCredential(kind: .opencodeGo, isConnected: false, detail: "Not connected"),
-            ProviderCredential(kind: .chatgpt, isConnected: true, detail: "you@lorca.app"),
-            ProviderCredential(kind: .grok, isConnected: false, detail: "Not connected"),
+            ProviderCredential(kind: .deepseek, isConnected: true, detail: "sk-live…4f2c", reviewModel: "deepseek-flash"),
+            ProviderCredential(kind: .anthropic, isConnected: true, detail: "sk-ant…8d1a", reviewModel: "claude-haiku-4-5"),
+            ProviderCredential(kind: .opencode, isConnected: false, detail: "Not connected", reviewModel: "deepseek-v4.1-flash"),
+            ProviderCredential(kind: .opencodeGo, isConnected: false, detail: "Not connected", reviewModel: "glm-5.3-flash"),
+            ProviderCredential(kind: .chatgpt, isConnected: true, detail: "you@lorca.app", reviewModel: "gpt-6-luna"),
+            ProviderCredential(kind: .grok, isConnected: false, detail: "Not connected", reviewModel: "grok-4.7"),
             ProviderCredential(
                 kind: .custom("custom:ollama"), isConnected: true, detail: "http://localhost:11434/v1",
                 baseURL: "http://localhost:11434/v1", name: "Ollama", api: .chatCompletions,
-                models: [CustomModel(id: "qwen3:8b", levels: ["low", "medium", "high"]), CustomModel(id: "llava", levels: ["low", "medium", "high"])]),
+                models: [CustomModel(id: "qwen3:8b", levels: ["low", "medium", "high"]), CustomModel(id: "llava", levels: ["low", "medium", "high"])],
+                reviewModel: "qwen3:8b"),
+            ProviderCredential(
+                kind: .custom("custom:openrouter-decisions"), isConnected: true, detail: "sk-or…9c0e · https://openrouter.ai/api/alpha/decisions",
+                baseURL: "https://openrouter.ai/api/alpha/decisions", name: "OpenRouter Decisions", api: .systemOne,
+                models: [
+                    CustomModel(id: "typesafe/jev-1.13", name: "TypeSafe: Jev 1.13"),
+                    CustomModel(id: "perplexity/pplx-decider-v1.1-27b", name: "Perplexity: Decider V1.1 27B"),
+                ],
+                reviewModel: "typesafe/jev-1.13"),
         ]
     }
 
     /// What a custom provider's server lists in mock mode: a gateway's catalog, a local
     /// server's few models, or no list at all.
     static func listedModels(baseURL: String) -> [CustomModel]? {
+        if baseURL.contains("openrouter.ai/api/alpha/decisions") {
+            return [
+                CustomModel(id: "typesafe/jev-1.13", name: "TypeSafe: Jev 1.13", contextWindow: 64_000),
+                CustomModel(id: "openai/gpt-6-luna-decisions", name: "OpenAI: GPT-6 Luna Decisions", contextWindow: 1_050_000, images: true),
+                CustomModel(id: "perplexity/pplx-decider-v1.1-27b", name: "Perplexity: Decider V1.1 27B", contextWindow: 262_144, images: true),
+                CustomModel(id: "cloudflare/clef-flash", name: "Cloudflare: Clef Flash", contextWindow: 65_536, images: true),
+            ]
+        }
         if baseURL.contains("openrouter") {
             return [
                 CustomModel(id: "anthropic/claude-sonnet-5", name: "Anthropic: Claude Sonnet 5", contextWindow: 1_000_000, images: true),
@@ -111,6 +129,8 @@ enum MockData {
             ProviderModel(provider: .opencode, id: "deepseek-v4.1-flash", label: "DeepSeek V4.1 Flash", levels: ["low", "high", "max"]),
             ProviderModel(provider: .opencode, id: "kimi-k3", label: "Kimi K3", levels: ["max"]),
             ProviderModel(provider: .opencode, id: "big-pickle", label: "Big Pickle", levels: []),
+            ProviderModel(provider: .opencode, id: "jev-1.13", label: "Jev 1.13", levels: [], decides: true),
+            ProviderModel(provider: .opencode, id: "jev-1.13-free", label: "Jev 1.13 Free", levels: [], decides: true),
             ProviderModel(provider: .opencodeGo, id: "glm-5.3-flash", label: "GLM-5.3 Flash", levels: ["low", "high", "max"]),
             ProviderModel(provider: .chatgpt, id: "gpt-6.1-sol", label: "GPT-6.1 Sol", levels: on),
             ProviderModel(provider: .chatgpt, id: "gpt-6-luna", label: "GPT-6 Luna", levels: on),
@@ -122,7 +142,20 @@ enum MockData {
         [
             InstalledPlugin(id: "github", name: "GitHub", description: "Issues, pull requests, code search, and repositories on GitHub.", version: "1", icon: "chevron.left.forwardslash.chevron.right", state: .ready, detail: "Ready"),
             InstalledPlugin(id: "linear", name: "Linear", description: "Issues, projects, and cycles in Linear.", version: "1", icon: "line.3.horizontal.decrease.circle", state: .needsAuth, detail: "Sign in"),
+            InstalledPlugin(id: "telegram-5f0c", name: "Telegram · Community", description: "Listen in a Telegram bot's groups and chats, and reply there as the bot.", version: "1", icon: "paperplane", state: .ready, detail: "Connected", serviceID: "telegram", accountName: "Community"),
         ] + mcpServers().compactMap { $0.isEnabled ? $0.status : nil }
+    }
+
+    /// The Feedback Collector listens in the community's Telegram group.
+    static func channels() -> [ChannelStatus] {
+        [
+            ChannelStatus(
+                id: "ev-feedback", botID: "bot-tally", name: "Community feedback", service: "telegram", accountID: "telegram-5f0c",
+                chats: [.init(id: "-1001846203311", title: "Acme Community")], listen: ChannelListen(mentions: true, replies: true, tags: ["feedback"]),
+                task: "Decide whether the new message is product feedback. If it is, find the matching open issue in acme/app and comment on it, or open a new one labeled feedback with the person's words quoted. Then reply to the person in their thread in one line with the issue number.",
+                state: .listening, detail: "", heldDelivery: nil,
+                requests: [.init(id: "-1002218840551", title: "Acme Beta Testers", isPrivate: false, from: "Priya Nair")]),
+        ]
     }
 
     /// Workbench's mcp.json: a command, a remote server, one waiting for its sign-in, and one off.
@@ -161,7 +194,7 @@ enum MockData {
 
     /// The bundled index's plugins and bots, as the CLI serves them.
     static func marketplace() -> Marketplace {
-        Marketplace(plugins: marketplacePlugins(), bots: marketplaceBots())
+        Marketplace(packs: MockWorkflows.packs(), plugins: marketplacePlugins(), bots: marketplaceBots())
     }
 
     private static func marketplacePlugins() -> [MarketplacePlugin] {
@@ -606,11 +639,69 @@ enum MockData {
         ]
     }
 
+    static func sharedLinks() -> [SharedLink] {
+        [SharedLink(id: "mock-link", url: "https://lorca.app/t/mock-link#dGhpcyBpcyBub3QgYSByZWFsIGtleSwganVzdCBhIGRlbW8",
+            botId: "bot-quill", name: "Writer", selection: TemplateSelection(memoryIds: ["memory-voice"]),
+            updatedAt: minutesAgo(60 * 26).timeIntervalSince1970)]
+    }
+
     static func autoReview() -> AutoReview {
-        AutoReview(isEnabled: true, rules: [
-            AutoReviewRule(id: "ar-1", text: "use GitHub create_issue", behavior: .allow, tool: "github/create_issue"),
-            AutoReviewRule(id: "ar-2", text: "comment on a pull request", behavior: .ask),
-        ])
+        AutoReview(
+            isEnabled: true,
+            rules: [
+                AutoReviewRule(id: "ar-1", text: "use GitHub create_issue", behavior: .allow, tool: "github/create_issue"),
+                AutoReviewRule(id: "ar-2", text: "comment on a pull request", behavior: .ask),
+            ],
+            provider: .custom("custom:openrouter-decisions"),
+            models: [.custom("custom:openrouter-decisions"): "perplexity/pplx-decider-v1.1-27b", .anthropic: "claude-opus-5"])
+    }
+
+    /// The demo's skills: two of the Developer's and a draft it proposed, and one for the Launch
+    /// room.
+    static func playbooks() -> [PlaybookRecord] {
+        func record(_ id: String, _ scope: PlaybookScope, _ status: String, _ content: PlaybookContent, hoursAgo: [Double]) -> PlaybookRecord {
+            let steps = hoursAgo.enumerated().map { index, hours in
+                PlaybookRevision(
+                    id: "\(id)-\(index + 1)", revision: index + 1, status: index == hoursAgo.count - 1 ? status : "saved",
+                    content: content,
+                    provenance: .init(kind: index == 0 ? (status == "draft" ? "workflow" : "manual") : "edit", chatId: index == 0 && status == "draft" ? "chat-patch" : nil, messageIds: index == 0 && status == "draft" ? ["m1", "m2"] : []),
+                    deviceId: index.isMultiple(of: 2) ? "dev-studio" : "dev-workbench", createdAt: minutesAgo(hours * 60).timeIntervalSince1970)
+            }
+            return PlaybookRecord(id: id, scope: scope, status: status, revision: steps.count, hash: "\(id)-hash", content: content, revisions: steps)
+        }
+        return [
+            record("playbook-release-notes", .bot("bot-patch"), "saved", PlaybookContent(
+                name: "release-notes", description: "Turn the merged pull requests since the last tag into release notes.",
+                instructions: "1. List the pull requests merged since the last release tag.\n2. Group them under Added, Changed, and Fixed.\n3. Write one plain line per change, in the user's words where the PR has them.\n4. Leave out internal refactors and dependency bumps.\n5. Show the draft before posting it anywhere.",
+                examples: "Fixed: The composer keeps your draft when you switch chats.",
+                references: [PlaybookFile(path: "references/style.md", text: "Short lines. No ticket numbers. Present tense.")],
+                scripts: [PlaybookFile(path: "scripts/merged-since-tag.sh", text: "git log --merges --oneline \"$(git describe --tags --abbrev=0)\"..HEAD")]),
+                hoursAgo: [80, 26, 3]),
+            record("playbook-flaky-tests", .bot("bot-patch"), "draft", PlaybookContent(
+                name: "flaky-tests", description: "Rerun a failing test in isolation before calling it a real failure.",
+                instructions: "When a test fails in CI, rerun it alone three times. If it passes every time, report it as flaky with the failing seed; otherwise look for the bug."),
+                hoursAgo: [1]),
+            record("playbook-ship-checklist", .bot("bot-patch"), "saved", PlaybookContent(
+                name: "ship-checklist", description: "Check the build, the changelog, and the version before a release.",
+                instructions: "Run the full test suite, confirm the changelog has a section for the new version, and bump the version in one commit."),
+                hoursAgo: [200]),
+            record("playbook-launch-post", .group("chat-relay"), "saved", PlaybookContent(
+                name: "launch-post", description: "Write the launch announcement from the checklist and the release notes.",
+                instructions: "Open with what the user can do now. Keep it under 150 words. Link the release notes last."),
+                hoursAgo: [50, 5]),
+        ]
+    }
+
+    /// What the demo's drafting model writes for a capture.
+    static func draftedSkill(kind: String) -> PlaybookContent {
+        kind == "corrections"
+            ? PlaybookContent(
+                name: "plain-replies", description: "How the user wants replies written.",
+                instructions: "Answer in two or three sentences. Use metric units. Don't add a summary at the end.")
+            : PlaybookContent(
+                name: "relay-deploy", description: "Deploy the relay to Railway and check it came up.",
+                instructions: "1. Build the relay image from the Dockerfile.\n2. Deploy it to the staging service.\n3. Check /health answers within a minute.\n4. Tell the user the version that is live.",
+                examples: "\"Relay 0.4.2 is live on staging; /health answered in 3 s.\"")
     }
 
     static func routines() -> [Routine] {
@@ -641,7 +732,207 @@ enum MockData {
                     store('seen', [...seen, ...fresh.map((pr) => pr.number)]);
                     return fresh.map((pr) => `#${pr.number} ${pr.title}`).join('\\n');
                     """),
+            // A watch on one pull request, a one-time reminder, and a routine around calendar events.
+            Routine(
+                id: "rt-login-pr", botID: "bot-patch", name: "Login PR",
+                prompt: "Tell me what changed on the passkey sign-in pull request and whether it needs me.",
+                schedule: "on events", scheduleText: L("Watches %@", "acme/project#42"), isEnabled: true, pausedReason: nil,
+                lastRunAt: minutesAgo(50), lastOutcome: "sent", nextRunAt: nil, isRunning: false, createdAt: minutesAgo(60 * 24),
+                events: RoutineEvents(
+                    receiver: "github", subject: "acme/project#42", status: "subscribed", sourceName: "GitHub", title: "Add passkey sign-in",
+                    url: URL(string: "https://github.com/acme/project/pull/42"), endpoint: "", key: "",
+                    lastEvent: .init(summary: "Changes requested by kim", at: minutesAgo(50)))),
+            Routine(
+                id: "rt-deploys", botID: "bot-patch", name: "Failed deploys",
+                prompt: "Read the deploy the request names and tell me why it failed, with the log lines that show it.",
+                schedule: "on events", scheduleText: L("When its webhook is called"), isEnabled: true, pausedReason: nil,
+                lastRunAt: minutesAgo(60 * 20), lastOutcome: "sent", nextRunAt: nil, isRunning: false, createdAt: minutesAgo(60 * 24 * 4),
+                events: RoutineEvents(
+                    receiver: "webhook", subject: "", status: "subscribed", sourceName: "Webhook", title: "", url: nil,
+                    endpoint: "https://relay.lorca.app/webhooks/5VPZsRAyy2VIu_yNsFDw2g", key: "q8Zc1kX0vB3nTf7wJp2yLr6uHs9dEa4Mg5Ki1Ox0Rn8",
+                    lastEvent: .init(summary: "Webhook request", at: minutesAgo(60 * 20)))),
+            Routine(
+                id: "rt-tag-release", botID: "bot-patch", name: "Tag the release",
+                prompt: "Remind me to tag v1.4.0 once the go/no-go call says go.",
+                schedule: "once", scheduleText: Format.once(tomorrowAtNine(), in: .current), isEnabled: true, pausedReason: nil,
+                lastRunAt: nil, lastOutcome: nil, nextRunAt: tomorrowAtNine(), isRunning: false,
+                createdAt: minutesAgo(120), onceAt: tomorrowAtNine()),
+            Routine(
+                id: "rt-docs-pr", botID: "bot-scout", name: "Docs PR",
+                prompt: "Tell me when the docs pull request gets a review, and what the reviewer asked for.",
+                schedule: "on events", scheduleText: L("Watches %@", "acme/docs#7"), isEnabled: true, pausedReason: nil,
+                lastRunAt: nil, lastOutcome: nil, nextRunAt: nil, isRunning: false, createdAt: minutesAgo(30),
+                events: RoutineEvents(receiver: "github", subject: "acme/docs#7", status: "needs_setup", sourceName: "GitHub", title: "", url: nil, endpoint: "", key: "", lastEvent: nil)),
+            Routine(
+                id: "rt-call-prep", botID: "bot-scout", name: "Call prep",
+                prompt: "Write a one-page prep for the customer call: who they are, their open issues, and what to ask.",
+                schedule: "15m before events", scheduleText: Format.aroundEvents(minutes: 15, after: false, matching: "Customer call"), isEnabled: true,
+                pausedReason: nil, lastRunAt: minutesAgo(60 * 22), lastOutcome: "sent", nextRunAt: Date().addingTimeInterval(60 * 60), isRunning: false,
+                createdAt: minutesAgo(60 * 24 * 3),
+                calendar: RoutineCalendar(account: "Google Calendar · Work", matching: "Customer call", minutes: 15, after: false, nextEventTitle: "Customer call: Acme")),
         ]
+    }
+
+    /// Tomorrow at 9:00 AM on this Mac's clock.
+    private static func tomorrowAtNine() -> Date {
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date())!
+        return Calendar.current.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow)!
+    }
+
+    /// Project Manager's feedback on its briefs, with one change suggested and one applied.
+    @MainActor static func feedback(for botID: Bot.ID) -> BotFeedback {
+        guard botID == "bot-nova", let messages = AppStore.shared.chat("chat-nova")?.messages,
+            let marker = messages.first(where: { $0.text == "Routine · Morning brief" }),
+            let brief = messages.first(where: { $0.text.hasPrefix("**Today's focus") }),
+            let handoff = messages.first(where: { $0.author.botID == "bot-nova" && $0.text.hasPrefix("Writer has the brief.") })
+        else { return .empty }
+        let routine = FeedbackTarget(kind: "routine_prompt", id: "rt-brief")
+        let checklist = FeedbackTarget(kind: "routine_prompt", id: "rt-checklist")
+        let notes = [
+            FeedbackNote(id: "fb-good", kind: .accepted, chatID: "chat-nova", messageID: handoff.id, text: handoff.text, target: nil, createdAt: minutesAgo(30)),
+            FeedbackNote(id: "fb-edit", kind: .edited, chatID: "chat-nova", messageID: brief.id, text: "Lead with what needs my decision, then blockers.", target: routine, createdAt: minutesAgo(150)),
+            FeedbackNote(id: "fb-short", kind: .explicit, chatID: "chat-nova", messageID: brief.id, text: "Keep the brief to five bullets or fewer.", target: routine, createdAt: minutesAgo(60 * 26)),
+            FeedbackNote(id: "fb-failed", kind: .routineFailure, chatID: "chat-nova", messageID: marker.id, text: "The launch checklist was not in the workspace.", target: checklist, createdAt: minutesAgo(60 * 50)),
+        ]
+        let suggestion = FeedbackSuggestion(
+            id: "sg-brief", target: routine,
+            explanation: "You moved decisions to the top of two briefs and asked for five bullets at most. Each brief would open with what needs you, then blockers.",
+            diff: """
+                --- current
+                +++ proposed
+                @@ -1,1 +1,1 @@
+                -Read the recent messages in every chat you are in and the launch checklist in the workspace. Post a short brief: what changed, what needs a decision, and what the team will do first.
+                +Read the recent messages in every chat you are in and the launch checklist in the workspace. Post a brief of five bullets at most: what needs my decision first, then blockers, then what changed.
+                """,
+            diffHash: "mock", evidence: ["fb-edit", "fb-short"], createdAt: minutesAgo(20))
+        let change = FeedbackChange(
+            id: "ch-checklist", target: checklist,
+            diff: """
+                --- current
+                +++ proposed
+                @@ -1,1 +1,1 @@
+                -Review the launch checklist and the team's replies. Report anything new.
+                +Review the launch checklist in the workspace and the latest team replies. Report new blockers or completed milestones, or PASS when nothing changed.
+                """,
+            isUndo: false, canUndo: true, currentHash: "mock", createdAt: minutesAgo(60 * 24 * 4))
+        return BotFeedback(
+            notes: notes, noteCount: notes.count, suggestions: [suggestion], changes: [change], reviewEvery: 7 * 86_400,
+            targets: [
+                .init(name: "Morning brief", target: routine), .init(name: "Launch checklist", target: checklist),
+                .init(name: "Review requests", target: FeedbackTarget(kind: "routine_prompt", id: "rt-reviews")),
+                .init(name: "launch-post", target: FeedbackTarget(kind: "playbook", id: "playbook-launch-post", scope: .init(kind: "project", id: "chat-relay"))),
+            ])
+    }
+
+    /// Limits in the demo: Project Manager's turns and Researcher's each have some, Researcher's
+    /// newest turn stopped at its token limit, and Review requests used up its spending.
+    static func budgets() -> [BudgetState] {
+        let now = Date().timeIntervalSince1970
+        func usage(tokens: Int = 0, api: Double = 0, estimate: Double = 0, runtime: Double = 0, retries: Int = 0, calls: Int = 0) -> BudgetState.Usage {
+            .init(tokens: tokens, apiCostUsd: api, subscriptionEstimateUsd: estimate, unknownPriceCalls: 0, runtimeSecs: runtime, retries: retries, connectorCalls: calls)
+        }
+        return [
+            BudgetState(
+                kind: "chat", id: "chat-nova", runnerId: "dev-workbench", chatId: "chat-nova", limits: BudgetLimits(maxUsd: 2, maxTokens: 200_000),
+                usage: usage(), state: "ready", updatedAt: now - 60 * 60 * 24),
+            BudgetState(
+                kind: "chat", id: "chat-scout", runnerId: "dev-studio", chatId: "chat-scout", limits: BudgetLimits(maxTokens: 100_000, maxRuntimeSecs: 900),
+                usage: usage(), state: "ready", updatedAt: now - 60 * 60 * 24),
+            BudgetState(
+                kind: "job", id: "job-demo-research", runnerId: "dev-studio", chatId: "chat-scout",
+                limits: BudgetLimits(maxTokens: 100_000, maxRuntimeSecs: 900),
+                usage: usage(tokens: 100_412, api: 0.21, runtime: 384, retries: 1, calls: 9), state: "budget_exhausted", reached: "tokens", updatedAt: now - 60 * 28),
+            BudgetState(
+                kind: "routine", id: "rt-reviews", runnerId: "dev-workbench", chatId: "chat-nova", limits: BudgetLimits(maxUsd: 5, maxRuntimeSecs: 3600),
+                usage: usage(tokens: 1_840_000, estimate: 5.02, runtime: 2_760, calls: 64), state: "budget_exhausted", reached: "usd", updatedAt: now - 60 * 5),
+        ]
+    }
+
+    /// What the demo's bots left for review, as the CLI sends items: a command and a GitHub call
+    /// held while Project Manager's routine ran, and a draft it wants edited.
+    static func reviews() -> [ReviewItem] {
+        reviewRecords = [
+            reviewRecord(
+                id: "review-tag", minutesAgo: 189,
+                payload: ["kind": "shell", "arguments": ["command": "git tag v1.4.0 && git push origin v1.4.0", "description": "Tag the release"]],
+                account: "Workbench", resource: "~/Projects/relay",
+                rationale: "Pushes a release tag to the shared repository, which starts the release build."),
+            reviewRecord(
+                id: "review-comment", minutesAgo: 188,
+                payload: ["kind": "plugin", "plugin_id": "github", "server_name": "github", "tool": "add_issue_comment",
+                          "arguments": ["owner": "lorca-app", "repo": "relay", "issue_number": 214, "body": "Release notes are ready: the TLS rollout, the new pairing flow, and the relay quotas."]],
+                account: "GitHub", resource: "add_issue_comment · owner: lorca-app, repo: relay, issue_number: 214",
+                rationale: "Posts a public comment on a pull request."),
+            reviewRecord(
+                id: "review-draft", minutesAgo: 33,
+                payload: ["kind": "draft", "text": "Lorca 1.4 is out. Pair your phone in one step, keep chats in sync across every Device, and run bots on the computers you already own.\n\nUpdate from the app, or download it from lorca.app."],
+                account: "Launch room", resource: "Launch announcement",
+                rationale: "Writer's draft, shortened to lead with what people can do. Edit it before it goes to the team."),
+        ]
+        return reviewRecords.compactMap { try? Wire.decoder.decode(ReviewItem.self, from: JSONSerialization.data(withJSONObject: $0)) }
+    }
+
+    private static var reviewRecords: [[String: Any]] = []
+
+    private static func reviewRecord(id: String, minutesAgo minutes: Double, payload: [String: Any], account: String, resource: String, rationale: String) -> [String: Any] {
+        [
+            "id": id, "runner_id": "dev-workbench", "bot_id": "bot-nova", "origin": ["chat_id": "chat-nova"],
+            "target": ["account": account, "resource": resource], "rationale": rationale, "payload": payload,
+            "version": 1, "revision": 1, "preconditions": ["workdir": "~/Projects/relay", "files": [] as [Any]], "state": "pending",
+            "created_at": minutesAgo(minutes).timeIntervalSince1970,
+        ]
+    }
+
+    struct ReviewChanged: LocalizedError {
+        var errorDescription: String? { "This changed on another Device. Review it again." }
+    }
+
+    /// The demo's Runner deciding: an edit makes the next version, and an approval runs at once.
+    static func changedReview(_ item: ReviewItem, action: String, fields: [String: Any]) throws -> Data {
+        guard let index = reviewRecords.firstIndex(where: { $0["id"] as? String == item.id }),
+            reviewRecords[index]["version"] as? Int == Int(item.version)
+        else { throw ReviewChanged() }
+        var record = reviewRecords[index]
+        record["revision"] = (record["revision"] as? Int ?? 1) + 1
+        let status = "review-status-\(item.id)"
+        switch action {
+        case "edit":
+            record["payload"] = fields["payload"]
+            record["version"] = Int(item.version) + 1
+        case "approve":
+            record["state"] = "succeeded"
+            let text = item.payload.isDraft ? item.payload.editorText : ""
+            record["outcome"] = ["summary": item.payload.isDraft ? "Accepted" : "Done", "message_id": status, "result": ["text": text]]
+        default:
+            record["state"] = "rejected"
+            record["outcome"] = ["summary": "Rejected", "message_id": status]
+        }
+        reviewRecords[index] = record
+        return try JSONSerialization.data(withJSONObject: record)
+    }
+
+    /// What Workbench's plugins offered when they last connected, for the Access sheet.
+    static func accessCatalog() -> BotAccessCatalog {
+        typealias Tool = BotAccessCatalog.Plugin.Tool
+        let github: [Tool] = [
+            Tool(name: "search_issues", title: "Search issues", capability: "read"),
+            Tool(name: "get_pull_request", title: "Get a pull request", capability: "read"),
+            Tool(name: "create_pull_request_review", title: "Draft a review", capability: "draft"),
+            Tool(name: "create_issue", title: "Create an issue", capability: "write"),
+            Tool(name: "merge_pull_request", title: "Merge a pull request", capability: "write"),
+        ]
+        let linear: [Tool] = [
+            Tool(name: "list_issues", title: "List issues", capability: "read"),
+            Tool(name: "create_issue", title: "Create an issue", capability: "write"),
+        ]
+        let servers = mcpServers().filter(\.isEnabled).map { server in
+            BotAccessCatalog.Plugin(
+                id: server.id, name: server.name,
+                tools: (server.tools ?? []).map { Tool(name: $0.name, description: $0.about, capability: $0.isReadOnly ? "read" : "write") })
+        }
+        return BotAccessCatalog(connections: [
+            .init(id: "github", name: "GitHub", tools: github), .init(id: "linear", name: "Linear", tools: linear),
+        ] + servers)
     }
 
     static func bots() -> [Bot] {
@@ -684,7 +975,18 @@ enum MockData {
                 accent: .pink,
                 runnerID: "dev-workbench",
                 provider: .anthropic,
+                permissions: writerAccess(),
                 createdAt: minutesAgo(60 * 24 * 9)
+            ),
+            Bot(
+                id: "bot-tally",
+                name: "Feedback Collector",
+                description: "Collects product feedback from the community chat into GitHub issues, thanks people in their thread, and writes a digest each morning.",
+                symbolName: "tray.and.arrow.down.fill",
+                accent: .teal,
+                runnerID: "dev-workbench",
+                provider: .deepseek,
+                createdAt: minutesAgo(60 * 24 * 2)
             ),
             Bot(
                 id: "bot-ember",
@@ -696,6 +998,26 @@ enum MockData {
                 provider: .deepseek,
                 createdAt: minutesAgo(60 * 24 * 4)
             ),
+        ]
+    }
+
+    /// The Writer reads GitHub and its notes folder, drafts reviews, and runs no commands.
+    static func writerAccess() -> BotPermissions {
+        var access = BotPermissions()
+        access.connections = [
+            "github": .init(capabilities: AccessLevel.draft.capabilities, tools: ["search_issues", "get_pull_request", "create_pull_request_review"]),
+            "filesystem": .init(capabilities: AccessLevel.write.capabilities),
+            "deepwiki": .init(capabilities: AccessLevel.read.capabilities),
+        ]
+        access.shell = false
+        return access
+    }
+
+    /// The demo's sidebar sections; `chats()` files chats under them.
+    static func sections() -> [SidebarSection] {
+        [
+            SidebarSection(id: "section-product", name: "Product"),
+            SidebarSection(id: "section-engineering", name: "Engineering"),
         ]
     }
 
@@ -720,7 +1042,11 @@ enum MockData {
                 messages: managerThread(),
                 unreadCount: 0,
                 isPinned: false,
-                createdAt: minutesAgo(60 * 30)
+                createdAt: minutesAgo(60 * 30),
+                usage: ChatUsage(
+                    contextTokens: 18_400, contextWindow: 400_000, inputTokens: 212_000, outputTokens: 31_000, cacheReadTokens: 160_000,
+                    costUSD: 0.86, turns: 14, model: "gpt-5.5", subscriptionEstimateUSD: 0.86, pricingKinds: ["subscription_estimate"]),
+                sectionID: "section-product"
             ),
             Chat(
                 id: "chat-patch",
@@ -730,7 +1056,8 @@ enum MockData {
                 messages: developerThread(),
                 unreadCount: 2,
                 isPinned: false,
-                createdAt: minutesAgo(60 * 26)
+                createdAt: minutesAgo(60 * 26),
+                sectionID: "section-engineering"
             ),
             Chat(
                 id: "chat-launch",
@@ -740,7 +1067,8 @@ enum MockData {
                 messages: launchThread(),
                 unreadCount: 0,
                 isPinned: false,
-                createdAt: minutesAgo(60 * 52)
+                createdAt: minutesAgo(60 * 52),
+                sectionID: "section-product"
             ),
             Chat(
                 id: "chat-scout",
@@ -750,7 +1078,10 @@ enum MockData {
                 messages: researcherThread(),
                 unreadCount: 1,
                 isPinned: false,
-                createdAt: minutesAgo(60 * 24 * 12)
+                createdAt: minutesAgo(60 * 24 * 12),
+                usage: ChatUsage(
+                    contextTokens: 61_000, contextWindow: 128_000, inputTokens: 402_000, outputTokens: 22_000, cacheReadTokens: 290_000,
+                    costUSD: 0.34, turns: 9, model: "deepseek-chat", apiCostUSD: 0.34, pricingKinds: ["api"])
             ),
             Chat(
                 id: "chat-quill",
@@ -763,6 +1094,30 @@ enum MockData {
                 createdAt: minutesAgo(60 * 24 * 9)
             ),
             Chat(
+                id: "chat-community",
+                kind: .dm,
+                customTitle: "Acme Community",
+                botIDs: ["bot-tally"],
+                messages: communityThread(),
+                unreadCount: 0,
+                isPinned: false,
+                createdAt: minutesAgo(60 * 20),
+                channel: ChatChannel(channelID: "ev-feedback", service: "telegram", accountID: "telegram-5f0c", chatID: "-1001846203311")
+            ),
+            Chat(
+                id: "chat-tally",
+                kind: .dm,
+                customTitle: nil,
+                botIDs: ["bot-tally"],
+                messages: [
+                    Message(author: .you, body: .text("Listen in our Telegram group for #feedback and file it in acme/app."), createdAt: minutesAgo(60 * 22)),
+                    Message(author: .bot("bot-tally"), body: .text("Listening in the groups the Community bot is in, for mentions, replies, and #feedback. I'll file each one in acme/app and thank the person in their thread."), createdAt: minutesAgo(60 * 22 - 1)),
+                ],
+                unreadCount: 0,
+                isPinned: false,
+                createdAt: minutesAgo(60 * 22)
+            ),
+            Chat(
                 id: "chat-ember",
                 kind: .dm,
                 customTitle: nil,
@@ -770,7 +1125,9 @@ enum MockData {
                 messages: devopsThread(),
                 unreadCount: 0,
                 isPinned: false,
-                createdAt: minutesAgo(60 * 72)
+                createdAt: minutesAgo(60 * 72),
+                sectionID: "section-engineering",
+                mute: Chat.Mute(until: nil)
             ),
         ]
     }
@@ -839,19 +1196,48 @@ enum MockData {
                 createdAt: minutesAgo(190)
             ),
             Message(
+                author: .system,
+                body: .notice("Waiting for your review · $ git tag v1.4.0 && git push origin v1.4.0"),
+                createdAt: minutesAgo(189)
+            ),
+            Message(
+                author: .system,
+                body: .notice("Waiting for your review · GitHub: add_issue_comment · owner: lorca-app, repo: relay, issue_number: 214"),
+                createdAt: minutesAgo(188)
+            ),
+            Message(
                 author: .you,
                 body: .text("Ask Writer to keep the announcement short and lead with what people can do."),
                 createdAt: minutesAgo(36)
             ),
             Message(
                 author: .bot("bot-nova"),
-                body: .handoff(from: "bot-nova", to: "bot-quill", reason: "Draft a short launch announcement that leads with what people can do."),
+                body: .tool(ToolInvocation(
+                    name: "message_bot", summary: "Messaged Writer",
+                    detail: "Draft a short launch announcement that leads with what people can do.",
+                    isRunning: false, targetBotID: "bot-quill")),
                 createdAt: minutesAgo(35)
             ),
             Message(
                 author: .bot("bot-nova"),
-                body: .text("Writer has the brief. I'll keep the final draft with the launch checklist for your review."),
+                body: .text("Writer has the brief. I'll bring the draft back here when it's ready."),
                 createdAt: minutesAgo(34)
+            ),
+            // Writer's handoff report, which wakes Project Manager in this chat.
+            Message(
+                author: .bot("bot-quill"),
+                body: .handoff(from: "bot-quill", to: "bot-nova", reason: "Draft saved to `launch/announcement.md`. It leads with what people can do and stays under 60 words."),
+                createdAt: minutesAgo(24)
+            ),
+            Message(
+                author: .bot("bot-nova"),
+                body: .text("Writer's draft is in `launch/announcement.md`: three short sentences that open with building a team of bots. I added it to the launch checklist for your review."),
+                createdAt: minutesAgo(23)
+            ),
+            Message(
+                author: .system,
+                body: .notice("Waiting for your review · Draft: Launch announcement"),
+                createdAt: minutesAgo(22)
             ),
         ]
     }
@@ -873,8 +1259,63 @@ enum MockData {
                 body: .text("The website build passes. I've left the changes ready for review."),
                 createdAt: minutesAgo(27)
             ),
+            Message(
+                author: .you,
+                body: .text("Have Claude Code fix the broken docs link on the download page, with a test."),
+                createdAt: minutesAgo(12)
+            ),
+            Message(
+                author: .bot("bot-patch"),
+                body: .tool(ToolInvocation(
+                    name: "coding_agent", summary: "Started Claude Code", detail: "", isRunning: false,
+                    agent: AgentRun(
+                        id: "agent-3f9a2c1d", kind: "claude", host: nil, task: "Fix the broken docs link on the download page, with a test",
+                        folder: "~/.lorca/worktrees/site-1a2b3c/fix-docs-link", branch: "fix-docs-link", state: .working,
+                        output: "● Read(src/pages/download.astro)\n● Edit(src/pages/download.astro)\n  ⎿ Updated 1 line\n● Bash(bun test links)\n  ⎿ 14 pass\n    0 fail",
+                        device: "Workbench", startedAt: minutesAgo(11)))),
+                createdAt: minutesAgo(11)
+            ),
+            Message(
+                author: .bot("bot-patch"),
+                body: .text("Claude Code is fixing the link in a worktree of its own. I'll check its test when it's done."),
+                createdAt: minutesAgo(11)
+            ),
         ]
     }
+
+    private static func communityThread() -> [Message] {
+        let alice = Message(author: .contact("Alice Chen"), body: .text("#feedback exporting a report as CSV crashes the app on the second try"), createdAt: minutesAgo(64))
+        var thanks = Message(author: .bot("bot-tally"), body: .text("Thanks Alice, tracked in #142."), createdAt: minutesAgo(63))
+        thanks.replyTo = ReplyQuote(messageID: alice.id, author: alice.author, text: "#feedback exporting a report as CSV crashes the app on the second try")
+        let ben = Message(author: .contact("Ben Ortiz"), body: .text("same here, happens on Android too"), createdAt: minutesAgo(41))
+        var more = Message(author: .bot("bot-tally"), body: .text("Added to #142, thanks Ben."), createdAt: minutesAgo(40))
+        more.replyTo = ReplyQuote(messageID: ben.id, author: ben.author, text: "same here, happens on Android too")
+        let maya = Message(author: .contact("Maya"), body: .text("@acme_feedback_bot could the dashboard remember my last filter? #feedback"), createdAt: minutesAgo(12))
+        var filed = Message(author: .bot("bot-tally"), body: .text("Good idea, tracked in #151."), createdAt: minutesAgo(11))
+        filed.replyTo = ReplyQuote(messageID: maya.id, author: maya.author, text: "@acme_feedback_bot could the dashboard remember my last filter? #feedback")
+        return [alice, thanks, ben, more, maya, filed]
+    }
+
+    /// The secrets the demo Runners keep, with the Runner each is on.
+    static var secrets: [(runnerID: Device.ID, secret: SavedSecret)] = [
+        ("dev-studio", SavedSecret(id: "secret-github", botID: "bot-patch", name: "github_password", label: "GitHub password", use: .browser, site: "github.com", updatedAt: minutesAgo(60 * 26))),
+        ("dev-studio", SavedSecret(id: "secret-s2", botID: "bot-scout", name: "S2_API_KEY", label: "Semantic Scholar API key", use: .command, site: nil, updatedAt: minutesAgo(60 * 24 * 6))),
+        ("dev-workbench", SavedSecret(id: "secret-medium", botID: "bot-quill", name: "medium_password", label: "Medium password", use: .browser, site: "medium.com", updatedAt: minutesAgo(60 * 50))),
+    ]
+
+    /// What `coding.transcript` answers in the demo.
+    static let agentTranscript = """
+        > Fix the broken docs link on the download page, with a test.
+        I'll find the link first.
+        ● Grep(docs/install)
+          ⎿ src/pages/download.astro:42
+        ● Read(src/pages/download.astro)
+        ● Edit(src/pages/download.astro)
+          ⎿ Updated 1 line
+        ● Bash(bun test links)
+          ⎿ 14 pass
+            0 fail
+        """
 
     private static func researcherThread() -> [Message] {
         [
@@ -887,6 +1328,16 @@ enum MockData {
                 author: .bot("bot-scout"),
                 body: .text("I'd explain the Device roles right after pairing: your Mac runs the bots, and your phone lets you chat with them. I added that note to `research/onboarding.md`."),
                 createdAt: minutesAgo(45)
+            ),
+            Message(
+                author: .you,
+                body: .text("Read the setup guides of five similar apps and compare what each explains first."),
+                createdAt: minutesAgo(34)
+            ),
+            Message(
+                author: .system,
+                body: .notice("Stopped at the token limit. Raise it in Limits to resume."),
+                createdAt: minutesAgo(28)
             ),
         ]
     }
@@ -902,6 +1353,36 @@ enum MockData {
                 author: .bot("bot-quill"),
                 body: .text("Create a team of bots for your everyday work. Give each one a role, bring them into a group chat, and pick up the conversation from your phone. Lorca runs the bots on your computers and encrypts your chats before they sync.\n\nDraft saved to `launch/announcement.md`."),
                 createdAt: minutesAgo(24)
+            ),
+            Message(author: .you, body: .text("File an issue for the pairing section of the docs."), createdAt: minutesAgo(12)),
+            // The Writer's Access lets it read GitHub and draft reviews, not open issues.
+            Message(
+                author: .bot("bot-quill"),
+                body: .permission(PermissionRequest(pluginID: "github", pluginName: "GitHub", tool: "access", summary: "GitHub · create_issue", decision: .pending)),
+                createdAt: minutesAgo(11)
+            ),
+            Message(
+                author: .bot("bot-quill"),
+                body: .text("I can't open issues on GitHub: my Access only lets me read it and draft reviews. I left a request above if you want to allow it."),
+                createdAt: minutesAgo(11)
+            ),
+            Message(author: .you, body: .text("Email Ana the launch note, and copy Bo."), createdAt: minutesAgo(6)),
+            Message(
+                id: "msg-mock-email-draft",
+                author: .bot("bot-quill"),
+                body: .draft(DraftCard(
+                    reviewID: "review-mock-email", version: 1, state: "pending", pluginID: "gmail-work", account: "Gmail · Work",
+                    fields: .init(
+                        kind: "email", to: ["ana@example.com"], cc: ["bo@example.com"], subject: "Lorca launches Friday",
+                        body: "Hi Ana,\n\nLorca goes out on Friday. The launch note is attached: it covers pairing, the phone app, and what runs on your own computers.\n\nThanks,\nQuill",
+                        attachments: [.init(name: "launch-note.pdf", size: 186_000)]),
+                    note: nil, direct: false)),
+                createdAt: minutesAgo(5)
+            ),
+            Message(
+                author: .bot("bot-quill"),
+                body: .text("The email to Ana is ready above. Send it when it reads right."),
+                createdAt: minutesAgo(5)
             ),
         ]
     }
@@ -922,6 +1403,16 @@ enum MockData {
                 author: .bot("bot-nova"),
                 body: .text("That covers the first session. The pairing guide follows it with a Mac-and-phone walkthrough."),
                 createdAt: minutesAgo(106)
+            ),
+            Message(author: .you, body: .text("@Project Manager tell #launch the guide is live."), createdAt: minutesAgo(20)),
+            Message(
+                id: "msg-mock-slack-draft",
+                author: .bot("bot-nova"),
+                body: .draft(DraftCard(
+                    reviewID: "review-mock-slack", version: 1, state: "pending", pluginID: "slack-team", account: "Slack · Team",
+                    fields: .init(kind: "slack", to: ["#launch"], body: "The setup guide is live, with the Mac-and-phone pairing walkthrough. Shout if anything reads wrong."),
+                    note: nil, direct: true)),
+                createdAt: minutesAgo(19)
             ),
         ]
     }

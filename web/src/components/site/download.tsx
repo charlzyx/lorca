@@ -1,5 +1,4 @@
 import { Link } from '@tanstack/react-router'
-import { createServerFn } from '@tanstack/react-start'
 import {
   Check,
   Computer,
@@ -16,14 +15,12 @@ import { Trans, useTranslation } from 'react-i18next'
 
 import { Button } from '#/components/ui/button'
 import { i18nFor, type Language, languages } from '#/i18n'
-import type { DesktopRelease } from '#/lib/desktop-release'
+import type { AndroidRelease, DesktopRelease } from '#/lib/releases'
 import { cn } from '#/lib/utils'
 import { Logo } from './logo'
 import { Nav, SITE, docsPath, downloadPath } from './nav'
 import { Footer } from './sections'
 
-/// Sparkle's feed for the Mac app. Every release rewrites it.
-const APPCAST = 'https://mac-releases.lorca.app/appcast.xml'
 const TESTFLIGHT = 'https://testflight.apple.com/join/WRR2R3y1'
 /// Bots on Windows run their commands in its bash.
 const GIT_FOR_WINDOWS = 'https://git-scm.com/downloads/win'
@@ -33,56 +30,10 @@ const INSTALL = [
   { shell: 'download.cli.windows', prompt: 'PS>', command: 'irm https://lorca.app/install-cli.ps1 | iex' },
 ] as const
 
-export type MacRelease = {
-  version: string
-  /// The notarized disk image.
-  url: string
-  minimumSystemVersion: string | null
-  appleSilicon: boolean
-}
-
-/// The newest Windows and Linux release, which the build reads (`define` in vite.config.ts).
+/// The newest desktop release and Android release, which the build reads (`define` in
+/// vite.config.ts).
 declare const __DESKTOP_RELEASE__: DesktopRelease | null
-
-const numeric = new Intl.Collator('en', { numeric: true })
-
-/// The newest release in a Sparkle appcast. An item's enclosure is the zip Sparkle installs
-/// updates from; the release uploads the disk image people download beside it, under the same
-/// name.
-export function parseAppcast(xml: string): MacRelease | null {
-  const items = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/g)].flatMap(([, item]) => {
-    // Delta updates carry enclosures of their own.
-    const body = item.replace(/<sparkle:deltas>[\s\S]*?<\/sparkle:deltas>/g, '')
-    const field = (name: string) => body.match(new RegExp(`<${name}>([^<]*)</${name}>`))?.[1].trim()
-    const archive = body.match(/<enclosure\b[^>]*\burl="([^"]+)"/)?.[1]
-    const build = field('sparkle:version')
-    if (!archive || !build) return []
-    const release: MacRelease = {
-      version: field('sparkle:shortVersionString') ?? build,
-      url: archive.replace(/\.zip$/, '.dmg'),
-      minimumSystemVersion: field('sparkle:minimumSystemVersion') ?? null,
-      appleSilicon: field('sparkle:hardwareRequirements')?.includes('arm64') ?? false,
-    }
-    return [{ build, release }]
-  })
-  return items.sort((a, b) => numeric.compare(b.build, a.build))[0]?.release ?? null
-}
-
-/// The loader of the download page, in either language. The feed sends no CORS headers, so the
-/// server reads it. A feed it can't read leaves the Mac button disabled and the rest of the page
-/// working.
-export const latestMacRelease = createServerFn({ method: 'GET' }).handler(async () => {
-  try {
-    const response = await fetch(APPCAST, { signal: AbortSignal.timeout(5000) })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const release = parseAppcast(await response.text())
-    if (!release) throw new Error('no release in the feed')
-    return release
-  } catch (error) {
-    console.error(`reading ${APPCAST}:`, error)
-    return null
-  }
-})
+declare const __ANDROID_RELEASE__: AndroidRelease | null
 
 /// The head for the download page in one language, paired with the other languages.
 export function downloadHead(lng: Language) {
@@ -104,9 +55,10 @@ export function downloadHead(lng: Language) {
 const action = 'h-12 rounded-full px-7 text-base'
 const link = 'underline underline-offset-4 hover:text-foreground'
 
-export function Download({ release: mac }: { release: MacRelease | null }) {
+export function Download() {
   const { t, i18n } = useTranslation()
   const desktop = __DESKTOP_RELEASE__
+  const android = __ANDROID_RELEASE__
   return (
     <div className="flex min-h-svh flex-col">
       <Nav />
@@ -121,21 +73,14 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
             title={t('download.mac.title')}
             body={t('download.mac.body')}
             note={
-              mac ? (
-                <Notes
-                  items={[
-                    t('download.version', { version: mac.version }),
-                    mac.minimumSystemVersion &&
-                      t('download.mac.system', { version: mac.minimumSystemVersion.replace(/(\.0)+$/, '') }),
-                    mac.appleSilicon && t('download.mac.appleSilicon'),
-                  ]}
-                />
+              desktop ? (
+                <Notes items={[t('download.version', { version: desktop.version }), t('download.mac.appleSilicon')]} />
               ) : (
                 t('download.unavailable')
               )
             }
           >
-            <DownloadButton href={mac?.url}>{t('download.mac.action')}</DownloadButton>
+            <DownloadButton href={desktop?.mac}>{t('download.mac.action')}</DownloadButton>
           </Platform>
           <Platform
             icon={Monitor}
@@ -193,8 +138,13 @@ export function Download({ release: mac }: { release: MacRelease | null }) {
               <a href={TESTFLIGHT}>{t('download.ios.action')}</a>
             </Button>
           </Platform>
-          <Platform icon={Smartphone} title={t('download.android.title')} body={t('download.android.body')}>
-            <Soon />
+          <Platform
+            icon={Smartphone}
+            title={t('download.android.title')}
+            body={t('download.android.body')}
+            note={android && <Notes items={[t('download.version', { version: android.version }), t('download.android.system')]} />}
+          >
+            {android ? <DownloadButton href={android.apk}>{t('download.android.action')}</DownloadButton> : <Soon />}
           </Platform>
         </section>
         <section className="mx-auto max-w-4xl px-5 pt-5 pb-20">

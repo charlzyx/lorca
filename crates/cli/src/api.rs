@@ -20,6 +20,14 @@ fn opt_string(params: &Value, key: &str) -> Option<String> {
     params[key].as_str().map(str::to_string).filter(|s| !s.is_empty())
 }
 
+fn parse_permissions(params: &Value) -> Result<Option<crate::permissions::BotPermissions>, String> {
+    let Some(value) = params.get("permissions") else { return Ok(None) };
+    let policy: crate::permissions::BotPermissions = serde_json::from_value(value.clone())
+        .map_err(|error| format!("Invalid bot permissions: {error}. Use an explicit policy to change access."))?;
+    policy.validate()?;
+    Ok(Some(policy))
+}
+
 /// A Runner opens provider OAuth in its browser. A phone emits the URL to the Expo app,
 /// whose in-app browser keeps the core alive for the localhost callback.
 #[cfg(feature = "provider-auth")]
@@ -62,7 +70,27 @@ fn store_avatar(app: &Arc<App>, params: &Value) -> Result<Option<Option<Attachme
 const UPDATE_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value, String> {
+    if method.starts_with("attention.") {
+        return crate::attention::dispatch(app, method, params, None);
+    }
     match method {
+        method if method.starts_with("templates.") => crate::templates::dispatch(app, method, &params).await,
+        method if method.starts_with("playbooks.") => crate::playbooks::dispatch(app, method, params).await,
+        method if method.starts_with("events.") => crate::event_triggers::dispatch(app, method, params).await,
+        "projects.get" | "projects.save" | "projects.refresh" | "projects.asset" | "projects.asset_path" => {
+            crate::project_context::dispatch(app, method, params).await
+        }
+        method if method.starts_with("budgets.") => crate::budgets::dispatch(app, method, &params).await,
+        #[cfg(feature = "runner")]
+        method if method.starts_with("connector_limits.") => crate::connector_limits::dispatch(app, method, &params).await,
+        #[cfg(not(feature = "runner"))]
+        method if method.starts_with("connector_limits.") => {
+            let runner = string(&params, "runner_id")?;
+            requests::ask(app, &runner, method, params).await
+        }
+        method if method.starts_with("reviews.") => crate::review_queue::dispatch(app, method, params).await,
+        method if method.starts_with("tasks.") => crate::tasks::dispatch(app, method, params).await,
+        method if method.starts_with("handoffs.") => crate::handoffs::dispatch(app, method, params),
         "hello" => Ok(json!({
             "version": crate::config::VERSION,
             "has_identity": app.has_identity(),
@@ -79,6 +107,21 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             crate::catalog::check_in_background(app);
             crate::marketplace::check_in_background(app);
             Ok(app.snapshot())
+        }
+        method if method.starts_with("browser.") => crate::browser::dispatch(app, method, params).await,
+        // A Runner's saved secrets: listed without their values, replaced, or deleted, there when
+        // this Device is the Runner, else sealed to it. A new value travels only sealed.
+        "secrets.list" | "secrets.set" | "secrets.delete" => {
+            let runner_id = string(&params, "runner_id")?;
+            let mut body = params.clone();
+            if let Some(fields) = body.as_object_mut() {
+                fields.remove("runner_id");
+            }
+            if app.this_device_id().as_deref() == Some(runner_id.as_str()) {
+                #[cfg(feature = "runner")]
+                return crate::secrets::serve(app, method, &body);
+            }
+            requests::ask(app, &runner_id, method, body).await
         }
 
         "identity.create" => {
@@ -109,10 +152,12 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(Value::Null)
         }
 
-        "device.rename" => {
-            let name = string(&params, "name")?;
-            app.rename_device(&name).map_err(|e| e.to_string())?;
-            Ok(json!({ "name": name }))
+        // The name a Device shows as on every paired Device, for any Device: blank takes back the
+        // name its machine goes by.
+        "device.set_name" => {
+            let id = string(&params, "id")?;
+            app.set_device_name(&id, &opt_string(&params, "name").unwrap_or_default()).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
         }
         // Another Device by id, or this one: the latter is `identity.forget`.
         "device.unpair" => {
@@ -172,9 +217,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // The desktop app names the chat on screen while it is frontmost, null otherwise; a
-        // reply the user is watching arrive is not pushed to their phone.
+        // reply the user is watching arrive is not pushed to their phone, from this Runner or
+        // another.
         "ui.watching" => {
-            app.set_watched_chat(opt_string(&params, "chat_id"));
+            app.watch_chat(opt_string(&params, "chat_id"));
             Ok(Value::Null)
         }
         // A phone's APNs or FCM device token, registered with the relay under this machine.
@@ -202,6 +248,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({ "relay_url": app.relay_url() }))
         }
 
+        method if method.starts_with("workflows.") => crate::workflows::handle(app, method, &params).await,
+
         "bots.create" => {
             // A bot from the marketplace starts from its template's profile, with the routines
             // and the first turn `marketplace::welcome` gives it.
@@ -225,6 +273,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 // description, then clears this rolling-upgrade slot.
                 legacy_instructions: opt_string(&params, "instructions").unwrap_or_default(),
                 workdir: opt_string(&params, "workdir"),
+                permissions: parse_permissions(&params)?,
                 created_at: 0.0,
             };
             // Every bot has one direct chat; both land in a single roster change.
@@ -236,6 +285,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
         "bots.update" => {
             let id = string(&params, "id")?;
+            let permissions = parse_permissions(&params)?;
+            let access_changed = permissions.is_some();
             // The image is copied and queued before the roster names it, so every Device can
             // fetch the blob by the time it reads the profile.
             let avatar = store_avatar(app, &params)?;
@@ -256,9 +307,21 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 if let Some(v) = params["thinking"].as_str() { bot.thinking = Some(v.trim().to_string()).filter(|t| !t.is_empty()); }
                 if let Some(v) = opt_string(&params, "runner_id") { bot.runner_id = v; }
                 if let Some(v) = params["workdir"].as_str() { bot.workdir = Some(v.to_string()).filter(|w| !w.trim().is_empty()); }
+                if let Some(v) = permissions { bot.permissions = Some(v); }
+                // A draft card's Send Directly changes only this, whatever else the policy says.
+                if let Some(v) = params["drafts"].as_bool() {
+                    bot.permissions.get_or_insert_with(Default::default).drafts = v;
+                }
             })
             .map_err(|e| e.to_string())?;
+            if access_changed { crate::permissions::dismiss_requests(app, &id); }
             Ok(json!({ "bot": bot }))
+        }
+        // The plugins the bot's Runner has and their tools, for its Access sheet.
+        "bots.permissions" => {
+            let bot = app.bot(&string(&params, "id")?).ok_or("Unknown bot")?;
+            let catalog = crate::plugins::on_runner(app, &bot.runner_id, "permissions.catalog", json!({})).await?;
+            Ok(json!({ "connections": catalog }))
         }
         "bots.delete" => {
             app.delete_bot(&string(&params, "id")?).map_err(|e| e.to_string())?;
@@ -280,7 +343,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     description: opt_string(&params, "description").map(|text| text.trim().to_string()),
                     bot_ids,
                     is_pinned: false,
+                    section_id: None,
+                    is_hidden: false,
+                    mute: None,
                     created_at: 0.0,
+                    channel: None,
                 })
                 .map_err(|e| e.to_string())?
             };
@@ -311,11 +378,35 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     .map_err(|e| e.to_string())?;
             Ok(json!({ "message": message }))
         }
+        "outputs.list" => {
+            let chat_id = string(&params, "chat_id")?;
+            let task_id = opt_string(&params, "task_id");
+            let messages = crate::outputs::list(app, &chat_id, task_id.as_deref())?;
+            Ok(json!({ "outputs": messages.into_iter().map(|message| message.for_app()).collect::<Vec<_>>() }))
+        }
+        #[cfg(feature = "runner")]
+        "outputs.publish" => {
+            let chat_id = string(&params, "chat_id")?;
+            let bot_id = string(&params, "bot_id")?;
+            let bot = app.bot(&bot_id).ok_or("Unknown producing bot")?;
+            let workdir = bot.working_directory(&app.config.home);
+            let mut payload = params;
+            payload.as_object_mut().ok_or("Output parameters must be an object")?.remove("chat_id");
+            payload.as_object_mut().unwrap().remove("bot_id");
+            let request = serde_json::from_value(payload).map_err(|error| format!("Invalid output: {error}"))?;
+            let app = app.clone();
+            let message = tokio::task::spawn_blocking(move || crate::outputs::publish(&app, &chat_id, &bot_id, &workdir, request)).await
+                .map_err(|error| error.to_string())??;
+            Ok(json!({ "message": message.for_app(), "task_evidence": message.output.as_ref().map(|output| output.task_evidence(&message.id)) }))
+        }
         "files.path" => {
             // Where the attachment's bytes are on this machine, fetched from the relay first
             // when another Device sent it.
             let attachment: Attachment = serde_json::from_value(params["attachment"].clone()).map_err(|e| e.to_string())?;
-            let path = crate::files::ensure_local(app, &attachment).await.map_err(|e| e.to_string())?;
+            let mut path = crate::files::ensure_local(app, &attachment).await.map_err(|e| e.to_string())?;
+            if params["named"].as_bool() == Some(true) {
+                path = crate::files::named_local_path(app, &attachment).map_err(|e| e.to_string())?;
+            }
             Ok(json!({ "path": path }))
         }
         "chats.stop" => {
@@ -385,8 +476,46 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(Value::Null)
         }
         "chats.pin" => {
-            let pinned = params["pinned"].as_bool();
-            app.update_chat_meta(&string(&params, "chat_id")?, |meta| meta.is_pinned = pinned.unwrap_or(!meta.is_pinned)).map_err(|e| e.to_string())?;
+            app.pin_chat(&string(&params, "chat_id")?, params["pinned"].as_bool()).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "chats.hide" => {
+            app.hide_chat(&string(&params, "chat_id")?, params["hidden"].as_bool().unwrap_or(true)).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        // `until` is unix seconds; without it the chat stays muted until unmuted.
+        "chats.mute" => {
+            let mute = params["muted"].as_bool().unwrap_or(true).then(|| Mute { until: params["until"].as_f64() });
+            app.mute_chat(&string(&params, "chat_id")?, mute).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        // A null `section_id` lists the chat with the chats in no section.
+        "chats.set_section" => {
+            app.set_chat_section(&string(&params, "chat_id")?, opt_string(&params, "section_id")).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "sections.create" => {
+            let section = app
+                .create_section(opt_string(&params, "id"), &string(&params, "name")?, opt_string(&params, "chat_id").as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(json!({ "section": section }))
+        }
+        "sections.rename" => {
+            app.rename_section(&string(&params, "id")?, &string(&params, "name")?).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "sections.collapse" => {
+            let collapsed = params["collapsed"].as_bool().unwrap_or(true);
+            app.update_section(&string(&params, "id")?, |section| section.collapsed = collapsed).map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "sections.reorder" => {
+            let ids: Vec<String> = serde_json::from_value(params["ids"].clone()).map_err(|_| "ids must be a list of section ids")?;
+            app.reorder_sections(&ids);
+            Ok(Value::Null)
+        }
+        "sections.delete" => {
+            app.delete_section(&string(&params, "id")?).map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
         "chats.add_bot" => {
@@ -511,24 +640,37 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // Routines live in the roster; any Device edits them, the bot's Runner runs them. A
-        // routine's check is the bot's to write, on its Runner, with the routines tool.
+        // routine's check is saved on its assigned Runner, including a private template import.
         "routines.create" => {
-            let routine = routines::create(
+            let bot_id = string(&params, "bot_id")?;
+            let check = params["check"].as_str().filter(|s| !s.trim().is_empty());
+            if check.is_some() {
+                let bot = app.bot(&bot_id).ok_or("Unknown bot")?;
+                if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) {
+                    return Err("Save routine checks on the bot's assigned Runner.".into());
+                }
+            }
+            let triggers = routines::Triggers { receiver: params["receiver"].as_str(), subject: params["subject"].as_str(), calendar: params["calendar"].as_str(), event_match: params["event_match"].as_str() };
+            let routine = routines::create_routine(
                 app,
-                &string(&params, "bot_id")?,
+                &bot_id,
                 &string(&params, "name")?,
-                &string(&params, "schedule")?,
+                params["schedule"].as_str().unwrap_or(""),
                 params["prompt"].as_str().unwrap_or(""),
-                None,
+                check,
                 params["enabled"].as_bool().unwrap_or(true),
+                params["timezone"].as_str(),
+                params["missed_run_policy"].as_str(),
+                triggers,
             )?;
             Ok(json!({ "routine": app.routine_out(&routine) }))
         }
         "routines.update" => {
             let id = string(&params, "id")?;
             let mut routine = app.routine(&id).ok_or("Unknown routine")?;
-            if params.get("name").is_some() || params.get("schedule").is_some() || params.get("prompt").is_some() {
-                routine = routines::edit(app, &id, opt_string(&params, "name").as_deref(), opt_string(&params, "schedule").as_deref(), params["prompt"].as_str(), None)?;
+            if ["name", "schedule", "prompt", "timezone", "missed_run_policy", "calendar", "event_match"].iter().any(|field| params.get(field).is_some()) {
+                let triggers = routines::Triggers { calendar: params["calendar"].as_str(), event_match: params["event_match"].as_str(), ..Default::default() };
+                routine = routines::edit_routine(app, &id, opt_string(&params, "name").as_deref(), opt_string(&params, "schedule").as_deref(), params["prompt"].as_str(), None, params["timezone"].as_str(), params["missed_run_policy"].as_str(), triggers)?;
             }
             if let Some(enabled) = params["enabled"].as_bool() {
                 routine = routines::set_enabled(app, &id, enabled)?;
@@ -543,7 +685,65 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             routines::run_now(app, &string(&params, "id")?)?;
             Ok(Value::Null)
         }
-        "routines.describe" => routines::describe(&string(&params, "schedule")?),
+        // A routine's webhook takes a new key on the bot's Runner, asked from any Device.
+        "routines.regenerate_key" => {
+            let id = string(&params, "id")?;
+            let routine = app.routine(&id).ok_or("Unknown routine")?;
+            let runner = app.bot(&routine.bot_id).map(|bot| bot.runner_id).ok_or("Unknown bot")?;
+            if app.this_device_id().as_deref() != Some(runner.as_str()) {
+                return crate::requests::ask(app, &runner, "routines.regenerate_key", json!({ "id": id })).await;
+            }
+            #[cfg(feature = "runner")]
+            {
+                crate::routine_events::regenerate_key(app, &id).await?;
+                Ok(json!({ "routine": app.routine(&id).map(|routine| app.routine_out(&routine)) }))
+            }
+            #[cfg(not(feature = "runner"))]
+            Err("Only a Runner keeps a routine's webhook.".into())
+        }
+        // A routine on events that waits on the user's setup subscribes again on its Runner,
+        // asked by an app the user came back to.
+        "routines.subscribe" => {
+            let id = string(&params, "id")?;
+            let routine = app.routine(&id).ok_or("Unknown routine")?;
+            let runner = app.bot(&routine.bot_id).map(|bot| bot.runner_id).ok_or("Unknown bot")?;
+            if app.this_device_id().as_deref() != Some(runner.as_str()) {
+                return crate::requests::ask(app, &runner, "routines.subscribe", json!({ "id": id })).await;
+            }
+            #[cfg(feature = "runner")]
+            {
+                crate::routine_events::subscribe_now(app, &id).await?;
+                Ok(json!({ "routine": app.routine(&id).map(|routine| app.routine_out(&routine)) }))
+            }
+            #[cfg(not(feature = "runner"))]
+            Err("Only a Runner subscribes a routine.".into())
+        }
+        // The link a user follows to set a relay's receiver up for this account, such as the
+        // Lorca GitHub App's install.
+        "receivers.setup" => {
+            let receiver = string(&params, "receiver")?;
+            let relay = app.relay_url().ok_or("This Device has no relay.")?;
+            let machine = app.machine_file().and_then(|m| m.machine().ok()).ok_or("This Device isn't paired.")?;
+            let token = crate::sync::token_or_register(app, &relay, &machine).await.map_err(|e| e.to_string())?;
+            app.relay.receiver_setup(&relay, &token, &receiver, params["subject"].as_str().filter(|subject| !subject.is_empty())).await.map_err(|error| match error.status {
+                Some(404) => format!("This relay has no {receiver} receiver."),
+                _ => error.message,
+            })
+        }
+        "routines.describe" => routines::describe(&string(&params, "schedule")?, params["timezone"].as_str(), params["missed_run_policy"].as_str()),
+        "device.service_status" => {
+            let runner = opt_string(&params, "id").or_else(|| app.this_device_id()).ok_or("No identity on this Device")?;
+            if app.this_device_id().as_deref() == Some(&runner) {
+                #[cfg(feature = "cli")]
+                { crate::service::status_out(&app.config) }
+                #[cfg(not(feature = "cli"))]
+                { Err("This Device does not run a CLI service.".into()) }
+            } else {
+                crate::requests::ask(app, &runner, "service.status", json!({})).await
+            }
+        }
+
+        method if method.starts_with("feedback.") => crate::feedback::on_runner(app, method, params).await,
 
         // The marketplace: plugins, each with the Runners that have it, and bots to add from a
         // template (`bots.create { template_id }`).
@@ -557,7 +757,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .map(|m| {
                     let mut out = serde_json::to_value(m).unwrap_or_default();
                     // A server from a Runner's mcp.json that happens to share the id is not this plugin.
-                    out["installed_on"] = json!(installed_on.iter().filter(|(_, p)| p.iter().any(|s| s.id == m.id && s.source.is_none())).map(|(id, _)| id.clone()).collect::<Vec<_>>());
+                    out["installed_on"] = json!(installed_on.iter().filter(|(_, p)| p.iter().any(|s| s.service_id.as_deref().unwrap_or(&s.id) == m.id && s.source.is_none())).map(|(id, _)| id.clone()).collect::<Vec<_>>());
                     out
                 })
                 .collect();
@@ -573,7 +773,10 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     out
                 })
                 .collect();
-            Ok(json!({ "plugins": plugins, "bots": bots }))
+            let packs: Vec<_> = index.packs.iter().filter(|p| {
+                query.split_whitespace().all(|word| format!("{} {} {}", p.name, p.outcome, p.description).to_lowercase().contains(&word.to_lowercase()))
+            }).collect();
+            Ok(json!({ "plugins": plugins, "bots": bots, "packs": packs }))
         }
         // Asks lorca.app for a newer marketplace index now, even within the hour of the last check.
         "marketplace.reload" => {
@@ -591,13 +794,19 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 }
             };
             let source = if params.get("plugin_id").is_some() { "marketplace" } else { "inline" };
-            let body = json!({ "manifest": manifest, "source": source });
+            let body = json!({ "manifest": manifest, "source": source, "account_name": params["account_name"] });
             let status = crate::plugins::on_runner(app, &runner_id, "plugins.install", body).await?;
             Ok(json!({ "status": status }))
         }
         "plugins.uninstall" => {
             let runner_id = string(&params, "runner_id")?;
             crate::plugins::on_runner(app, &runner_id, "plugins.uninstall", json!({ "plugin_id": string(&params, "plugin_id")? })).await
+        }
+        "plugins.rename" => {
+            let runner_id = string(&params, "runner_id")?;
+            let body = json!({ "plugin_id": string(&params, "plugin_id")?, "account_name": string(&params, "account_name")? });
+            let status = crate::plugins::on_runner(app, &runner_id, "plugins.rename", body).await?;
+            Ok(json!({ "status": status }))
         }
         "plugins.set_variables" => {
             let runner_id = string(&params, "runner_id")?;
@@ -640,11 +849,32 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Box::pin(crate::plugins::mcp_json::on_runner(app, runner_id.as_deref(), method, params)).await
         }
         // Auto-review: the check on plugin and shell actions, shared through the roster.
-        // `rules` replaces the list; a rule without an id gets one.
+        // `rules` replaces the list; a rule without an id gets one. `provider` picks a
+        // connected provider to review with (empty or null for the bot's own). `models` sets a
+        // provider's review model by kind, or with null or "" puts back its default; the
+        // providers it leaves out keep theirs.
         "auto_review.set" => {
             let mut auto_review = app.auto_review();
             if let Some(enabled) = params["is_enabled"].as_bool() {
                 auto_review.is_enabled = enabled;
+            }
+            if let Some(provider) = params.get("provider") {
+                let provider = provider.as_str().map(str::trim).filter(|kind| !kind.is_empty());
+                if let Some(kind) = provider {
+                    let credentials = app.credentials.lock().unwrap();
+                    if !credentials.connected_kinds().iter().any(|connected| connected == kind) {
+                        return Err(format!("{} is not connected", credentials.label(kind)));
+                    }
+                }
+                auto_review.provider = provider.map(str::to_string);
+            }
+            if let Some(models) = params["models"].as_object() {
+                for (kind, model) in models {
+                    match model.as_str().map(str::trim).filter(|model| !model.is_empty()) {
+                        Some(model) => auto_review.models.insert(kind.clone(), model.to_string()),
+                        None => auto_review.models.remove(kind),
+                    };
+                }
             }
             if let Some(rules) = params["rules"].as_array() {
                 auto_review.rules = rules
@@ -676,7 +906,11 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let message = app.message(&chat_id, &message_id).ok_or("Unknown message")?;
             let Author::Bot { bot_id } = &message.author else { return Err("Not a permission request".into()) };
             let bot = app.bot(bot_id).ok_or("Unknown bot")?;
-            let body = json!({ "chat_id": chat_id, "message_id": message_id, "decision": decision });
+            // A secret request's values go along, here or sealed to the Runner, and nowhere else.
+            let mut body = json!({ "chat_id": chat_id, "message_id": message_id, "decision": decision });
+            if let Some(values) = params.get("values").filter(|values| values.is_object()) {
+                body["values"] = values.clone();
+            }
             // Sign in on a card for a bot on another Runner: the sign-in page opens here.
             if let Body::Permission { tool, plugin_id, plugin_name, decision: current, .. } = &message.body {
                 let signs_in = tool == "connect" && current == "pending" && decision != "deny";
@@ -701,6 +935,34 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 return crate::shell::serve(app, method, &body).await;
             }
             requests::ask(app, &bot.runner_id, method, body).await
+        }
+
+        // A coding agent's card: its transcript, Stop, an answer to what its pane asks, and its
+        // pane brought forward on the Runner. Here when the bot runs here, else sealed to its
+        // Runner, except showing the pane, which is the Runner's own.
+        "coding.transcript" | "coding.stop" | "coding.answer" | "coding.show" => {
+            let chat_id = string(&params, "chat_id")?;
+            let message_id = string(&params, "message_id")?;
+            let message = app.message(&chat_id, &message_id).ok_or("Unknown message")?;
+            let Author::Bot { bot_id } = &message.author else { return Err("That row has no coding agent".into()) };
+            let bot = app.bot(bot_id).ok_or("Unknown bot")?;
+            let body = json!({ "chat_id": chat_id, "message_id": message_id, "choice": params["choice"], "text": params["text"] });
+            if app.this_device_id().as_deref() == Some(bot.runner_id.as_str()) {
+                #[cfg(feature = "runner")]
+                return crate::coding::serve(app, method, &body).await;
+            }
+            if method == "coding.show" {
+                return Err("Its pane is on the Runner".into());
+            }
+            requests::ask(app, &bot.runner_id, method, body).await
+        }
+        // `lorca coding hook` in the pane of a coding agent this CLI runs asks whether its next
+        // command may run.
+        #[cfg(feature = "runner")]
+        "coding.review" => {
+            let id = string(&params, "agent_id")?;
+            let command = string(&params, "command")?;
+            crate::coding::review_for_hook(app, &id, &command).await
         }
 
         // Read one API key on demand for the local settings editor. Snapshots and events

@@ -4,6 +4,8 @@
 
 pub mod bash;
 pub mod bash_session;
+#[cfg(windows)]
+mod conpty;
 pub mod edit;
 pub mod find;
 pub mod grep;
@@ -18,8 +20,8 @@ use std::sync::Arc;
 
 use crate::tool::Tool;
 
-pub use bash::BashTool;
-pub use bash_session::{BashInputTool, BashOutputTool, BashSession, BashSessions, SessionEnd};
+pub use bash::{BashTool, SecretVariables};
+pub use bash_session::{terminals, BashInputTool, BashOutputTool, BashSession, BashSessions, SessionEnd};
 pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;
@@ -50,13 +52,23 @@ pub fn coding_tools(cwd: impl Into<PathBuf>) -> Vec<Arc<dyn Tool>> {
 }
 
 /// The seven tools, with `bash` running each command in a terminal session `sessions` keeps,
-/// plus `bash_input` and `bash_output` to reach a command that is still running. On Windows
-/// `bash` runs on pipes and the two are left out. `extras` go over the login shell's environment
-/// for every command.
-pub fn coding_tools_with_sessions(cwd: impl Into<PathBuf>, sessions: Arc<dyn BashSessions>, extras: crate::login_shell::Extras) -> Vec<Arc<dyn Tool>> {
+/// plus `bash_input` and `bash_output` to reach a command that is still running. Where there are
+/// no terminals ([`terminals`]: a Windows before 10 1809) `bash` runs on pipes and the two are
+/// left out. `extras` go over the login shell's environment
+/// for every command, and `secrets` lets a call name saved secrets for its command's environment.
+pub fn coding_tools_with_sessions(
+    cwd: impl Into<PathBuf>,
+    sessions: Arc<dyn BashSessions>,
+    extras: crate::login_shell::Extras,
+    secrets: Option<Arc<dyn SecretVariables>>,
+) -> Vec<Arc<dyn Tool>> {
     let cwd: PathBuf = cwd.into();
-    let mut tools = with_bash(BashTool::with_sessions(cwd.clone(), sessions.clone()).with_extras(extras), cwd);
-    if cfg!(unix) {
+    let mut bash = BashTool::with_sessions(cwd.clone(), sessions.clone()).with_extras(extras);
+    if let Some(secrets) = secrets {
+        bash = bash.with_secrets(secrets);
+    }
+    let mut tools = with_bash(bash, cwd);
+    if terminals() {
         tools.push(Arc::new(BashInputTool::new(sessions.clone())));
         tools.push(Arc::new(BashOutputTool::new(sessions)));
     }

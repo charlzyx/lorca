@@ -169,6 +169,24 @@ async fn machines_challenges_envelopes_and_revocation() {
 }
 
 #[tokio::test]
+async fn event_envelopes_wait_for_their_recipient_and_use_sealed_retention() {
+    assert!(KINDS.contains(&"event") && SEALED_KINDS.contains(&"event"));
+    for (store, _) in backends().await {
+        let (who, runner, gateway) = (name("identity"), name("runner"), name("gateway"));
+        ok!(store.register_identity(&who, "content", &runner, "box", "attestation"));
+        ok!(store.register_identity(&who, "content", &gateway, "box", "attestation"));
+        ok!(store.insert_blob(NewBlob { kind: "event".into(), recipient_machine_pubkey: Some(runner.clone()), ..blob(&who, "event", b"opaque sealed event") }, 0));
+        assert!(ids(&store, &who, &gateway, 0, i64::MAX).await.is_empty());
+        assert_eq!(ids(&store, &who, &runner, 0, i64::MAX).await, ["event"]);
+        assert_eq!(ok!(store.blob(&who, &runner, "event")).unwrap().ciphertext, b"opaque sealed event");
+        ok!(store.sweep(now() - 7 * 86_400, now() - 180 * 86_400));
+        assert_eq!(ids(&store, &who, &runner, 0, i64::MAX).await, ["event"], "fresh offline work stays");
+        ok!(store.delete_blob(&who, "event"));
+        assert!(ids(&store, &who, &runner, 0, i64::MAX).await.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn a_paired_machine_attests_another() {
     for (store, _) in backends().await {
         let (who, mac, laptop, phone) = (name("identity"), name("mac"), name("laptop"), name("phone"));
@@ -228,7 +246,7 @@ async fn presence_and_events_reach_the_sockets() {
         assert!(ok!(store.online(&who)).contains(&mac));
 
         // The store opened once its listener was listening, so an event published at once arrives.
-        store.publish(Event::Blobs { identity: who.clone(), recipient: None }).await;
+        store.publish(Event::Blobs { identity: who.clone(), recipient: None, sender: None }).await;
         let signal = tokio::time::timeout(std::time::Duration::from_secs(5), seat.signals.recv()).await;
         assert_eq!(signal.ok().flatten(), Some(crate::hub::Signal::Blobs), "{}", store.describe());
 
@@ -405,5 +423,86 @@ async fn a_group_pages_backwards_by_where_each_message_began() {
         assert_eq!((page(&tight), more), (vec!["b1".to_string()], true), "{}", store.describe());
         let (none, more) = ok!(store.group_page(&who, "nowhere", i64::MAX, 2, i64::MAX));
         assert!(none.is_empty() && !more);
+    }
+}
+
+#[tokio::test]
+async fn a_shared_link_belongs_to_the_identity_that_put_it() {
+    for (store, _) in backends().await {
+        let (owner, other, id) = (name("owner"), name("other"), name("link"));
+        ok!(store.register_identity(&owner, "content", &name("machine"), "box", "attestation"));
+        ok!(store.register_identity(&other, "content", &name("machine"), "box", "attestation"));
+        ok!(store.put_share(&owner, &id, b"first", 2));
+        ok!(store.put_share(&owner, &id, b"second", 2));
+        assert_eq!(ok!(store.share(&id)).as_deref(), Some(&b"second"[..]));
+        assert_eq!(store.put_share(&other, &id, b"taken", 2).await.err().map(|e| axum::response::IntoResponse::into_response(e).status().as_u16()), Some(403));
+        assert!(!ok!(store.delete_share(&other, &id)));
+        ok!(store.put_share(&owner, &name("link"), b"two", 2));
+        assert_eq!(store.put_share(&owner, &name("link"), b"three", 2).await.err().map(|e| axum::response::IntoResponse::into_response(e).status().as_u16()), Some(409));
+        assert!(ok!(store.delete_share(&owner, &id)));
+        assert!(ok!(store.share(&id)).is_none());
+        ok!(store.delete_identity(&owner, false));
+        ok!(store.put_share(&other, &name("link"), b"room", 2));
+    }
+}
+
+#[tokio::test]
+async fn receiver_states_accounts_and_subscriptions_belong_to_their_identity() {
+    for (store, _) in backends().await {
+        let (who, other) = (name("identity"), name("identity"));
+        // A state works once, for its receiver, while it is fresh.
+        let state = name("state");
+        ok!(store.receiver_state_put(&state, "github", &who));
+        assert_eq!(ok!(store.receiver_state_take(&state, "webhook", 0)), None, "another receiver's");
+        let fresh = name("state");
+        ok!(store.receiver_state_put(&fresh, "github", &who));
+        assert_eq!(ok!(store.receiver_state_take(&fresh, "github", now() + 60)), None, "a stale one");
+        let good = name("state");
+        ok!(store.receiver_state_put(&good, "github", &who));
+        assert_eq!(ok!(store.receiver_state_take(&good, "github", now() - 60)).as_deref(), Some(who.as_str()));
+        assert_eq!(ok!(store.receiver_state_take(&good, "github", now() - 60)), None, "once");
+        // An account binds to each identity that proved it holds it, with what it may reach there;
+        // binding again replaces that.
+        let account = name("installation");
+        ok!(store.receiver_bind("github", &account, &who, "acme", r#"["acme/a"]"#));
+        ok!(store.receiver_bind("github", &account, &who, "acme", r#"["acme/a","acme/b"]"#));
+        assert_eq!(ok!(store.receiver_scope("github", &account, &who)).as_deref(), Some(r#"["acme/a","acme/b"]"#));
+        assert_eq!(ok!(store.receiver_scope("github", &account, &other)), None);
+        let sub = |identity: &str, subject: &str| ReceiverSub {
+            id: name("sub"),
+            receiver: "github".into(),
+            identity_pubkey: identity.into(),
+            machine_pubkey: "machine".into(),
+            subject: subject.into(),
+            subscription_id: "ev-1".into(),
+            generation: 1,
+            secret: "a-secret-of-sixteen".into(),
+            key_hash: None,
+            account: Some(account.clone()),
+            state: Some("{}".into()),
+            created_at: now(),
+        };
+        let repo = name("acme").to_lowercase();
+        let first = sub(&who, &format!("{repo}/pro_ject#42"));
+        ok!(store.receiver_subscribe(&first, 2));
+        ok!(store.receiver_subscribe(&sub(&who, &format!("{repo}/pro_ject#7")), 2));
+        assert!(store.receiver_subscribe(&sub(&who, &format!("{repo}/pro_ject#8")), 2).await.is_err(), "at most two");
+        ok!(store.receiver_subscribe(&sub(&other, &format!("{repo}/proxject#9")), 2));
+        // A subject's prefix matches as written: `_` is no wildcard.
+        assert_eq!(ok!(store.receiver_subs("github", &format!("{repo}/pro_ject#"))).len(), 2);
+        assert_eq!(ok!(store.receiver_subs("github", &format!("{repo}/proxject#"))).len(), 1);
+        assert_eq!(ok!(store.receiver_sub("github", &first.id)), Some(first.clone()));
+        assert_eq!(ok!(store.receiver_sub("webhook", &first.id)), None);
+        ok!(store.receiver_set_state("github", &first.id, "{\"head_sha\":\"abc\"}"));
+        assert_eq!(ok!(store.receiver_sub("github", &first.id)).unwrap().state.as_deref(), Some("{\"head_sha\":\"abc\"}"));
+        assert!(!ok!(store.receiver_set_key(&other, "github", &first.id, "hash")), "not theirs");
+        assert!(ok!(store.receiver_set_key(&who, "github", &first.id, "hash")));
+        assert!(!ok!(store.receiver_unsubscribe(&other, "github", &first.id)));
+        assert!(ok!(store.receiver_unsubscribe(&who, "github", &first.id)));
+        // The service drops the account: its bindings and every subscription through it go.
+        let removed = ok!(store.receiver_unbind("github", &account));
+        assert_eq!(removed.len(), 2);
+        assert_eq!(ok!(store.receiver_scope("github", &account, &who)), None);
+        assert!(ok!(store.receiver_subs("github", &repo)).is_empty());
     }
 }

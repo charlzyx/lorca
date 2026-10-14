@@ -80,12 +80,13 @@ final class MarketplaceHomePage: MarketplacePage {
         return Build.stack([line, retry], spacing: 10)
     }
 
-    /// Featured Plugins, Featured Bots, then a section per category, plugins before bots. A
+    /// Workflows, Featured Plugins, Featured Bots, then a section per category, plugins before bots. A
     /// featured section's View all lists every plugin or every bot, the featured ones first.
     /// A category leads with what the featured sections do not already show, and one with both
     /// kinds keeps half its rows for bots, so its plugins never hide them.
     private func homeSections(_ catalog: Marketplace) -> [NSView] {
         var sections: [NSView] = []
+        if !catalog.packs.isEmpty { sections.append(workflowSection(catalog.packs)) }
         let featuredPlugins = catalog.plugins.filter(\.isFeatured)
         if !featuredPlugins.isEmpty {
             sections.append(section(L("Featured Plugins"), featuredPlugins.map(MarketplaceItem.plugin), listTitle: L("Plugins")) { catalog in
@@ -125,11 +126,14 @@ final class MarketplaceHomePage: MarketplacePage {
         return MarketplaceSection(title: title, rows: rows, onViewAll: viewAll)
     }
 
-    /// What matches every word of the query, with All, Plugins, and Bots when both kinds do.
+    /// The workflows that match every word of the query, then the plugins and bots that do, with
+    /// All, Plugins, and Bots when both kinds do.
     private func results(for query: String, in catalog: Marketplace) -> [NSView] {
         let words = query.split(whereSeparator: \.isWhitespace).map(String.init)
         let found = catalog.items.filter { $0.matches(words) }
-        guard !found.isEmpty else { return [statusLine(L("No results match “%@”", query))] }
+        let packs = catalog.packs.filter { $0.matches(words) }
+        let workflows = packs.isEmpty ? [] : [workflowSection(packs)]
+        guard !found.isEmpty else { return workflows.isEmpty ? [statusLine(L("No results match “%@”", query))] : workflows }
         let plugins = found.filter { if case .plugin = $0 { true } else { false } }
         let bots = found.filter { if case .bot = $0 { true } else { false } }
         var filter: NSView?
@@ -143,7 +147,7 @@ final class MarketplaceHomePage: MarketplacePage {
             filter = control
             shown = kind == 1 ? plugins : kind == 2 ? bots : found
         }
-        return [MarketplaceSection(title: L("Results"), rows: shown.map(market.row(for:)), accessory: filter)]
+        return workflows + [MarketplaceSection(title: L("Results"), rows: shown.map(market.row(for:)), accessory: filter)]
     }
 
     @objc private func searchChanged() {

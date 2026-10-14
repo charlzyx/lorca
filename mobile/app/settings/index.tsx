@@ -7,7 +7,7 @@ import { ActivityIndicator, Alert, Platform, ScrollView, StyleSheet, Text, View 
 import { engine } from "../../src/core/engine";
 import { loadPrefs } from "../../src/core/prefs";
 import { checkForUpdates, installedVersion, installUpdate, setDailyChecks, updatesSupported, useUpdates, type Updates } from "../../src/core/updates";
-import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, providerLabel } from "../../src/core/model";
+import { CUSTOM_PRESETS, customProviderNamed, deviceName, isCustomProvider, isRunner, presetGroup, providerLabel, reviewModelRows, reviewPicker, withCustomModels, type ReviewModelRow } from "../../src/core/model";
 import { deviceIsOnline, useStore } from "../../src/core/store";
 import { deviceLanguage, languageNames, languages, setAppLanguage, t, useLanguage } from "../../src/i18n";
 import { FieldRow, MenuRow, Row, Section, ToggleRow, type MenuChoice } from "../../src/ui/forms";
@@ -16,6 +16,7 @@ import { Symbol } from "../../src/ui/Symbol";
 import { usePalette } from "../../src/ui/theme";
 import { deviceSymbol } from "../../src/ui/devices";
 import { CloseToolbar } from "../../src/ui/navigation";
+import { alert } from "../../src/ui/alert";
 import {
   automaticLanguage,
   languageName,
@@ -53,6 +54,8 @@ export default function SettingsScreen() {
   const identity = useStore((s) => s.identityId);
   const autoReview = useStore((s) => s.auto_review);
   const providers = useStore((s) => s.providers);
+  const sharedLinks = useStore((s) => s.shared_links);
+  const catalog = withCustomModels(useStore((s) => s.models), providers);
   const thisDevice = devices.find((d) => d.is_this_device);
   const [name, setName] = useState(thisDevice?.name ?? "");
   const [addingRule, setAddingRule] = useState(false);
@@ -76,8 +79,54 @@ export default function SettingsScreen() {
     { title: systemLanguage, selected: !appLanguage.chosen, onPress: () => setAppLanguage(undefined) },
     ...languages.map((code) => ({ title: languageNames[code], selected: appLanguage.chosen === code, onPress: () => setAppLanguage(code) })),
   ];
-  // Add Custom Provider's menu: the hosted presets, the ones on the user's own computer, then any
-  // other server. A preset the account has already opens that provider, checked.
+  // Reviews with, after Details' Runs with: the bot's own provider, then every connected one.
+  const reviewer = reviewPicker(autoReview, providers);
+  const botsProvider = t("Bot's provider");
+  const reviewProviderChoices: MenuChoice[] = [
+    {
+      title: botsProvider,
+      selected: !reviewer.provider,
+      onPress: () => {
+        if (autoReview.provider) engine.setReviewProvider(undefined);
+      },
+      dividerAfter: reviewer.providers.length > 0,
+    },
+    ...reviewer.providers.map((kind) => ({
+      title: providerLabel(kind, providers),
+      selected: kind === reviewer.provider,
+      onPress: () => {
+        if (kind !== autoReview.provider) engine.setReviewProvider(kind);
+      },
+    })),
+  ];
+  // Review Models: each connected provider's, Default (the model its status names) first, then
+  // all its models, decision models among them.
+  const reviewModels = reviewModelRows(autoReview, providers, catalog);
+  function reviewModelMenu(row: ReviewModelRow) {
+    const fallback = row.defaultName ? t("Default ({model})", { model: row.defaultName }) : t("Default");
+    const choices: MenuChoice[] = [
+      {
+        title: fallback,
+        selected: !row.picked,
+        onPress: () => {
+          if (row.picked) engine.setReviewModel(row.kind, undefined);
+        },
+        dividerAfter: row.models.length > 0,
+      },
+      ...row.models.map((model) => ({
+        title: model.name,
+        selected: model.id === row.picked,
+        onPress: () => {
+          if (model.id !== row.picked) engine.setReviewModel(row.kind, model.id);
+        },
+      })),
+    ];
+    const value = row.picked ? (row.models.find((model) => model.id === row.picked)?.name ?? row.picked) : fallback;
+    return { title: providerLabel(row.kind, providers), value, choices };
+  }
+  // Add Custom Provider's menu: the hosted presets, the ones on the user's own computer, the
+  // decision APIs Auto-review can use, then any other server. A preset the account has already
+  // opens that provider, checked.
   const customProviderChoices: MenuChoice[] = [
     ...CUSTOM_PRESETS.map((preset, index) => {
       const existing = customProviderNamed(preset.name, providers);
@@ -85,7 +134,7 @@ export default function SettingsScreen() {
       return {
         title: preset.name,
         selected: !!existing,
-        dividerAfter: !next || !!next.local !== !!preset.local,
+        dividerAfter: !next || presetGroup(next) !== presetGroup(preset),
         onPress: () =>
           router.push({ pathname: "/settings/custom-provider", params: existing ? { kind: existing.kind } : { preset: preset.name } }),
       };
@@ -98,9 +147,13 @@ export default function SettingsScreen() {
     a.id === thisId ? -1 : b.id === thisId ? 1 : Number(!!a.unknown) - Number(!!b.unknown) || a.name.localeCompare(b.name),
   );
 
+  // Blank takes back the name the phone itself goes by.
   function commitName() {
-    if (thisDevice && name.trim() && name.trim() !== thisDevice.name)
-      void engine.renameDevice(name);
+    if (!thisDevice) return;
+    const trimmed = name.trim();
+    if (!trimmed) setName(thisDevice.machine_name ?? thisDevice.name);
+    if (trimmed === thisDevice.name) return;
+    engine.setDeviceName(thisDevice.id, trimmed).catch((error: unknown) => alert(t("Couldn't rename it"), error instanceof Error ? error.message : String(error)));
   }
 
   function addRule() {
@@ -134,7 +187,7 @@ export default function SettingsScreen() {
     if (!rule) return;
     const flipped: "allow" | "ask" =
       rule.behavior === "allow" ? "ask" : "allow";
-    Alert.alert(
+    alert(
       rule.text,
       rule.behavior === "allow" ? t("Allow automatically") : t("Ask first"),
       [
@@ -163,7 +216,7 @@ export default function SettingsScreen() {
   }
 
   function confirmUnpair() {
-    Alert.alert(
+    alert(
       t("Unpair this phone?"),
       t("Its keys and the synced chats are removed from this phone. Your other paired Devices keep everything, and you can pair again any time."),
       [
@@ -197,6 +250,7 @@ export default function SettingsScreen() {
           <FieldRow
             label={t("Name")}
             value={name}
+            placeholder={thisDevice?.machine_name ?? thisDevice?.name}
             onChangeText={setName}
             onBlur={commitName}
             onSubmitEditing={commitName}
@@ -242,6 +296,20 @@ export default function SettingsScreen() {
               engine.setAutoReview({ ...autoReview, is_enabled: v })
             }
           />
+        </Section>
+
+        <Section title={t("Reviews with")}>
+          <Row
+            title={t("Provider")}
+            menu={{
+              title: t("Provider"),
+              value: reviewer.provider ? providerLabel(reviewer.provider, providers) : botsProvider,
+              choices: reviewProviderChoices,
+            }}
+          />
+        </Section>
+
+        <Section title={t("Auto-review Rules")}>
           {autoReview.rules.map((rule) => (
             <Row
               key={rule.id}
@@ -286,6 +354,22 @@ export default function SettingsScreen() {
             )),
             <MenuRow key="add-custom-provider" title={t("Add Custom Provider")} choices={customProviderChoices} />,
           ]}
+        </Section>
+
+        {reviewModels.length > 0 && (
+          <Section
+            title={t("Review Models")}
+            footer={t("Auto-review runs the review model of the bot's provider, or of the provider picked in Auto-review. A decision model writes no rule, so a card it pauses offers Allow once and Deny.")}
+          >
+            {reviewModels.map((row) => {
+              const menu = reviewModelMenu(row);
+              return <Row key={row.kind} title={menu.title} menu={menu} />;
+            })}
+          </Section>
+        )}
+
+        <Section>
+          <Row title={t("Shared Links")} detail={sharedLinks.length ? String(sharedLinks.length) : undefined} chevron onPress={() => router.push("/settings/shared-links")} />
         </Section>
 
         <Section

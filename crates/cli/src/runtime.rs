@@ -69,15 +69,32 @@ pub fn send_user_message(
     if let Some(id) = message_id.filter(|id| !id.is_empty()) {
         message.id = id;
     }
+    admit_user_message(app, &chat, message, &mentions, replied_bot.as_deref())
+}
+
+/// The user's message with what they recorded in one of `bot_id`'s browser profiles, addressed
+/// to that bot: the bot reads the recording with it.
+pub fn send_recording(app: Arc<App>, chat_id: &str, bot_id: &str, text: &str, recording: RecordingRef) -> anyhow::Result<Message> {
+    let chat = app.chat(chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+    if !chat.meta.bot_ids.iter().any(|id| id == bot_id) {
+        anyhow::bail!("The bot isn't in this chat");
+    }
+    let mentions = if chat.meta.is_group() { vec![bot_id.to_string()] } else { Vec::new() };
+    let mut message = Message::new(chat_id, Author::You, Body::Text { text: text.trim().to_string(), attachments: Vec::new(), mentions: mentions.clone(), reply_to: None });
+    message.recording = Some(recording);
+    admit_user_message(app, &chat, message, &mentions, None)
+}
+
+fn admit_user_message(app: Arc<App>, chat: &Chat, message: Message, mentions: &[String], replied_bot: Option<&str>) -> anyhow::Result<Message> {
     app.upsert_message(message.clone(), true);
     #[cfg(feature = "runner")]
     crate::turns::hear_user_message(&app, &message);
 
     if chat.meta.is_group() {
-        let members = turn_order(&chat.meta, &app, &mentions, replied_bot.as_deref());
-        start_room(app.clone(), chat_id.to_string(), message.id.clone(), members);
+        let members = turn_order(&chat.meta, &app, mentions, replied_bot);
+        start_room(app.clone(), chat.meta.id.clone(), message.id.clone(), members);
     } else if let Some(bot) = chat.meta.bot_ids.first().and_then(|id| app.bot(id)) {
-        start_turn(&app, user_turn_job(&app, chat_id, &bot.id, &message.id));
+        start_turn(&app, user_turn_job(&app, &chat.meta.id, &bot.id, &message.id));
     }
     Ok(message)
 }
@@ -96,12 +113,16 @@ pub fn greet_new_bot(app: &Arc<App>, chat_id: &str, bot_id: &str, text: &str, se
 /// Runner currently doing that work. This is the hard Stop path; ordinary messages steer and
 /// do not call it.
 pub fn cancel_chat(app: &Arc<App>, chat_id: &str) {
-    // A command left waiting for input in this chat stops too, turn or no turn.
+    // A command left waiting for input in this chat stops too, turn or no turn, and so do the
+    // coding agents its bots run.
     #[cfg(feature = "runner")]
-    app.shell_sessions.stop_chat(chat_id);
+    {
+        app.shell_sessions.stop_chat(chat_id);
+        app.coding_agents.stop_chat(app, chat_id);
+    }
     for (job_id, runner_id) in app.cancel_chat(chat_id) {
         let Some(runner) = app.device(&runner_id).filter(|runner| !runner.box_pubkey.is_empty()) else { continue };
-        match crate::crypto::seal_json(&runner.box_pubkey, &JobCancel { job_id: job_id.clone() }) {
+        match crate::envelope::seal(app, "job_cancel", &runner, &JobCancel { job_id: job_id.clone() }) {
             Ok(ciphertext) => {
                 app.push_blob("job_cancel", Some(runner.id), ciphertext);
             }
@@ -116,7 +137,10 @@ fn user_turn_job(app: &Arc<App>, chat_id: &str, bot_id: &str, trigger_message_id
         chat_id: chat_id.to_string(),
         bot_id: bot_id.to_string(),
         kind: "turn".into(),
+        task_id: None,
+        task_context: None,
         trigger_message_id: trigger_message_id.to_string(),
+        handoff: None,
         requested_by: app.this_device_id().unwrap_or_default(),
         routine_id: None,
         check: None,
@@ -137,7 +161,10 @@ pub fn command_job(app: &App, chat_id: &str, bot_id: &str, card_id: &str) -> Job
         chat_id: chat_id.to_string(),
         bot_id: bot_id.to_string(),
         kind: "command".into(),
+        task_id: None,
+        task_context: None,
         trigger_message_id: card_id.to_string(),
+        handoff: None,
         requested_by: app.this_device_id().unwrap_or_default(),
         check: None,
         routine_id: None,
@@ -148,6 +175,12 @@ pub fn command_job(app: &App, chat_id: &str, bot_id: &str, card_id: &str) -> Job
         setup: None,
         created_at: now_secs(),
     }
+}
+
+/// The turn in which a bot hears what a coding agent it runs did (`coding::wake`):
+/// `trigger_message_id` is the agent's card.
+pub fn agent_job(app: &App, chat_id: &str, bot_id: &str, card_id: &str) -> Job {
+    Job { kind: "agent".into(), ..command_job(app, chat_id, bot_id, card_id) }
 }
 
 /// Members in chat order, with the ones the message mentions first, then the one whose message
@@ -208,7 +241,7 @@ pub enum TurnOutcome {
 }
 
 impl TurnOutcome {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TurnOutcome::Sent => "sent",
             TurnOutcome::Pass => "pass",
@@ -232,7 +265,11 @@ fn begin_job(
     routine_id: Option<String>,
     runner_id: Option<String>,
     cancel: CancellationToken,
-) {
+) -> bool {
+    let mut running = app.running_jobs.lock().unwrap();
+    if running.contains_key(job_id) {
+        return false;
+    }
     // A job on another Runner outlives this process; `resume_sent_jobs` picks up its wait.
     if let Some(runner_id) = &runner_id {
         let sent = SentJob {
@@ -247,7 +284,7 @@ fn begin_job(
             tracing::error!(%error, %job_id, "keeping a job sent to another Runner");
         }
     }
-    app.running_jobs.lock().unwrap().insert(
+    running.insert(
         job_id.to_string(),
         RunningJob {
             chat_id: chat_id.to_string(),
@@ -258,7 +295,9 @@ fn begin_job(
             activity: None,
         },
     );
+    drop(running);
     app.local_turns_changed();
+    true
 }
 
 fn finish_job(app: &App, job_id: &str) {
@@ -336,7 +375,10 @@ async fn run_room(
                 bot_id: bot.id.clone(),
                 kind: "room_turn".into(),
                 check: None,
+                task_id: None,
+                task_context: None,
                 trigger_message_id: trigger.clone(),
+                handoff: None,
                 routine_id: None,
                 requested_by: app.this_device_id().unwrap_or_default(),
                 from_bot_id: None,
@@ -448,6 +490,9 @@ async fn wait_for_result(
 /// since the first pull may carry a result that landed meanwhile. A group exchange this Device
 /// was running does not resume; only the member turn in flight shows.
 pub fn resume_sent_jobs(app: &Arc<App>) {
+    if let Err(error) = crate::handoffs::resume(app) {
+        tracing::error!(%error, "recovering handoffs");
+    }
     let jobs = match app.store.sent_jobs() {
         Ok(jobs) => jobs,
         Err(error) => {
@@ -488,7 +533,13 @@ pub fn resume_sent_jobs(app: &Arc<App>) {
 }
 
 /// A `job_result` from another Runner reached this Device.
-pub fn deliver_job_result(app: &Arc<App>, result: JobResult) {
+pub fn deliver_job_result(app: &Arc<App>, from: &str, result: JobResult) {
+    // Only the Runner the job went to says how it ended.
+    let sent_there = app.running_jobs.lock().unwrap().get(&result.job_id).is_some_and(|job| job.runner_id.as_deref() == Some(from));
+    if !sent_there {
+        tracing::warn!(job_id = %result.job_id, "a job result from a Device the job was not sent to");
+        return;
+    }
     if let Some(tx) = app.pending_results.lock().unwrap().remove(&result.job_id) {
         let _ = tx.send(result.outcome);
     }
@@ -537,7 +588,7 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
         return Dispatch::Ran;
     }
     match app.device(&bot.runner_id) {
-        Some(runner) if !runner.box_pubkey.is_empty() => match crate::crypto::seal_json(&runner.box_pubkey, &job) {
+        Some(runner) if !runner.box_pubkey.is_empty() => match crate::envelope::seal(app, "job", &runner, &job) {
             Ok(ciphertext) => {
                 app.push_blob("job", Some(runner.id.clone()), ciphertext);
                 if app.relay_url().is_none() {
@@ -566,8 +617,22 @@ pub fn dispatch_job(app: &Arc<App>, job: Job) -> Dispatch {
 /// outcome goes back to the requesting Device when the job came from another one. It registers
 /// before taking the lock, so hard Stop also cancels jobs waiting behind another turn.
 pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) {
+    if job.kind == "task" {
+        match crate::tasks::claim(&app, &job) {
+            Ok(true) => {},
+            result => {
+                if let Err(error) = result { app.notice(&job.chat_id, format!("Task run did not start: {error}")); }
+                if let Some(id) = remote_blob_id { tokio::spawn(async move { crate::sync::delete_remote_blob(&app, &id).await; }); }
+                return;
+            }
+        }
+    }
+    if let Err(error) = crate::handoffs::stage_job(&app, &job) {
+        tracing::error!(%error, job_id = %job.id, "persisting handoff admission");
+        return;
+    }
     let cancel = CancellationToken::new();
-    begin_job(
+    if !begin_job(
         &app,
         &job.id,
         &job.chat_id,
@@ -575,13 +640,48 @@ pub fn spawn_local_job(app: Arc<App>, job: Job, remote_blob_id: Option<String>) 
         job.routine_id.clone(),
         None,
         cancel.clone(),
-    );
+    ) {
+        if let Some(id) = remote_blob_id {
+            tokio::spawn(async move { crate::sync::delete_remote_blob(&app, &id).await });
+        }
+        return;
+    }
     tokio::spawn(async move {
         let lock = app.chat_lock(&job.chat_id);
         let _guard = lock.lock().await;
-        let outcome = run_job_started(&app, job.clone(), cancel).await;
-        if let Some(id) = &job.routine_id {
+        if job.kind == "task" {
+            match crate::tasks::admit(&app, &job).await {
+                Ok(true) => {},
+                result => {
+                    if let Err(error) = result { app.notice(&job.chat_id, format!("Task run did not start: {error}")); }
+                    finish_job(&app, &job.id);
+                    crate::tasks::finished(&app, &job, TurnOutcome::Skipped).await;
+                    if let Some(id) = remote_blob_id { crate::sync::delete_remote_blob(&app, &id).await; }
+                    return;
+                }
+            }
+        }
+        let outcome = run_job_started(&app, job.clone(), cancel.clone()).await;
+        if job.kind == "task" { crate::tasks::finished(&app, &job, if cancel.is_cancelled() { TurnOutcome::Skipped } else { outcome }).await; }
+        // An event turn settles its delivery; it is not a run of the routine it targets.
+        if job.kind == "event" {
+            // The event turn of a routine on events is its run; the delivery's event is read
+            // before it settles and drops its payload.
+            #[cfg(feature = "runner")]
+            let watched = job.routine_id.as_ref().and_then(|_| crate::event_triggers::delivery_event(&app, &job));
+            #[cfg(feature = "runner")]
+            if let Err(error) = crate::event_triggers::finished(&app, &job, outcome, cancel.is_cancelled() && !crate::handoffs::stopped_at_limits(&app, &job)) {
+                tracing::error!(%error, "recording the event turn outcome");
+            }
+            #[cfg(feature = "runner")]
+            if let (Some((subscription_id, payload)), Some(routine_id)) = (watched, job.routine_id.as_deref()) {
+                if app.routine(routine_id).and_then(|routine| routine.events).is_some_and(|events| events.subscription_id == subscription_id) {
+                    crate::routine_events::event_finished(&app, routine_id, &payload, outcome);
+                }
+            }
+        } else if let Some(id) = &job.routine_id {
             crate::routines::finished(&app, id, outcome);
+            if !cancel.is_cancelled() { crate::feedback::routine_outcome(&app, &job, outcome == TurnOutcome::Skipped || job.check.as_ref().is_some_and(|check|check.error.is_some())); }
         }
         if let Some(id) = remote_blob_id {
             crate::sync::delete_remote_blob(&app, &id).await;
@@ -608,8 +708,17 @@ async fn run_job_here(app: &Arc<App>, job: Job, cancel: CancellationToken) -> Tu
 
 /// Runs a job with its working record already installed.
 async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) -> TurnOutcome {
+    crate::workflows::sample_started(app, &job);
+    let admitted = match crate::handoffs::begin_job(app, &job) {
+        Ok(admitted) => admitted,
+        Err(error) => {
+            app.notice(&job.chat_id, format!("Could not start handoff: {error}"));
+            false
+        }
+    };
+    let report_cancel = cancel.clone();
     #[cfg(feature = "runner")]
-    let outcome = if cancel.is_cancelled()
+    let outcome = if !admitted || cancel.is_cancelled()
         || (job.kind == "turn"
             && app.take_steering_message(&job.chat_id, &job.trigger_message_id))
     {
@@ -623,10 +732,18 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
     };
     #[cfg(not(feature = "runner"))]
     let outcome = {
+        let _ = admitted;
         let _ = cancel;
         app.notice(&job.chat_id, "This Device does not run bots; assign the bot to a Runner.");
         TurnOutcome::Skipped
     };
+    crate::workflows::sample_finished(app, &job, outcome);
+    if let Err(error) = crate::handoffs::finish_job(app, &job, outcome, report_cancel.is_cancelled()) {
+        tracing::error!(%error, job_id = %job.id, "reporting handoff outcome");
+    }
+    if report_cancel.is_cancelled() {
+        crate::handoffs::stop_handed_off(app, &job);
+    }
     finish_job(app, &job.id);
     outcome
 }
@@ -634,7 +751,7 @@ async fn run_job_started(app: &Arc<App>, job: Job, cancel: CancellationToken) ->
 fn report_outcome(app: &Arc<App>, job: &Job, outcome: TurnOutcome) {
     let Some(requester) = app.device(&job.requested_by).filter(|d| !d.box_pubkey.is_empty()) else { return };
     let result = JobResult { job_id: job.id.clone(), chat_id: job.chat_id.clone(), bot_id: job.bot_id.clone(), outcome: outcome.as_str().into() };
-    match crate::crypto::seal_json(&requester.box_pubkey, &result) {
+    match crate::envelope::seal(app, "job_result", &requester, &result) {
         Ok(ciphertext) => {
             app.push_blob("job_result", Some(requester.id.clone()), ciphertext);
         }
@@ -684,7 +801,10 @@ mod tests {
                 owner_bot_id: None,
                 description: None,
                 is_pinned: false,
-                created_at: 1.0,
+                section_id: None,
+                is_hidden: false,
+                mute: None,
+                created_at: 1.0, channel: None,
             },
             unread_count: 0,
             usage: None,
@@ -706,6 +826,7 @@ mod tests {
             thinking: None,
             legacy_instructions: String::new(),
             workdir: None,
+            permissions: None,
             created_at: 0.0,
         }
     }
@@ -763,7 +884,7 @@ mod tests {
             Author::You,
             Body::Text {
                 text: String::new(),
-                attachments: vec![Attachment { id: "f".into(), name: "plan.pdf".into(), mime: "application/pdf".into(), size: 1, width: None, height: None }],
+                attachments: vec![Attachment { id: "f".into(), name: "plan.pdf".into(), mime: "application/pdf".into(), size: 1, width: None, height: None, sha256: None }],
                 mentions: Vec::new(),
                 reply_to: None,
             },
@@ -816,6 +937,8 @@ mod tests {
     fn cancellation_is_sealed_to_the_remote_runner() {
         let scratch = scratch_app();
         let app = &scratch.0;
+        // The cancellation is signed as this Device.
+        crate::identity::create(app, None).unwrap();
         let runner_keys = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device {
             id: "runner".into(),
@@ -824,7 +947,7 @@ mod tests {
             os: "macos".into(),
             os_version: String::new(),
             box_pubkey: runner_keys.box_pubkey(),
-            plugins: Vec::new(),
+            plugins: Vec::new(), channels: Vec::new(),
             version: String::new(),
             update: None,
             updated_at: 1,
@@ -850,7 +973,7 @@ mod tests {
         assert_eq!(queued.recipient.as_deref(), Some("runner"));
         let ciphertext = queued.ciphertext;
         let payload: JobCancel =
-            crate::crypto::unseal_json(&runner_keys.box_secret, &ciphertext).unwrap();
+            crate::envelope::body_of(&runner_keys.box_secret, &ciphertext);
         assert_eq!(payload.job_id, "remote-job");
     }
 
@@ -931,6 +1054,8 @@ mod tests {
     fn stop_is_sealed_to_the_device_that_lists_the_turn() {
         let scratch = scratch_app();
         let app = &scratch.0;
+        // The cancellation is signed as this Device.
+        crate::identity::create(app, None).unwrap();
         let mac_keys = crate::keys::Machine::generate();
         app.state.lock().unwrap().devices.push(Device {
             id: "mac".into(),
@@ -939,7 +1064,7 @@ mod tests {
             os: "macos".into(),
             os_version: String::new(),
             box_pubkey: mac_keys.box_pubkey(),
-            plugins: Vec::new(),
+            plugins: Vec::new(), channels: Vec::new(),
             version: String::new(),
             update: None,
             updated_at: 1,
@@ -952,7 +1077,7 @@ mod tests {
         let cancels: Vec<_> = app.store.outbox().unwrap().into_iter().filter(|item| item.kind == "job_cancel").collect();
         let [cancel] = cancels.try_into().unwrap();
         assert_eq!(cancel.recipient.as_deref(), Some("mac"));
-        let payload: JobCancel = crate::crypto::unseal_json(&mac_keys.box_secret, &cancel.ciphertext).unwrap();
+        let payload: JobCancel = crate::envelope::body_of(&mac_keys.box_secret, &cancel.ciphertext);
         assert_eq!(payload.job_id, "mac-job");
     }
 
@@ -970,7 +1095,7 @@ mod tests {
             os: "macos".into(),
             os_version: "26.0".into(),
             box_pubkey: String::new(),
-            plugins: Vec::new(),
+            plugins: Vec::new(), channels: Vec::new(),
             version: String::new(),
             update: None,
             updated_at: 1,
@@ -982,7 +1107,7 @@ mod tests {
             kind: "machine".into(),
             recipient_machine_pubkey: None,
             seq,
-            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns }).unwrap()),
+            ciphertext: crate::keys::b64(&crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns, budgets: Vec::new(), watching: None }).unwrap()),
             created_at: 0,
         };
         let mut events = app.events.subscribe();
@@ -1012,7 +1137,10 @@ mod tests {
             bot_id: "bot".into(),
             check: None,
             kind: "turn".into(),
+            task_id: None,
+            task_context: None,
             trigger_message_id: "message".into(),
+            handoff: None,
             routine_id: None,
             requested_by: String::new(),
             from_bot_id: None,
@@ -1047,7 +1175,7 @@ mod tests {
 
         // The result that lands later ends it there, and nothing is left to resume.
         let mut events = restarted.events.subscribe();
-        deliver_job_result(&restarted, JobResult { job_id: "remote-job".into(), chat_id: "chat".into(), bot_id: "bot".into(), outcome: "sent".into() });
+        deliver_job_result(&restarted, "runner", JobResult { job_id: "remote-job".into(), chat_id: "chat".into(), bot_id: "bot".into(), outcome: "sent".into() });
         let finished = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
         assert!(matches!(finished, Event::JobFinished { job_id, .. } if job_id == "remote-job"));
         assert!(restarted.running_turns().is_empty());

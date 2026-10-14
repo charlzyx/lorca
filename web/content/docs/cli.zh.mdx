@@ -35,17 +35,20 @@ irm https://lorca.app/install-cli.ps1 | iex
 | `lorca` | 列出所有命令。 |
 | `lorca serve` | 运行服务。 |
 | `lorca identity new` | 创建身份并打印备份短语。 |
-| `lorca identity restore <phrase>` | 用备份短语恢复身份。 |
+| `lorca identity restore <phrase>` | 用备份短语恢复身份。没有桌面应用时，要指明 Lorca 的中继：`LORCA_RELAY_URL=https://relay.lorca.app lorca identity restore …`。 |
 | `lorca identity show` | 显示这台设备的身份。 |
 | `lorca pair` | 显示配对字符串，并等待另一台设备。 |
 | `lorca pair <string>` | 用配对字符串加入一个账户。 |
 | `lorca provider set <kind> [api-key]` | 接入 `deepseek`、`anthropic`、`opencode`、`opencode-go`、`chatgpt` 或 `grok`。省略密钥时从标准输入读取；`--base-url` 设置自定义地址。 |
-| `lorca provider add <name> <base-url>` | 添加一个自定义服务商：任何兼容 OpenAI 或 Anthropic API 的服务器。`--api` 选择 `chat-completions`（默认）、`responses` 或 `messages`；`--model` 指定一个模型，每个模型写一次；`--api-key-stdin` 读取密钥。 |
+| `lorca provider add <name> <base-url>` | 添加一个自定义服务商：任何兼容 OpenAI 或 Anthropic API 的服务器，或供自动审查使用的决策 API。`--api` 选择 `chat-completions`（默认）、`responses`、`messages`、`system-one` 或 `decisions`；`--model` 指定一个模型，每个模型写一次；`--api-key-stdin` 读取密钥。 |
 | `lorca provider remove <kind>` | 在每台设备上断开一个服务商，或删除一个自定义服务商（例如 `custom:openrouter`，以 `provider list` 显示的为准）。 |
 | `lorca provider list` | 列出已接入的服务商。 |
 | `lorca mcp …` | 管理这台电脑自己的 MCP 服务器；见 [MCP 服务器](#mcp-服务器)。 |
 | `lorca chats list` | 列出所有聊天：每个聊天的 ID 和智能体，以及群聊的负责人。 |
 | `lorca chats set-owner <group> <bot>` | 把某个智能体设为群聊的[负责人](/zh/docs/group-chats#负责人)。群聊用标题或 ID 指定，智能体用名字或 ID 指定。 |
+| `lorca tasks list` | 列出[任务](/zh/docs/tasks)；`--chat-id`、`--owner-bot-id` 和 `--state` 可以缩小范围。`lorca tasks get <id>` 查看其中一个。 |
+| `lorca tasks create`、`update`、`run` | 用一个 JSON 对象新建、修改或开始一个任务，`-` 表示从标准输入读取。需要 `lorca serve` 正在运行。 |
+| `lorca events …` | 管理这台 Runner 的事件订阅和网关；见[Webhook 与事件](/zh/docs/events)。 |
 | `lorca marketplace reload` | 立即向 lorca.app 检查有没有更新的市场。Lorca 启动时、应用连接时，以及你或智能体浏览市场时也会自己检查，最多每小时一次，所以新的插件和智能体无需更新应用就能用上。 |
 | `lorca models reload` | 立即向 lorca.app 检查有没有更新的模型目录。Lorca 启动时和应用连接时也会自己检查，最多每小时一次，所以新模型无需更新应用就能用上。 |
 | `lorca update` | 立即安装最新版本。正在运行的 `lorca serve` 会在没有智能体工作时重启到新版本。`--check` 只告诉你有没有新版本；`--auto off` 关闭自动更新，`--auto on` 重新打开。 |
@@ -84,7 +87,6 @@ lorca mcp add-json time '{"command": "uvx", "args": ["mcp-server-time"]}'
 ## 无屏幕的 Runner
 
 ```bash
-export LORCA_RELAY_URL=https://relay.example.com
 lorca pair 'lorca://pair?…'   # 来自已有设备上的“配对设备…”或 `lorca pair`
 lorca service install
 ```
@@ -105,14 +107,13 @@ lorca service install
 | --- | --- |
 | `LORCA_HOME` | 密钥、凭据和聊天的存放位置。默认 `~/.lorca`。 |
 | `LORCA_PORT` | 应用连接的本地端口。默认 `4862`。 |
-| `LORCA_RELAY_URL` | 中继地址。 |
+| `LORCA_RELAY_URL` | 中继地址。配对的电脑会从配对码里得知它；只有在没有桌面应用时恢复身份（`https://relay.lorca.app`），或使用[你自己的中继](/zh/docs/relay#自己运行中继)时才需要设置。 |
 | `LORCA_SHELL` | 智能体运行命令所用的 shell。默认 `/bin/bash`；在 Windows 上是 Git for Windows 的 bash。在 macOS 和 Linux 上，无论用哪个 shell，命令都会得到你的登录 shell 的 `PATH` 和环境变量。 |
 | `LORCA_DEEPSEEK_MODEL`、`LORCA_ANTHROPIC_MODEL`、`LORCA_CHATGPT_MODEL`、`LORCA_GROK_MODEL` | 没有指定模型的智能体使用的默认模型。 |
-| `LORCA_MODELS_URL` | Lorca 检查更新模型目录的地址。默认 `https://lorca.app/models/v1.json`；设置 `LORCA_MODELS_FETCH=0` 则不再检查。 |
-| `LORCA_MARKETPLACE_URL` | Lorca 检查更新市场的地址。默认 `https://lorca.app/marketplace/v1.json`；设置 `LORCA_MARKETPLACE_FETCH=0` 则不再检查。 |
+| `LORCA_MODELS_FETCH=0`、`LORCA_MARKETPLACE_FETCH=0` | 不再到 lorca.app 检查新的模型目录或市场。要使用你自己托管的版本，见[中继](/zh/docs/relay#模型目录和市场)。 |
 
 ## 文件
 
-一切都在 `~/.lorca/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json` 里你自己的 MCP 服务器、`catalog.json` 里最近一次获取的模型目录、`marketplace.json` 里最近一次获取的市场、`update.json` 里最近一次的更新检查，以及每个智能体一个的工作区文件夹（里面有它的记忆）。
+一切都在 `~/.lorca/` 下，只有你的用户可读：身份和机器密钥、服务商凭据、设置、聊天、附件、插件、`mcp.json` 里你自己的 MCP 服务器、`catalog.json` 里最近一次获取的模型目录、`marketplace.json` 里最近一次获取的市场、`update.json` 里最近一次的更新检查、`serve-token` 里应用和 `lorca` 连接正在运行的 `lorca serve` 所用的令牌（网页连不上它）、你的[技能](/zh/docs/skills)、智能体索要的[密钥](/zh/docs/secrets)、智能体的[浏览器配置文件](/zh/docs/browser)、[编程智能体](/zh/docs/coding-agents)的 worktree 和记录，以及每个智能体一个的工作区文件夹（里面有它的记忆）。技能、密钥、反馈，以及任务、审核和项目的记录，都用你的账户密钥加密。
 
 macOS 应用把服务的日志写到 `~/Library/Logs/Lorca/cli.log`。使用 `lorca service` 时，日志在 macOS 上是 `~/Library/Logs/Lorca/serve.log`，在 Linux 上用 `journalctl --user -u lorca` 查看，在 Windows 上是 `~/.lorca` 里的 `serve.log`。

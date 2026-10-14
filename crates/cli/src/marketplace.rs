@@ -40,11 +40,16 @@ pub struct Index {
     pub updated: String,
     pub plugins: Vec<Manifest>,
     pub bots: Vec<BotTemplate>,
+    pub packs: Vec<crate::workflows::Pack>,
 }
 
 impl Index {
     pub fn plugin(&self, id: &str) -> Option<&Manifest> {
         self.plugins.iter().find(|p| p.id == id)
+    }
+
+    pub fn pack(&self, id: &str) -> Option<&crate::workflows::Pack> {
+        self.packs.iter().find(|p| p.id == id)
     }
 
     pub fn bot(&self, id: &str) -> Option<&BotTemplate> {
@@ -90,7 +95,7 @@ pub struct BotTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RoutineTemplate {
     pub name: String,
-    /// Anything `crate::schedule::parse` reads: `every 2h`, `0 9 * * 1-5`.
+    /// A repeating schedule `crate::schedule::parse_repeating` reads: `every 2h`, `0 9 * * 1-5`.
     pub schedule: String,
     pub prompt: String,
 }
@@ -117,7 +122,7 @@ impl BotTemplate {
             if routine.name.trim().is_empty() || routine.prompt.trim().is_empty() {
                 return Err(format!("A routine of {} needs a name and a prompt.", template.name));
             }
-            crate::schedule::parse(&routine.schedule).map_err(|e| format!("{} · {}: {e}", template.name, routine.name))?;
+            crate::schedule::parse_repeating(&routine.schedule).map_err(|e| format!("{} · {}: {e}", template.name, routine.name))?;
         }
         Ok(template)
     }
@@ -289,6 +294,8 @@ struct RawIndex {
     plugins: Vec<Value>,
     #[serde(default)]
     bots: Vec<Value>,
+    #[serde(default)]
+    packs: Vec<Value>,
 }
 
 /// Reads an index by rules every later version keeps, so an index written for a newer Lorca
@@ -317,6 +324,13 @@ fn parse(text: &str) -> Result<Index, String> {
             Ok(template) if index.bot(&template.id).is_some() => tracing::warn!(id = %template.id, "skipping a marketplace bot listed twice"),
             Ok(template) => index.bots.push(template),
             Err(error) => tracing::warn!(%error, "skipping a marketplace bot"),
+        }
+    }
+    for entry in &raw.packs {
+        match crate::workflows::Pack::parse(entry, &index) {
+            Ok(pack) if index.pack(&pack.id).is_some() => tracing::warn!(id = %pack.id, "skipping a workflow pack listed twice"),
+            Ok(pack) => index.packs.push(pack),
+            Err(error) => tracing::warn!(%error, "skipping a workflow pack"),
         }
     }
     if index.plugins.is_empty() {
@@ -411,6 +425,42 @@ mod tests {
         assert!(search_plugins(&index.plugins, "nothing-like-this").is_empty());
         assert!(search_bots(&index.bots, "pull requests").iter().any(|b| b.id == "pr-reviewer"));
         assert_eq!(search_bots(&index.bots, "").len(), index.bots.len());
+    }
+
+    #[test]
+    fn builtin_servers_stay_out_of_what_older_builds_read() {
+        // An older build drops an entry whose server type it does not know, so the index keeps
+        // builtin servers apart from `servers`, and Slack stays readable everywhere.
+        let raw: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        for plugin in raw["plugins"].as_array().unwrap() {
+            for server in plugin["servers"].as_object().unwrap().values() {
+                assert!(matches!(server["type"].as_str(), Some("stdio" | "http")), "{}", plugin["id"]);
+            }
+        }
+        let index = bundled();
+        assert!(matches!(index.plugin("slack").unwrap().servers.get("bot"), Some(crate::plugins::ServerSpec::Builtin { service, .. }) if service == "slack"));
+        assert!(matches!(index.plugin("telegram").unwrap().servers.get("telegram"), Some(crate::plugins::ServerSpec::Builtin { service, .. }) if service == "telegram"));
+        assert!(index.plugin("telegram").unwrap().builtin_servers.is_empty());
+    }
+
+    #[test]
+    fn packs_are_additive_and_bad_entries_do_not_hide_the_catalog() {
+        #[derive(Deserialize)]
+        struct OlderIndex { version: u64, plugins: Vec<Value>, bots: Vec<Value> }
+        let old: OlderIndex = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        assert_eq!(old.version, 1);
+        assert!(!old.plugins.is_empty() && !old.bots.is_empty());
+        let mut raw: Value = serde_json::from_str(BUNDLED_INDEX).unwrap();
+        let mut unsupported = raw["packs"][0].clone();
+        unsupported["version"] = serde_json::json!(99);
+        raw["packs"].as_array_mut().unwrap().push(unsupported);
+        let bundled = raw["packs"].as_array().unwrap().len() - 1;
+        let parsed = parse(&raw.to_string()).unwrap();
+        assert_eq!(parsed.packs.len(), bundled);
+        assert_eq!(parsed.plugins.len(), old.plugins.len());
+        assert_eq!(parsed.bots.len(), old.bots.len());
+        raw.as_object_mut().unwrap().remove("packs");
+        assert!(parse(&raw.to_string()).unwrap().packs.is_empty());
     }
 
     #[test]

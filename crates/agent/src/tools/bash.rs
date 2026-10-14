@@ -1,7 +1,7 @@
 //! `bash`: run a shell command in the working directory, with the login shell's environment
 //! ([`crate::login_shell`]). Output is tail-truncated to 2000 lines or 50KB; the full output is
 //! saved to a temp file when truncated. Cancellation kills the whole process group (on Windows,
-//! the process tree).
+//! the job object the shell runs in).
 //!
 //! Built with [`BashTool::new`], it is pi's bash: pipes, nothing on stdin, and the call lasts
 //! as long as the command. Its results carry structured output for codemode scripts: the output
@@ -25,6 +25,10 @@ use crate::tool::{Tool, ToolError, ToolResult, ToolUpdateFn};
 
 pub(crate) const UPDATE_THROTTLE_MS: u64 = 250;
 
+/// How long a killed command's pipes are still read, for what it printed on its way out. A
+/// process the kill missed can hold them open, and a stopped call does not wait for it.
+const KILLED_DRAIN: Duration = Duration::from_secs(1);
+
 /// The most of a command's output a script receives in `output`, as pi's bash gives it.
 const SCRIPT_OUTPUT_MAX_BYTES: usize = 1024 * 1024;
 
@@ -41,12 +45,20 @@ const TERMINAL_DESCRIPTION: &str = "Execute a bash command in the current workin
 
 const NO_INPUT_DESCRIPTION: &str = "Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last 2000 \
      lines or 50KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in \
-     seconds. Commands get no input: stdin is closed, and interactive input is not available on Windows, so pass answers as flags \
-     (--yes, -y) or through files.";
+     seconds. Commands get no input: stdin is closed, and interactive input is not available on this computer, so pass answers as \
+     flags (--yes, -y) or through files.";
 
 const NO_SHELL: &str = "Commands run in Git for Windows' bash, and none was found: no bash.exe in Program Files, Program Files (x86), \
      %LOCALAPPDATA%\\Programs\\Git, or beside a git.exe on PATH. Install Git for Windows from https://git-scm.com/downloads/win, \
      and commands run from the next message on; or set LORCA_SHELL to the full path of a bash.exe and restart Lorca.";
+
+/// Saved secrets a call may name in `secrets`, looked up by the host as the call starts: each
+/// becomes an environment variable of that one command, so the command reads `$NAME` and the
+/// model never holds the value.
+pub trait SecretVariables: Send + Sync {
+    /// The variables for `names`, or why one cannot be had (no such secret).
+    fn variables(&self, names: &[String]) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, String>;
+}
 
 pub struct BashTool {
     cwd: PathBuf,
@@ -55,16 +67,24 @@ pub struct BashTool {
     sessions: Option<Arc<dyn BashSessions>>,
     waiting_after: Duration,
     extras: Arc<crate::login_shell::Extras>,
+    secrets: Option<Arc<dyn SecretVariables>>,
 }
 
 impl BashTool {
     pub fn new(cwd: PathBuf) -> Self {
-        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER, extras: Arc::default() }
+        BashTool { cwd, shell: shell(), sessions: None, waiting_after: WAITING_AFTER, extras: Arc::default(), secrets: None }
+    }
+
+    /// Lets a call name saved secrets (`secrets`) that `secrets` turns into environment variables
+    /// of its command.
+    pub fn with_secrets(mut self, secrets: Arc<dyn SecretVariables>) -> Self {
+        self.secrets = Some(secrets);
+        self
     }
 
     /// Runs each command in a terminal session `sessions` keeps, so a command waiting for input
-    /// returns with its session id and can be answered. On Windows commands still run on pipes,
-    /// with no input.
+    /// returns with its session id and can be answered. Where there are no terminals (a Windows
+    /// before 10 1809) commands still run on pipes, with no input.
     pub fn with_sessions(cwd: PathBuf, sessions: Arc<dyn BashSessions>) -> Self {
         BashTool { sessions: Some(sessions), ..BashTool::new(cwd) }
     }
@@ -82,9 +102,29 @@ impl BashTool {
         self
     }
 
-    /// Where commands run in terminals: a host that keeps sessions, on Unix.
+    /// Where commands run in terminals: a host that keeps sessions, where there are terminals
+    /// ([`super::bash_session::terminals`]).
     fn terminal(&self) -> Option<&Arc<dyn BashSessions>> {
-        self.sessions.as_ref().filter(|_| cfg!(unix))
+        self.sessions.as_ref().filter(|_| super::bash_session::terminals())
+    }
+}
+
+impl BashTool {
+    /// What this call's command gets over the login shell's environment: the tool's own extras,
+    /// and the secrets the call names, as variables.
+    fn extras_for(&self, args: &Value) -> Result<Arc<crate::login_shell::Extras>, ToolError> {
+        let names: Vec<String> = match args.get("secrets") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(names)) => names.iter().map(|name| name.as_str().map(str::to_string).ok_or_else(|| ToolError("secrets is a list of names".into()))).collect::<Result<_, _>>()?,
+            Some(_) => return Err(ToolError("secrets is a list of names".into())),
+        };
+        if names.is_empty() {
+            return Ok(self.extras.clone());
+        }
+        let secrets = self.secrets.as_ref().ok_or_else(|| ToolError("This bash takes no secrets.".into()))?;
+        let mut extras = (*self.extras).clone();
+        extras.variables.extend(secrets.variables(&names).map_err(ToolError)?);
+        Ok(Arc::new(extras))
     }
 }
 
@@ -140,8 +180,7 @@ fn within(path: &Path, dir: &Path) -> bool {
     lower(path).starts_with(lower(dir))
 }
 
-/// Kills the process group the shell leads: `process_group(0)` on pipes, `setsid` in a terminal,
-/// both make its pid the group's id.
+/// Kills the process group a terminal's shell leads: `setsid` makes its pid the group's id.
 #[cfg(unix)]
 pub(crate) fn kill_group(pid: u32) {
     // Negative pid addresses the process group; -0 would be this process's own.
@@ -151,19 +190,6 @@ pub(crate) fn kill_group(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
-}
-
-/// Windows has no process group to signal: `taskkill /T` ends the shell and everything it started.
-#[cfg(windows)]
-pub(crate) fn kill_group(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    let _ = std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 fn describe(text: &str, truncation: &super::truncate::TruncationResult, full_output_path: Option<&Path>) -> String {
@@ -249,6 +275,13 @@ impl Tool for BashTool {
             },
             "required": ["command", "description"]
         });
+        if self.secrets.is_some() {
+            parameters["properties"]["secrets"] = json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Names of saved secrets this command needs, each set as the environment variable of that name ($NAME) for this command only"
+            });
+        }
         if self.terminal().is_some() {
             parameters["properties"]["background"] = json!({
                 "type": "boolean",
@@ -286,24 +319,28 @@ impl Tool for BashTool {
             return Err(ToolError(format!("Working directory does not exist: {}\nCannot execute bash commands.", self.cwd.display())));
         }
         let shell = self.shell.as_deref().ok_or_else(|| ToolError(NO_SHELL.into()))?;
+        let extras = self.extras_for(&args)?;
         if let Some(sessions) = self.terminal() {
             let background = args["background"].as_bool().unwrap_or(false);
-            return super::bash_session::run(shell, &command, &self.cwd, timeout, background, &self.extras, sessions, id, self.waiting_after, cancel, on_update).await;
+            return super::bash_session::run(shell, &command, &self.cwd, timeout, background, &extras, sessions, id, self.waiting_after, cancel, on_update).await;
         }
 
         let mut cmd = crate::login_shell::command(shell).await;
-        self.extras.apply(&mut cmd);
+        extras.apply(&mut cmd);
         cmd.arg("-c").arg(&command).current_dir(&self.cwd).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // A kill reaches everything the shell started: its process group on Unix; on Windows
+        // its job object, which holds a process whose parent has exited too, where `taskkill /T`
+        // no longer finds it.
+        let mut wrapped = process_wrap::tokio::CommandWrap::from(cmd);
         #[cfg(unix)]
-        {
-            cmd.process_group(0);
-        }
+        wrapped.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        wrapped.wrap(process_wrap::tokio::JobObject);
         let started = std::time::Instant::now();
-        let mut child = cmd.spawn().map_err(|e| ToolError(format!("Failed to start {shell}: {e}")))?;
-        let pid = child.id().unwrap_or(0);
+        let mut child = wrapped.spawn().map_err(|e| ToolError(format!("Failed to start {shell}: {e}")))?;
 
-        let mut stdout = child.stdout.take();
-        let mut stderr = child.stderr.take();
+        let mut stdout = child.stdout().take();
+        let mut stderr = child.stderr().take();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let mut readers = Vec::new();
         for reader in [stdout.take().map(|s| Box::pin(s) as std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>), stderr.take().map(|s| Box::pin(s) as _)].into_iter().flatten() {
@@ -331,6 +368,8 @@ impl Tool for BashTool {
         let mut timed_out = false;
         let mut aborted = false;
 
+        // The call waits for the shell, not for what it left running: the wrapper's own `wait`
+        // would wait for the whole group or job.
         let status = loop {
             let sleep_until = deadline.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(3600));
             tokio::select! {
@@ -345,18 +384,19 @@ impl Tool for BashTool {
                                 on_update(ToolResult::text(snapshot.content));
                             }
                         }
-                        None => break child.wait().await.ok(),
+                        None => break child.inner_mut().wait().await.ok(),
                     }
                 }
-                _ = cancel.cancelled() => { aborted = true; kill_group(pid); let _ = child.kill().await; break child.wait().await.ok(); }
-                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; kill_group(pid); let _ = child.kill().await; break child.wait().await.ok(); }
+                _ = cancel.cancelled() => { aborted = true; let _ = child.start_kill(); break child.inner_mut().wait().await.ok(); }
+                _ = tokio::time::sleep_until(sleep_until), if deadline.is_some() => { timed_out = true; let _ = child.start_kill(); break child.inner_mut().wait().await.ok(); }
             }
         };
-        for reader in readers {
-            let _ = reader.await;
-        }
-        while let Ok(bytes) = rx.try_recv() {
+        let drained_by = tokio::time::Instant::now() + KILLED_DRAIN;
+        while let Ok(Some(bytes)) = tokio::time::timeout_at(drained_by, rx.recv()).await {
             output.extend_from_slice(&bytes);
+        }
+        for reader in readers {
+            reader.abort();
         }
 
         let text = String::from_utf8_lossy(&output).into_owned();
@@ -429,6 +469,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    struct Saved;
+    impl SecretVariables for Saved {
+        fn variables(&self, names: &[String]) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, String> {
+            names.iter().map(|name| if name == "API_KEY" { Ok((name.into(), "s3cret-value".into())) } else { Err(format!("No secret {name}")) }).collect()
+        }
+    }
+
+    /// A call names the secrets its command needs; only that command gets them, as variables.
+    #[tokio::test]
+    async fn a_call_gets_the_secrets_it_names_in_its_environment() {
+        let tool = BashTool::new(std::env::temp_dir()).with_secrets(Arc::new(Saved));
+        assert_eq!(tool.parameters()["properties"]["secrets"]["type"], "array");
+        let named = tool.execute("1", json!({ "command": "printf %s \"$API_KEY\"", "secrets": ["API_KEY"] }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        assert_eq!(named.text_content(), "s3cret-value");
+        let unnamed = tool.execute("2", json!({ "command": "printf %s \"${API_KEY:-unset}\"" }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap();
+        assert_eq!(unnamed.text_content(), "unset");
+        let unknown = tool.execute("3", json!({ "command": "true", "secrets": ["OTHER"] }), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
+        assert_eq!(unknown.0, "No secret OTHER");
+        let without = BashTool::new(std::env::temp_dir());
+        assert!(without.parameters()["properties"].get("secrets").is_none());
+        assert!(without.execute("4", json!({ "command": "true", "secrets": ["API_KEY"] }), CancellationToken::new(), Arc::new(|_| {})).await.is_err());
+    }
+
     #[tokio::test]
     async fn runs_and_reports_exit_code() {
         let tool = BashTool::new(std::env::temp_dir());
@@ -481,6 +544,50 @@ mod tests {
         let tool = BashTool::new(std::env::temp_dir());
         let err = tool.execute("1", json!({"command": "echo before; kill -9 $$"}), CancellationToken::new(), Arc::new(|_| {})).await.unwrap_err();
         assert!(err.0.contains("before") && err.0.ends_with("Command terminated by signal 9"), "{}", err.0);
+    }
+
+    /// Runs `command` in a folder of its own and stops it once it prints. Returns the folder, the
+    /// call's error, and how long the call took to return after the stop.
+    async fn stopped_once_it_prints(name: &str, command: &str) -> (PathBuf, String, Duration) {
+        let dir = std::env::temp_dir().join(format!("lorca-bash-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cancel = CancellationToken::new();
+        let stopped_at = Arc::new(std::sync::Mutex::new(None));
+        let (stop, at) = (cancel.clone(), stopped_at.clone());
+        let on_update: ToolUpdateFn = Arc::new(move |_| {
+            at.lock().unwrap().get_or_insert_with(std::time::Instant::now);
+            stop.cancel();
+        });
+        let err = BashTool::new(dir.clone()).execute("1", json!({ "command": command }), cancel, on_update).await.unwrap_err();
+        let stopped_at = stopped_at.lock().unwrap().expect("the command printed");
+        (dir, err.0, stopped_at.elapsed())
+    }
+
+    /// A stop ends every stage of a pipeline, and the call returns at once. On Windows the
+    /// stages are Git Bash's programs, in the shell's job object.
+    #[tokio::test]
+    async fn a_stop_ends_every_stage_of_a_pipeline() {
+        let (dir, err, took) = stopped_once_it_prints("pipeline", "(echo started; sleep 4; echo late > marker) | cat").await;
+        assert!(err.ends_with("Command aborted"), "{err}");
+        assert!(took < Duration::from_millis(2500), "the call returned {took:?} after the stop");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(!dir.join("marker").exists(), "a stage outlived the stop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A process the kill does not reach still holds the output: the stopped call reads it for
+    /// a moment and returns.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stop_does_not_wait_for_what_still_holds_the_output() {
+        // `set -m` gives each job a process group of its own, which the kill does not reach.
+        let (dir, err, took) = stopped_once_it_prints("escaped", "set -m; sleep 30 & echo $! > pid; echo started; wait").await;
+        let pid: i32 = std::fs::read_to_string(dir.join("pid")).unwrap().trim().parse().unwrap();
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(err.contains("started") && err.ends_with("Command aborted"), "{err}");
+        assert!(took < Duration::from_millis(2500), "the call returned {took:?} after the stop");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A drive root on Windows, `/` elsewhere, so the fixture paths are absolute where the test runs.

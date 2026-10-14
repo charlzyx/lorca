@@ -17,6 +17,9 @@ use crate::local_store::LocalStore;
 use crate::credentials::Credentials;
 use crate::relay::RelayClient;
 
+/// How long the app's chat on screen stays put before the other Devices hear of it, so a run
+/// through the sidebar goes up once.
+const WATCH_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct OutboxItem {
@@ -51,14 +54,39 @@ impl Slot {
     }
 }
 
+/// How long a Device remembers what it uploaded, and how many blobs at most: the time a newer
+/// account key takes to reach it after another Device made it.
+pub const RECENT_UPLOADS: i64 = 2 * 60;
+const MAX_RECENT_UPLOADS: usize = 500;
+
+/// A blob this Device uploaded: when, and where the relay put it in the log.
+#[derive(Debug, Clone)]
+pub struct RecentUpload {
+    pub at: i64,
+    pub seq: i64,
+    pub item: OutboxItem,
+}
+
+/// The longest name the account can give a Device.
+pub const MAX_DEVICE_NAME_CHARS: usize = 64;
+
 /// The process's in-memory projection of the local SQLite tables.
 #[derive(Debug, Clone, Default)]
 pub struct State {
     pub devices: Vec<Device>,
     pub bots: Vec<Bot>,
     pub chats: Vec<Chat>,
+    /// The sidebar's sections, in order.
+    pub sections: Vec<Section>,
     pub routines: Vec<Routine>,
+    pub workflows: Vec<crate::workflows::Setup>,
     pub auto_review: AutoReview,
+    pub shared_links: Vec<crate::templates::links::SharedLink>,
+    /// The names the account gives its Devices, by machine pubkey, from the roster.
+    pub device_names: std::collections::BTreeMap<String, String>,
+    /// The machine pubkeys of Devices unpaired from this account, from the roster and kept for
+    /// good: no `machine` blob makes one a Device again and no envelope from one is opened.
+    pub unpaired: std::collections::BTreeSet<String>,
     pub last_seq: i64,
     /// Chats deleted here whose blobs the relay still has to drop.
     pub group_deletes: Vec<String>,
@@ -78,6 +106,9 @@ pub struct State {
     pub turns_online: std::collections::HashSet<String>,
     /// The turns each other Device's latest machine blob lists, by machine pubkey.
     pub device_turns: HashMap<String, Vec<LiveTurn>>,
+    /// The chat each other computer's latest machine blob says its app shows in front of the
+    /// user, by machine pubkey.
+    pub device_watching: HashMap<String, String>,
     /// The relay's machine list as last read: machine pubkey → when the relay attested it, on
     /// this Device's clock. Not kept across runs.
     pub listed_machines: HashMap<String, i64>,
@@ -146,13 +177,25 @@ pub struct SentJob {
 }
 
 pub struct App {
+    /// Serializes scoped context revisions, optimistic checks, and remote replay locally.
+    pub(crate) project_context_lock: Mutex<()>,
     pub config: Config,
     pub settings: Mutex<Settings>,
     pub identity: Mutex<Option<IdentityFile>>,
     pub machine: Mutex<Option<MachineFile>>,
     pub credentials: Mutex<Credentials>,
+    pub playbooks: Mutex<crate::playbooks::Library>,
     pub state: Mutex<State>,
     pub store: LocalStore,
+    /// Serializes encrypted handoff record merges and admission on this Device.
+    pub handoff_lock: Mutex<()>,
+    pub budgets: crate::budgets::BudgetStore,
+    #[cfg(feature = "runner")]
+    pub connector_limits: crate::connector_limits::ConnectorLimits,
+    /// Serializes review decisions, encrypted persistence, and their relay publication.
+    pub review_lock: Mutex<()>,
+    /// An approval wakes the Runner's review executor.
+    pub review_wake: Notify,
     pub events: broadcast::Sender<Event>,
     pub relay: RelayClient,
     pub outbox_notify: Notify,
@@ -161,6 +204,10 @@ pub struct App {
     /// Held from a message's local write to its outbox enqueue, so a chat's `position` order
     /// and the order its messages reach the relay log are the same on every Device.
     message_order: Mutex<()>,
+    /// Serializes task validation with its atomic SQLite CAS and request receipt.
+    pub(crate) task_order: Mutex<()>,
+    /// Serializes output version checks and publication on the producing Runner.
+    pub(crate) output_publication: Mutex<()>,
     pub relay_connected: AtomicBool,
     /// The relay answered `426`: it no longer serves the protocol this build speaks.
     pub relay_update_required: AtomicBool,
@@ -175,6 +222,19 @@ pub struct App {
     /// history). Message and roster events are held back and state is not written per
     /// message; the cycle saves once and emits one snapshot when the page is applied.
     pub bulk_sync: AtomicBool,
+    /// This process has checked the encrypted attention and project context records after an
+    /// upgrade from a build that advanced last_seq without recognizing those blob kinds.
+    pub attention_backfilled: AtomicBool,
+    /// A Device was unpaired: an identity device makes a new generation of the account key once
+    /// its pull has caught up (`identity::rotate_if_due`).
+    pub rotation_due: AtomicBool,
+    /// A Device this one had no record of landed, or a newer account key did: the blobs held
+    /// for them are tried again after the page being applied (`sync::release_held`).
+    pub held_due: AtomicBool,
+    /// What this Device uploaded for the account in the last `RECENT_UPLOADS`, with when: a blob
+    /// that went up under an older key just before a newer one reached it goes up again under
+    /// that one (`sync::account_key_changed`).
+    pub recent_uploads: Mutex<std::collections::VecDeque<RecentUpload>>,
     /// The machine key of the account the sync loop has pulled from the relay since this
     /// process started: its roster, Devices, and credentials. `sync.account` waits on it.
     pub account_pulled: watch::Sender<Option<String>>,
@@ -205,7 +265,9 @@ pub struct App {
     /// Jobs sent to other Runners, waiting for their `job_result`.
     pub pending_results: Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>,
     /// Requests sent to other Runners, waiting for their `response`.
-    pub pending_responses: Mutex<HashMap<String, tokio::sync::oneshot::Sender<Response>>>,
+    /// The questions this Device asked, by request id: the Runner asked, which alone answers, and
+    /// where its answer goes.
+    pub pending_responses: Mutex<HashMap<String, (String, tokio::sync::oneshot::Sender<Response>)>>,
     /// Questions waiting for the user's answer, by the id of the row that asks: its chat, and
     /// where the answer goes.
     #[cfg(feature = "runner")]
@@ -213,10 +275,17 @@ pub struct App {
     /// Commands `bash` left running in their terminals, waiting for input.
     #[cfg(feature = "runner")]
     pub shell_sessions: crate::shell::Sessions,
+    /// The coding agents the bots run on this Runner.
+    #[cfg(feature = "runner")]
+    pub coding_agents: crate::coding::Agents,
     /// What this Runner has installed, with the secrets kept apart.
     pub plugins: Mutex<crate::plugins::Store>,
+    /// This Runner's channels as its machine blob advertises them, and its accounts' readers.
+    pub channels: crate::channels::Channels,
     /// The marketplace index in use, and the checks for a newer one.
     pub marketplace: crate::marketplace::Updates,
+    /// Serializes guided setup resource creation and installation on this Device.
+    pub workflow_editing: tokio::sync::Mutex<()>,
     /// Checks for a newer model catalog.
     pub catalog: crate::catalog::Updates,
     /// Checks for a newer release of the CLI itself, which a build from `release-cli.yml`
@@ -226,9 +295,20 @@ pub struct App {
     /// Connected MCP servers.
     #[cfg(feature = "runner")]
     pub mcp: crate::plugins::mcp::Pool,
+    /// The bots' browser profiles on this Runner and their open browsers.
+    #[cfg(feature = "runner")]
+    pub browser_sessions: crate::browser::Sessions,
+    /// The secrets the user saved for this Runner's bots.
+    #[cfg(feature = "runner")]
+    pub secrets: crate::secrets::Store,
     /// The checks of this Runner's routines.
     #[cfg(feature = "runner")]
     pub routine_checks: crate::routines::Checks,
+    /// Serializes encrypted feedback records and guarded revision decisions on this Runner.
+    pub feedback_lock: tokio::sync::Mutex<()>,
+    #[cfg(feature = "runner")]
+    /// At most one bounded coordinator review per bot; exclusions cancel its token.
+    pub feedback_reviews: Mutex<HashMap<String, CancellationToken>>,
     pub http: reqwest::Client,
 }
 
@@ -247,6 +327,12 @@ impl App {
         crate::catalog::load_cached(&config);
         let identity: Option<IdentityFile> = config::read_json(&config.identity_path());
         let machine: Option<MachineFile> = config::read_json(&config.machine_path());
+        // The library also travels in the roster, so one that cannot be read comes back from
+        // the other Devices.
+        let playbooks = crate::playbooks::Library::load(&config.home, machine.as_ref().and_then(|m| m.dek().ok())).unwrap_or_else(|error| {
+            tracing::warn!(%error, "reading playbooks.enc");
+            crate::playbooks::Library::default()
+        });
         let credentials = Credentials::load(&config);
         let plugins = crate::plugins::Store::load(&config);
         let marketplace = crate::marketplace::Updates::load(&config);
@@ -264,23 +350,38 @@ impl App {
         let http = lorca_tls::client_builder().timeout(std::time::Duration::from_secs(60)).build()?;
 
         let app = Arc::new(App {
+            project_context_lock: Mutex::new(()),
             config,
             settings: Mutex::new(settings),
             identity: Mutex::new(identity),
             machine: Mutex::new(machine),
             credentials: Mutex::new(credentials),
+            playbooks: Mutex::new(playbooks),
             state: Mutex::new(state),
             store,
+            handoff_lock: Mutex::new(()),
+            budgets: crate::budgets::BudgetStore::default(),
+            #[cfg(feature = "runner")]
+            connector_limits: crate::connector_limits::ConnectorLimits::default(),
+            review_lock: Mutex::new(()),
+            review_wake: Notify::new(),
             events,
             relay: RelayClient::new()?,
             outbox_notify: Notify::new(),
             sync_wakes: AtomicU64::new(0),
             message_order: Mutex::new(()),
+            task_order: Mutex::new(()),
+            output_publication: Mutex::new(()),
             relay_connected: AtomicBool::new(false),
             relay_update_required: AtomicBool::new(false),
             relay_problem: Mutex::new(None),
             presence_stale: AtomicBool::new(false),
             bulk_sync: AtomicBool::new(false),
+            attention_backfilled: AtomicBool::new(false),
+            rotation_due: AtomicBool::new(false),
+            // Blobs held when the last run ended are tried once this one has its keys.
+            held_due: AtomicBool::new(true),
+            recent_uploads: Mutex::new(std::collections::VecDeque::new()),
             account_pulled: watch::Sender::new(None),
             pairings: Mutex::new(HashMap::new()),
             accepting: Mutex::new(None),
@@ -301,15 +402,26 @@ impl App {
             pending_permissions: Mutex::new(HashMap::new()),
             #[cfg(feature = "runner")]
             shell_sessions: crate::shell::Sessions::default(),
+            #[cfg(feature = "runner")]
+            coding_agents: crate::coding::Agents::default(),
             plugins: Mutex::new(plugins),
+            channels: crate::channels::Channels::default(),
             marketplace,
+            workflow_editing: tokio::sync::Mutex::new(()),
             catalog: crate::catalog::Updates::default(),
             #[cfg(feature = "cli")]
             updates: crate::update::Updater::default(),
             #[cfg(feature = "runner")]
             mcp: crate::plugins::mcp::Pool::new(),
             #[cfg(feature = "runner")]
+            browser_sessions: crate::browser::Sessions::default(),
+            #[cfg(feature = "runner")]
+            secrets: crate::secrets::Store::default(),
+            #[cfg(feature = "runner")]
             routine_checks: crate::routines::Checks::default(),
+            feedback_lock: tokio::sync::Mutex::new(()),
+            #[cfg(feature = "runner")]
+            feedback_reviews: Mutex::new(HashMap::new()),
             http,
         });
         // Normalize and persist the in-memory view before background work begins.
@@ -444,11 +556,13 @@ impl App {
             && matches!(
                 event,
                 Event::MessageAdded { .. }
+                    | Event::AttentionChanged(_)
                     | Event::MessageUpdated { .. }
                     | Event::MessageRemoved { .. }
                     | Event::ChatRemoved { .. }
                     | Event::RosterChanged { .. }
                     | Event::ChatUsageChanged { .. }
+                    | Event::TaskChanged { .. }
             )
         {
             // The snapshot at the end of the page carries all of this at once.
@@ -475,7 +589,8 @@ impl App {
         self.machine_file().and_then(|m| m.machine().ok()).map(|m| m.pubkey())
     }
 
-    pub fn dek(&self) -> Option<[u8; 32]> {
+    /// The account keys: the newest encrypts, any opens (`keys::AccountKeys`).
+    pub fn dek(&self) -> Option<crate::keys::AccountKeys> {
         self.machine_file().and_then(|m| m.dek().ok())
     }
 
@@ -507,24 +622,25 @@ impl App {
         Ok(())
     }
 
-    /// Renames this Device; the roster hears through the machine blob.
-    pub fn rename_device(&self, name: &str) -> anyhow::Result<()> {
+    /// Gives a Device, this one or another, the name every paired Device shows it as. Blank, or
+    /// the name its own machine goes by, takes that name back.
+    pub fn set_device_name(&self, id: &str, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
-        if name.is_empty() {
-            anyhow::bail!("Give the Device a name");
+        if name.chars().count() > MAX_DEVICE_NAME_CHARS {
+            anyhow::bail!("Keep the name to {MAX_DEVICE_NAME_CHARS} characters");
         }
         {
-            let mut machine = self.machine.lock().unwrap();
-            let Some(file) = machine.as_mut() else { anyhow::bail!("No identity on this Device") };
-            file.name = name.to_string();
+            let mut state = self.state.lock().unwrap();
+            let Some(device) = state.devices.iter().find(|d| d.id == id) else { anyhow::bail!("Unknown Device") };
+            if name.is_empty() || name == device.name {
+                if state.device_names.remove(id).is_none() {
+                    return Ok(());
+                }
+            } else if state.device_names.insert(id.to_string(), name.to_string()).as_deref() == Some(name) {
+                return Ok(());
+            }
         }
-        self.save_machine()?;
-        if let Some(device) = self.local_device() {
-            upsert_device(&mut self.state.lock().unwrap().devices, device);
-        }
-        self.save_state();
-        self.push_machine_blob_if_changed();
-        self.emit(self.roster_summary());
+        self.roster_changed(true);
         Ok(())
     }
 
@@ -538,20 +654,30 @@ impl App {
         self.cancel_provider_auth();
         self.cancel_plugin_sign_in(None);
         #[cfg(feature = "runner")]
+        for review in self.feedback_reviews.lock().unwrap().values() { review.cancel(); }
+        #[cfg(feature = "runner")]
         self.steering_queues.lock().unwrap().clear();
         #[cfg(feature = "runner")]
         self.step_interrupts.lock().unwrap().clear();
+        #[cfg(feature = "runner")]
+        self.browser_sessions.reset();
+        #[cfg(feature = "runner")]
+        self.secrets.reset();
         *self.identity.lock().unwrap() = None;
         *self.machine.lock().unwrap() = None;
         *self.credentials.lock().unwrap() = Credentials::default();
+        *self.playbooks.lock().unwrap() = crate::playbooks::Library::default();
         *self.state.lock().unwrap() = State::default();
         self.store.clear()?;
+        self.budgets.clear();
+        #[cfg(feature = "runner")]
+        self.connector_limits.clear();
         self.settings.lock().unwrap().relay_url = None;
         self.relay.forget_token();
         *self.relay_problem.lock().unwrap() = None;
         // The sync session ends on this instead of waiting for its socket to say something.
         self.outbox_notify.notify_waiters();
-        for path in [self.config.identity_path(), self.config.machine_path(), self.config.credentials_path(), self.config.settings_path()] {
+        for path in [self.config.identity_path(), self.config.machine_path(), self.config.credentials_path(), self.config.settings_path(), self.config.home.join("playbooks.enc"), self.config.home.join("secrets.enc")] {
             if path.exists() {
                 std::fs::remove_file(&path)?;
             }
@@ -560,6 +686,8 @@ impl App {
         if files.is_dir() {
             std::fs::remove_dir_all(&files)?;
         }
+        let browser = self.config.home.join("browser");
+        if browser.is_dir() { std::fs::remove_dir_all(browser)?; }
         // The other Devices' turns went with the account.
         self.turns_changed();
         self.emit(Event::IdentityChanged { has_identity: false });
@@ -582,6 +710,7 @@ impl App {
             os_version,
             box_pubkey: keys.box_pubkey(),
             plugins: self.plugins.lock().unwrap().statuses(),
+            channels: self.channels.statuses(),
             version: config::VERSION.into(),
             update: self.update_status(),
             updated_at: config::now_unix(),
@@ -627,7 +756,7 @@ impl App {
         self.queue_blob(OutboxItem { id, kind: kind.to_string(), recipient: None, ciphertext, slot: Some(slot), group });
     }
 
-    fn queue_blob(&self, item: OutboxItem) {
+    pub fn queue_blob(&self, item: OutboxItem) {
         let snapshot = {
             let mut state = self.state.lock().unwrap();
             remember_applied(&mut state, &item.id);
@@ -646,10 +775,15 @@ impl App {
         let roster = {
             let state = self.state.lock().unwrap();
             RosterBlob {
+                workflows: Some(state.workflows.clone()),
                 bots: state.bots.clone(),
                 chats: state.chats.iter().map(|c| c.meta.clone()).collect(),
+                sections: state.sections.clone(),
                 routines: state.routines.clone(),
                 auto_review: state.auto_review.clone(),
+                shared_links: state.shared_links.clone(),
+                device_names: state.device_names.clone(),
+                unpaired: state.unpaired.clone(),
                 updated_at: config::now_secs(),
             }
         };
@@ -669,6 +803,10 @@ impl App {
     /// its place ahead of older messages. A chat goes up under the message order lock, so no new
     /// message lands between its old ones.
     pub fn push_history(&self) {
+        if let Err(error) = crate::attention::push_history(self) {
+            tracing::warn!(%error, "queueing attention history");
+        }
+        if let Err(error) = crate::tasks::push_all(self) { tracing::warn!(%error, "requeueing durable tasks"); }
         let (avatars, chats): (Vec<Attachment>, Vec<(String, u32)>) = {
             let state = self.state.lock().unwrap();
             (
@@ -691,6 +829,9 @@ impl App {
             if let Err(error) = self.store.drop_outbox_group(&relay_name(&chat_id)) {
                 tracing::error!(%error, %chat_id, "dropping a chat's queued blobs to upload it again");
                 continue;
+            }
+            if let Err(error) = crate::project_context::push_history(self, &chat_id, true) {
+                tracing::warn!(%error, %chat_id, "queueing shared project context again");
             }
             let messages = match self.store.all(&chat_id) {
                 Ok(messages) => messages,
@@ -718,6 +859,16 @@ impl App {
         }
     }
 
+    /// Notes a blob that went up, and its place in the relay's log, for `recent_uploads`.
+    pub fn remember_upload(&self, item: OutboxItem, seq: i64) {
+        let at = config::now_unix();
+        let mut recent = self.recent_uploads.lock().unwrap();
+        recent.push_back(RecentUpload { at, seq, item });
+        while recent.front().is_some_and(|upload| upload.at < at - RECENT_UPLOADS) || recent.len() > MAX_RECENT_UPLOADS {
+            recent.pop_front();
+        }
+    }
+
     pub fn push_chat_op(&self, op: &ChatBlob) {
         let Some(dek) = self.dek() else { return };
         match crate::crypto::encrypt_json(&dek, "chat", op) {
@@ -733,17 +884,22 @@ impl App {
     pub fn push_machine_blob_if_changed(&self) {
         let (Some(dek), Some(device)) = (self.dek(), self.local_device()) else { return };
         let turns = self.turns_here();
+        let budgets = self.budgets.local_snapshots(self);
+        let watching = self.watched_chat.lock().unwrap().clone();
         let fingerprint = format!(
-            "{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
             device.id,
             device.name,
             device.model,
             device.os,
             device.os_version,
             serde_json::to_string(&device.plugins).unwrap_or_default(),
+            serde_json::to_string(&device.channels).unwrap_or_default(),
             device.version,
             serde_json::to_string(&device.update).unwrap_or_default(),
-            serde_json::to_string(&turns).unwrap_or_default()
+            serde_json::to_string(&turns).unwrap_or_default(),
+            serde_json::to_string(&budgets).unwrap_or_default(),
+            watching.as_deref().unwrap_or_default()
         );
         let hash = keys::b64(&<sha2::Sha256 as sha2::Digest>::digest(fingerprint.as_bytes()));
         let changed = {
@@ -760,7 +916,7 @@ impl App {
             return;
         }
         let device_id = device.id.clone();
-        match crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns }) {
+        match crate::crypto::encrypt_json(&dek, "machine", &MachineBlob { device, turns, budgets, watching }) {
             Ok(ciphertext) => {
                 self.push_slot_blob("machine", Slot::latest(format!("machine-{}", device_id)), None, ciphertext);
             }
@@ -778,8 +934,14 @@ impl App {
         self.state.lock().unwrap().chats.iter().find(|c| c.meta.id == id).cloned()
     }
 
+    /// A Device as the account knows it, under the name the account gave it, if any.
     pub fn device(&self, id: &str) -> Option<Device> {
-        self.state.lock().unwrap().devices.iter().find(|d| d.id == id).cloned()
+        let state = self.state.lock().unwrap();
+        let mut device = state.devices.iter().find(|d| d.id == id).cloned()?;
+        if let Some(name) = state.device_names.get(id) {
+            device.name = name.clone();
+        }
+        Some(device)
     }
 
     /// A chat's name as the apps show it: a group's title, else its members' names; a direct
@@ -1007,10 +1169,13 @@ impl App {
             devices: self.devices_out(&state),
             bots: state.bots.clone(),
             chats: state.chats.iter().map(|c| ChatSummary { meta: c.meta.clone(), unread_count: c.unread_count, usage: c.usage.clone() }).collect(),
+            sections: state.sections.clone(),
             routines: self.routines_out(&state),
             auto_review: state.auto_review.clone(),
+            shared_links: state.shared_links.iter().map(crate::templates::links::SharedLink::out).collect(),
             providers: self.credentials.lock().unwrap().statuses(),
             models: models_out(),
+            playbooks: crate::playbooks::summaries(self),
         }
     }
 
@@ -1072,6 +1237,7 @@ impl App {
             self.push_roster();
         }
         self.emit(self.roster_summary());
+        crate::attention::changed(self);
     }
 
     /// Creates the bot and its direct chat in one roster change, so other Devices (and the
@@ -1104,6 +1270,7 @@ impl App {
     /// Deletes a bot, its direct chat and routines, and its memberships in group chats. A
     /// group whose last bot was deleted goes with it; the other groups keep their transcript.
     pub fn delete_bot(&self, id: &str) -> anyhow::Result<()> {
+        let _project_context = self.project_context_lock.lock().unwrap();
         let removed_chat_ids = {
             let mut state = self.state.lock().unwrap();
             let deleted_bot = state.bots.iter().find(|bot| bot.id == id).cloned().ok_or_else(|| anyhow::anyhow!("Unknown bot"))?;
@@ -1157,8 +1324,14 @@ impl App {
         if let Err(error) = self.store.forget_codemode_values_of(id) {
             tracing::warn!(%error, "forgetting a deleted bot's script values");
         }
+        crate::feedback::forget_bot(self, id);
+        crate::playbooks::forget_scopes(self, &[id.to_string()], &removed_chat_ids);
+        #[cfg(feature = "runner")]
+        crate::secrets::forget_bots(self, &[id.to_string()]);
         #[cfg(feature = "runner")]
         self.shell_sessions.close_orphans(self);
+        #[cfg(feature = "runner")]
+        self.coding_agents.close_orphans(self);
         self.roster_changed(true);
         Ok(())
     }
@@ -1202,7 +1375,10 @@ impl App {
             meta.created_at = config::now_secs();
         }
         let ids: Vec<String> = if meta.kind == "dm" {
-            meta.title = None;
+            // A channel's conversation is named after where it happens.
+            if meta.channel.is_none() {
+                meta.title = None;
+            }
             meta.description = None;
             meta.bot_ids.iter().take(1).cloned().collect()
         } else {
@@ -1244,7 +1420,7 @@ impl App {
             .unwrap()
             .chats
             .iter()
-            .find(|c| c.meta.kind == "dm" && c.meta.bot_ids == vec![bot_id.to_string()])
+            .find(|c| c.meta.kind == "dm" && c.meta.channel.is_none() && c.meta.bot_ids == vec![bot_id.to_string()])
             .cloned()
         {
             return Ok(existing);
@@ -1257,11 +1433,16 @@ impl App {
             owner_bot_id: Some(bot_id.to_string()),
             description: None,
             is_pinned: false,
+            section_id: None,
+            is_hidden: false,
+            mute: None,
             created_at: 0.0,
+            channel: None,
         })
     }
 
     pub fn delete_chat(&self, chat_id: &str) {
+        let _project_context = self.project_context_lock.lock().unwrap();
         self.cancel_chat(chat_id);
         {
             let mut state = self.state.lock().unwrap();
@@ -1276,8 +1457,11 @@ impl App {
             tracing::error!(%error, %chat_id, "deleting chat state");
         }
         self.emit(Event::ChatRemoved { chat_id: chat_id.to_string() });
+        crate::playbooks::forget_scopes(self, &[], &[chat_id.to_string()]);
         #[cfg(feature = "runner")]
         self.shell_sessions.close_orphans(self);
+        #[cfg(feature = "runner")]
+        self.coding_agents.close_orphans(self);
         self.roster_changed(true);
     }
 
@@ -1320,6 +1504,111 @@ impl App {
         Ok(())
     }
 
+    // MARK: - Sidebar
+
+    /// Adds a section after the others, with `chat_id` moved into it in the same roster change.
+    pub fn create_section(&self, id: Option<String>, name: &str, chat_id: Option<&str>) -> anyhow::Result<Section> {
+        let name = section_name(name)?;
+        let section = {
+            let mut state = self.state.lock().unwrap();
+            let id = id.filter(|id| !id.trim().is_empty()).unwrap_or_else(|| format!("section-{}", &uuid::Uuid::new_v4().to_string()[..8]));
+            if state.sections.iter().any(|section| section.id == id) {
+                anyhow::bail!("That section already exists");
+            }
+            if let Some(chat_id) = chat_id {
+                let chat = state.chats.iter_mut().find(|chat| chat.meta.id == chat_id).ok_or_else(|| anyhow::anyhow!("Unknown chat"))?;
+                chat.meta.section_id = Some(id.clone());
+            }
+            let section = Section { id, name, collapsed: false };
+            state.sections.push(section.clone());
+            section
+        };
+        self.roster_changed(true);
+        Ok(section)
+    }
+
+    pub fn update_section(&self, id: &str, update: impl FnOnce(&mut Section)) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let section = state.sections.iter_mut().find(|section| section.id == id).ok_or_else(|| anyhow::anyhow!("Unknown section"))?;
+            update(section);
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    pub fn rename_section(&self, id: &str, name: &str) -> anyhow::Result<()> {
+        let name = section_name(name)?;
+        self.update_section(id, |section| section.name = name)
+    }
+
+    /// Deletes a section. Its chats go back to the chats in no section.
+    pub fn delete_section(&self, id: &str) -> anyhow::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            let before = state.sections.len();
+            state.sections.retain(|section| section.id != id);
+            if state.sections.len() == before {
+                anyhow::bail!("Unknown section");
+            }
+            for chat in state.chats.iter_mut().filter(|chat| chat.meta.section_id.as_deref() == Some(id)) {
+                chat.meta.section_id = None;
+            }
+        }
+        self.roster_changed(true);
+        Ok(())
+    }
+
+    /// Puts the sections in the order of `ids`. Sections it leaves out follow, in their order.
+    pub fn reorder_sections(&self, ids: &[String]) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let place = |section: &Section| ids.iter().position(|id| *id == section.id).unwrap_or(usize::MAX);
+            state.sections.sort_by_key(place);
+        }
+        self.roster_changed(true);
+    }
+
+    /// Lists a chat under a section, or with the chats in no section, where the sidebar shows
+    /// it: off the pinned rows and out of Hidden.
+    pub fn set_chat_section(&self, chat_id: &str, section_id: Option<String>) -> anyhow::Result<()> {
+        if let Some(id) = &section_id {
+            if !self.state.lock().unwrap().sections.iter().any(|section| &section.id == id) {
+                anyhow::bail!("Unknown section");
+            }
+        }
+        self.update_chat_meta(chat_id, |meta| {
+            meta.section_id = section_id;
+            meta.is_pinned = false;
+            meta.is_hidden = false;
+        })
+    }
+
+    /// Takes a chat out of the sidebar, or puts it back. A hidden chat is not pinned.
+    pub fn hide_chat(&self, chat_id: &str, hidden: bool) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| {
+            meta.is_hidden = hidden;
+            if hidden {
+                meta.is_pinned = false;
+            }
+        })
+    }
+
+    /// Pins or unpins a chat. A pinned chat is back in the sidebar.
+    pub fn pin_chat(&self, chat_id: &str, pinned: Option<bool>) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| {
+            meta.is_pinned = pinned.unwrap_or(!meta.is_pinned);
+            if meta.is_pinned {
+                meta.is_hidden = false;
+            }
+        })
+    }
+
+    /// Turns a chat's alerts off on every Device, until `until` or until unmuted, or back on.
+    pub fn mute_chat(&self, chat_id: &str, mute: Option<Mute>) -> anyhow::Result<()> {
+        self.update_chat_meta(chat_id, |meta| meta.mute = mute)
+    }
+
     // MARK: - Routines
 
     /// Adds a routine and publishes the roster.
@@ -1348,15 +1637,35 @@ impl App {
         Ok(routine)
     }
 
-    /// Changes a routine and publishes the roster.
+    /// Changes a routine, saves it, and publishes the roster.
     pub fn update_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        self.change_routine(id, true, update)
+    }
+
+    /// Changes a routine and saves it without publishing: what only its Runner needs at once (a
+    /// due time it took, one more quiet check) goes up with the next roster change.
+    pub fn record_routine(&self, id: &str, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
+        self.change_routine(id, false, update)
+    }
+
+    /// The change is saved before anything acts on it, even during a relay bulk pull: one that
+    /// can't be saved is taken back, so the scheduler admits no work a restart would not know of.
+    fn change_routine(&self, id: &str, upload: bool, update: impl FnOnce(&mut Routine)) -> anyhow::Result<Routine> {
         let routine = {
             let mut state = self.state.lock().unwrap();
-            let routine = state.routines.iter_mut().find(|r| r.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
-            update(routine);
-            routine.clone()
+            let index = state.routines.iter().position(|routine| routine.id == id).ok_or_else(|| anyhow::anyhow!("Unknown routine"))?;
+            let previous = state.routines[index].clone();
+            update(&mut state.routines[index]);
+            if let Err(error) = self.store.save_state(&state) {
+                state.routines[index] = previous;
+                return Err(error);
+            }
+            state.routines[index].clone()
         };
-        self.roster_changed(true);
+        if upload {
+            self.push_roster();
+        }
+        self.emit(self.roster_summary());
         Ok(routine)
     }
 
@@ -1377,15 +1686,66 @@ impl App {
     /// next run is due (or the next check, for a routine with one), and whether a run is going
     /// on right now.
     fn routines_out(&self, state: &State) -> Vec<Value> {
-        state.routines.iter().map(|routine| self.routine_out(routine)).collect()
+        state.routines.iter().map(|routine| self.routine_out_with_state(routine, state)).collect()
     }
 
     pub fn routine_out(&self, routine: &Routine) -> Value {
+        self.routine_out_with_state(routine, &self.state.lock().unwrap())
+    }
+
+    fn routine_out_with_state(&self, routine: &Routine, state: &State) -> Value {
         let mut out = serde_json::to_value(routine).unwrap_or_default();
-        out["schedule_text"] = json!(crate::schedule::parse(&routine.schedule).map(|s| s.describe()).unwrap_or_else(|_| routine.schedule.clone()));
-        out["next_run_at"] = json!(crate::routines::next_run_shown(self, routine).map(|t| t as f64));
-        out["is_running"] = json!(self.is_routine_running(&routine.id));
+        out["schedule_text"] = json!(crate::routine_triggers::describe(routine));
+        out["next_run_at"] = json!(crate::routines::next_run_shown(routine).map(|t| t as f64));
+        // What the apps word themselves: a one-time routine's instant, what a routine on events
+        // listens to, and the event a routine around events runs for next. What the Runner keeps
+        // to compare reads stays out.
+        if let Ok(schedule @ crate::schedule::Schedule::Once(_)) = crate::schedule::parse(&routine.schedule) {
+            out["once_at"] = json!(schedule.once_instant(&routine.timezone).map(|t| t as f64));
+        }
+        if let Some(calendar) = &routine.calendar {
+            let offset = match crate::schedule::parse(&routine.schedule) {
+                Ok(crate::schedule::Schedule::Events(offset)) => Some(offset),
+                _ => None,
+            };
+            let next = offset.and_then(|offset| crate::routine_triggers::next_event_run(routine, offset)).map(|(_, event)| json!({ "title": event.title, "start": event.start, "end": event.end }));
+            out["calendar"] = json!({
+                "account": calendar.account,
+                "matching": calendar.matching,
+                "minutes": offset.map(|offset| offset.minutes),
+                "after": offset.map(|offset| offset.after),
+                "next_event": next,
+            });
+        }
+        let running = self.is_routine_running(&routine.id);
+        out["is_running"] = json!(running);
+        out["state"] = json!(self.routine_state(routine, state, running));
         out
+    }
+
+    /// How a routine stands, for the apps: `running`; `blocked`, paused until a sign-in (with
+    /// `paused_reason: authentication`) or with a check that tried to change something;
+    /// `paused`; `waiting_for_runner`, while its Runner is offline, since no other Runner takes
+    /// it over; `failed`, while its checks or runs fail and it tries again; else `on`.
+    fn routine_state(&self, routine: &Routine, state: &State, running: bool) -> &'static str {
+        use crate::routine_health::CheckStatus;
+        let runner = state.bots.iter().find(|bot| bot.id == routine.bot_id).map(|bot| bot.runner_id.as_str());
+        let online = runner.is_some_and(|id| self.this_device_id().as_deref() == Some(id) || state.device_online.contains(id));
+        if running {
+            "running"
+        } else if routine.paused_reason.as_deref() == Some("authentication") {
+            "blocked"
+        } else if !routine.is_enabled {
+            "paused"
+        } else if !online {
+            "waiting_for_runner"
+        } else {
+            match routine.health.as_ref().and_then(|health| health.model.status.or(health.status)) {
+                Some(CheckStatus::Failed) => "failed",
+                Some(CheckStatus::Blocked) => "blocked",
+                _ => "on",
+            }
+        }
     }
 
     /// The local app says which chat the user is looking at (`None` when it is not frontmost).
@@ -1393,8 +1753,47 @@ impl App {
         *self.watched_chat.lock().unwrap() = chat_id;
     }
 
+    /// The same, told to the other Devices in this Device's machine blob once the user settles
+    /// on a chat, so a Runner elsewhere does not push it to a phone either.
+    pub fn watch_chat(self: &Arc<Self>, chat_id: Option<String>) {
+        self.set_watched_chat(chat_id);
+        let app = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(WATCH_SETTLE).await;
+            app.push_machine_blob_if_changed();
+        });
+    }
+
+    /// Whether the user looks at the chat on this Device.
     pub fn is_watching(&self, chat_id: &str) -> bool {
         self.watched_chat.lock().unwrap().as_deref() == Some(chat_id)
+    }
+
+    /// Whether the user looks at the chat on this Device or on another computer the relay lists
+    /// online.
+    pub fn is_watched_anywhere(&self, chat_id: &str) -> bool {
+        if self.is_watching(chat_id) {
+            return true;
+        }
+        let state = self.state.lock().unwrap();
+        state.device_watching.iter().any(|(device_id, watched)| watched == chat_id && state.device_online.contains(device_id))
+    }
+
+    /// The chat another computer's latest machine blob says it shows.
+    pub fn set_device_watching(&self, device_id: &str, chat_id: Option<String>) {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.device_watching.get(device_id) == chat_id.as_ref() {
+                return;
+            }
+            match &chat_id {
+                Some(chat_id) => state.device_watching.insert(device_id.to_string(), chat_id.clone()),
+                None => state.device_watching.remove(device_id),
+            };
+        }
+        if let Err(error) = self.store.set_device_watching(device_id, chat_id.as_deref()) {
+            tracing::error!(%error, "keeping the chat another Device shows");
+        }
     }
 
     /// Clears a chat's unread count. Read on this Device (`upload`), it clears on every other
@@ -1537,6 +1936,24 @@ impl App {
     pub fn notice(&self, chat_id: &str, text: impl Into<String>) {
         let message = Message::new(chat_id, Author::System, Body::Notice { text: text.into(), routine_id: None });
         self.upsert_message(message, true);
+    }
+
+    #[cfg(feature = "runner")]
+    pub fn record_pricing(&self, chat_id: &str, pricing: crate::budgets::Pricing, usd: f64) {
+        let updated = {
+            let mut state = self.state.lock().unwrap();
+            let Some(chat) = state.chats.iter_mut().find(|c| c.meta.id == chat_id) else { return };
+            let entry = chat.usage.get_or_insert_with(ChatUsage::default);
+            if !entry.pricing_kinds.contains(&pricing) { entry.pricing_kinds.push(pricing); }
+            match pricing {
+                crate::budgets::Pricing::Api => entry.api_cost_usd += usd,
+                crate::budgets::Pricing::SubscriptionEstimate => entry.subscription_estimate_usd += usd,
+                crate::budgets::Pricing::Unknown => entry.unknown_price_calls += 1,
+            }
+            entry.clone()
+        };
+        self.save_state();
+        self.emit(Event::ChatUsageChanged { chat_id: chat_id.into(), usage: updated });
     }
 
     /// Adds a finished turn's usage to the chat's and tells the app.
@@ -1710,8 +2127,9 @@ impl App {
 
     fn devices_out(&self, state: &State) -> Vec<Value> {
         let this_id = self.this_device_id();
+        let name = |device: &Device| state.device_names.get(&device.id).unwrap_or(&device.name).clone();
         let mut devices: Vec<&Device> = state.devices.iter().collect();
-        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, d.name.to_lowercase()));
+        devices.sort_by_key(|d| (Some(d.id.clone()) != this_id, name(d).to_lowercase()));
         let mut out: Vec<Value> = devices
             .into_iter()
             .map(|device| {
@@ -1720,7 +2138,8 @@ impl App {
                 let status = if is_this || state.device_online.contains(&device.id) { "online" } else { "offline" };
                 json!({
                     "id": device.id,
-                    "name": device.name,
+                    "name": name(device),
+                    "machine_name": device.name,
                     "model": device.model,
                     "os": device.os,
                     "os_version": device.os_version,
@@ -1729,6 +2148,7 @@ impl App {
                     "status": status,
                     "last_seen": seen as f64,
                     "plugins": device.plugins,
+                    "channels": device.channels,
                     "version": device.version,
                     "update": device.update,
                 })
@@ -1788,22 +2208,38 @@ impl App {
             "devices": self.devices_out(&state),
             "bots": state.bots,
             "chats": state.chats.iter().map(|chat| self.chat_for_app(chat)).collect::<Vec<_>>(),
+            "sections": state.sections,
             "routines": self.routines_out(&state),
+            "reviews": crate::review_queue::list(self).unwrap_or_default(),
+            "tasks": crate::tasks::list(self).unwrap_or_default(),
             "auto_review": state.auto_review,
+            "shared_links": state.shared_links.iter().map(crate::templates::links::SharedLink::out).collect::<Vec<_>>(),
             "providers": self.credentials.lock().unwrap().statuses(),
             "models": models_out(),
+            "playbooks": crate::playbooks::summaries(self),
             "running_chat_ids": self.running_chat_ids(),
             "running_turns": self.running_turns(),
+            "attention": crate::attention::view(self).unwrap_or_default(),
+            "budgets": self.budgets.snapshots(self),
         })
     }
 }
 
 /// The models the apps offer in their pickers, in the catalog's order, so each provider's first
 /// is its default: the provider, id, and name, and the thinking levels each one takes.
+/// A section's name as the sidebar shows it: one line, at most 60 characters.
+fn section_name(name: &str) -> anyhow::Result<String> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        anyhow::bail!("A section needs a name");
+    }
+    Ok(name.chars().take(60).collect())
+}
+
 fn models_out() -> Vec<Value> {
     lorca_models::models()
         .iter()
-        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels }))
+        .map(|model| json!({ "provider": model.provider, "id": model.id, "name": model.name, "levels": model.levels, "decides": model.decides() }))
         .collect()
 }
 
@@ -1902,6 +2338,7 @@ mod tests {
             thinking: None,
             legacy_instructions: String::new(),
             workdir: None,
+            permissions: None,
             created_at: 1.0,
         }
     }
@@ -1916,7 +2353,10 @@ mod tests {
                 owner_bot_id: owner.map(str::to_string),
                 description: None,
                 is_pinned: false,
-                created_at: 1.0,
+                section_id: None,
+                is_hidden: false,
+                mute: None,
+                created_at: 1.0, channel: None,
             },
             unread_count: 0,
             usage: None,
@@ -1930,13 +2370,20 @@ mod tests {
             bot_id: bot_id.into(),
             name: id.into(),
             prompt: String::new(),
+            feedback_authorization_prompt: None,
             schedule: "every 1h".into(),
+            timezone: "UTC".into(),
+            missed_run_policy: Default::default(),
+            last_scheduled_at: None,
+            health: None,
             is_enabled: true,
             enabled_at: 1.0,
             last_run_at: None,
             last_outcome: None,
             paused_reason: None,
             check: None,
+            events: None,
+            calendar: None,
             created_at: 1.0,
         }
     }
@@ -1982,6 +2429,90 @@ mod tests {
             assert!(!home.join(name).exists());
         }
         assert!(scratch.0.config.database_path().is_file());
+    }
+
+    #[test]
+    fn sections_hidden_chats_and_mutes_are_kept_in_the_roster() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        {
+            let mut state = app.state.lock().unwrap();
+            state.bots.push(bot("b1"));
+            state.chats.push(chat("a", "dm", &["b1"], Some("b1")));
+            state.chats.push(chat("b", "group", &["b1"], Some("b1")));
+        }
+        let pipeline = app.create_section(None, "  Big   deals ", Some("a")).unwrap();
+        assert_eq!(pipeline.name, "Big deals");
+        assert!(app.create_section(None, "   ", None).is_err(), "a section needs a name");
+        assert!(app.create_section(Some(pipeline.id.clone()), "Twice", None).is_err());
+        let customers = app.create_section(Some("customers".into()), "Customers", None).unwrap();
+        assert_eq!(app.chat("a").unwrap().meta.section_id.as_deref(), Some(pipeline.id.as_str()));
+        app.reorder_sections(&["customers".into()]);
+        app.rename_section(&pipeline.id, "Pipeline").unwrap();
+        app.update_section(&pipeline.id, |section| section.collapsed = true).unwrap();
+        assert!(app.set_chat_section("b", Some("gone".into())).is_err(), "a chat moves only into a section that exists");
+        app.set_chat_section("b", Some(customers.id.clone())).unwrap();
+        let names = |app: &App| app.state.lock().unwrap().sections.iter().map(|s| (s.name.clone(), s.collapsed)).collect::<Vec<_>>();
+        assert_eq!(names(app), [("Customers".to_string(), false), ("Pipeline".to_string(), true)]);
+
+        app.pin_chat("a", Some(true)).unwrap();
+        app.hide_chat("a", true).unwrap();
+        assert!(app.chat("a").unwrap().meta.is_hidden && !app.chat("a").unwrap().meta.is_pinned, "a hidden chat is not pinned");
+        app.mute_chat("b", Some(Mute { until: Some(100.0) })).unwrap();
+        assert!(app.chat("b").unwrap().meta.is_muted(99.0) && !app.chat("b").unwrap().meta.is_muted(100.0));
+
+        // Everything is still there after a restart.
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(names(&reloaded), names(app));
+        assert_eq!(reloaded.chat("a").unwrap().meta, app.chat("a").unwrap().meta);
+        assert_eq!(reloaded.chat("b").unwrap().meta.mute, Some(Mute { until: Some(100.0) }));
+        drop(reloaded);
+
+        // Pinning brings a hidden chat back, and moving a chat to a section shows it there, off
+        // the pinned rows; deleting a section leaves its chats in none.
+        app.pin_chat("a", None).unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_hidden);
+        app.set_chat_section("a", Some(customers.id.clone())).unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_pinned);
+        app.hide_chat("a", true).unwrap();
+        app.set_chat_section("a", None).unwrap();
+        assert!(!app.chat("a").unwrap().meta.is_hidden);
+        app.delete_section(&customers.id).unwrap();
+        assert_eq!(app.chat("b").unwrap().meta.section_id, None);
+        assert!(app.delete_section(&customers.id).is_err());
+        app.mute_chat("b", None).unwrap();
+        assert!(!app.chat("b").unwrap().meta.is_muted(0.0));
+    }
+
+    #[test]
+    fn a_device_name_shows_everywhere_and_survives_a_restart() {
+        let scratch = scratch_app();
+        let app = &scratch.0;
+        app.state.lock().unwrap().devices.push(Device { id: "runner".into(), name: "MacBook Air".into(), os: "macos".into(), ..Default::default() });
+        let row = |app: &App| {
+            let state = app.state.lock().unwrap();
+            app.devices_out(&state).into_iter().find(|d| d["id"] == "runner").unwrap()
+        };
+
+        app.set_device_name("runner", "  Build box ").unwrap();
+        assert_eq!((row(app)["name"].as_str(), row(app)["machine_name"].as_str()), (Some("Build box"), Some("MacBook Air")));
+        assert_eq!(app.device("runner").unwrap().name, "Build box");
+        assert!(app.set_device_name("runner", &"x".repeat(MAX_DEVICE_NAME_CHARS + 1)).is_err());
+        assert!(app.set_device_name("nobody", "Box").is_err());
+
+        app.save_state_now();
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert_eq!(reloaded.device("runner").unwrap().name, "Build box");
+
+        // The machine's own name, like a blank one, takes the name the account gave back.
+        app.set_device_name("runner", "MacBook Air").unwrap();
+        assert!(app.state.lock().unwrap().device_names.is_empty());
+        app.set_device_name("runner", "Build box").unwrap();
+        app.set_device_name("runner", " ").unwrap();
+        assert_eq!(row(app)["name"], "MacBook Air");
+        app.save_state_now();
+        let reloaded = App::load(Config { home: scratch.1.clone(), port: 0 }).unwrap();
+        assert!(reloaded.state.lock().unwrap().device_names.is_empty());
     }
 
     #[test]
@@ -2108,7 +2639,7 @@ mod tests {
     fn a_dropped_avatar_is_queued_for_deletion_on_the_relay() {
         let scratch = scratch_app();
         let app = &scratch.0;
-        let avatar = |id: &str| crate::model::Attachment { id: id.into(), name: "a.png".into(), mime: "image/png".into(), size: 1, width: None, height: None };
+        let avatar = |id: &str| crate::model::Attachment { id: id.into(), name: "a.png".into(), mime: "image/png".into(), size: 1, width: None, height: None, sha256: None };
         let mut b1 = bot("b1");
         b1.avatar = Some(avatar("first"));
         app.state.lock().unwrap().bots.push(b1);

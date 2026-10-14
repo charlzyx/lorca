@@ -99,6 +99,9 @@ log(`${color.bold("building")} ${color.dim(`${ABIS}, signed with ${keystore}`)}`
 // Android Studio's signed builds use, which sign every variant. On the command line the password
 // would show in ps, and as ORG_GRADLE_PROJECT_ variables their names hold dots, which dash, the
 // /bin/sh that runs gradlew on Ubuntu, drops: the APK came out with the debug key.
+//
+// The heap goes there too, after Expo's 2 GiB, which the release's dex merge outgrew; a
+// repeated key takes the last value.
 const properties = join(ANDROID, "gradle.properties")
 const unsigned = await Bun.file(properties).text()
 // A .properties value takes a backslash as an escape.
@@ -106,6 +109,7 @@ const value = (text: string) => text.replaceAll("\\", "\\\\")
 await Bun.write(
   properties,
   `${unsigned}
+org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g
 android.injected.signing.store.file=${value(keystore)}
 android.injected.signing.store.password=${value(password)}
 android.injected.signing.key.alias=lorca

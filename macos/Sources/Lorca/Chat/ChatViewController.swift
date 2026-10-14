@@ -261,12 +261,30 @@ final class ChatViewController: NSViewController {
             previousAuthor = isChrome ? nil : message.author
             previousDate = message.createdAt
         }
+        stackOutputs(of: chat)
 
         let working = store.workingBots(in: chat.id)
         if !working.isEmpty {
             rows.append(.working(working))
         } else if let stoppedNotice {
             rows.append(.status(stoppedNotice))
+        }
+    }
+
+    /// Joins each run of one bot's outputs, with nothing between them, into one list.
+    private func stackOutputs(of chat: Chat) {
+        func output(at row: Int) -> Message? {
+            guard let id = rows[row].messageID, let index = messageIndex[id] else { return nil }
+            let message = chat.messages[index]
+            return message.isOutputCard ? message : nil
+        }
+        for row in rows.indices.dropFirst() {
+            guard let below = output(at: row), let above = output(at: row - 1), above.author == below.author,
+                case let .message(aboveID, aboveStart, aboveStack) = rows[row - 1],
+                case let .message(belowID, belowStart, belowStack) = rows[row]
+            else { continue }
+            rows[row - 1] = .message(id: aboveID, groupStart: aboveStart, stack: OutputStack(above: aboveStack.above, below: true))
+            rows[row] = .message(id: belowID, groupStart: belowStart, stack: OutputStack(above: true, below: belowStack.below))
         }
     }
 
@@ -603,6 +621,16 @@ final class ChatViewController: NSViewController {
     }
 
     /// Makes the draft a reply to `message`, from the bubble's Reply.
+    /// Save as Skill, or Save as Standing Instruction: pick the messages, then review the draft.
+    private func captureSkill(from message: Message, in chatID: Chat.ID) {
+        guard let chat = store.chat(chatID) else { return }
+        let capture = PlaybookCaptureViewController(chat: chat, message: message)
+        capture.onDrafted = { [weak self] draft in
+            self?.presentAsSheet(PlaybookViewController(scope: draft.scope, record: draft))
+        }
+        presentAsSheet(capture)
+    }
+
     private func startReply(to message: Message) {
         guard let quote = ReplyQuote(quoting: message) else { return }
         composer.reply(to: message.id, name: authorName(of: quote.author), text: quote.text)
@@ -615,6 +643,17 @@ final class ChatViewController: NSViewController {
         case .you: L("You")
         case let .bot(botID): store.bot(botID)?.name ?? L("Bot")
         case .system: "Lorca"
+        case let .contact(name): name
+        }
+    }
+
+    /// Brings a message into view, loading older pages until it is there, for feedback that
+    /// names it.
+    func reveal(loading messageID: Message.ID) {
+        guard let id = chatID else { return }
+        Task { [weak self] in
+            guard let self, (try? await self.store.loadMessage(messageID, in: id)) == true, self.chatID == id else { return }
+            self.reveal(messageID)
         }
     }
 
@@ -627,7 +666,9 @@ final class ChatViewController: NSViewController {
         }
         scrollIntoView(row: row)
         isPinnedToBottom = false
-        (tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCellView)?.flash()
+        let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)
+        (cell as? MessageCellView)?.flash()
+        (cell as? OutputCellView)?.flash()
     }
 
     @objc func stopResponding(_ sender: Any?) {
@@ -708,14 +749,20 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             configure(cell: cell, row: chatRow)
             return cell
 
-        case let .message(id, _):
+        case let .message(id, _, _):
             guard let message = message(for: id) else { return nil }
             let identifier: NSUserInterfaceItemIdentifier
             let cell: NSView
             switch message.body {
+            case .text where message.isOutputCard:
+                identifier = OutputCellView.identifier
+                cell = dequeue(identifier) { OutputCellView() }
             case .text:
                 identifier = MessageCellView.identifier
                 cell = dequeue(identifier) { MessageCellView() }
+            case let .tool(tool) where tool.agent != nil:
+                identifier = AgentCellView.identifier
+                cell = dequeue(identifier) { AgentCellView() }
             case let .tool(tool) where tool.run != nil:
                 identifier = CommandCellView.identifier
                 cell = dequeue(identifier) { CommandCellView() }
@@ -725,9 +772,15 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
             case .notice:
                 identifier = NoticeCellView.identifier
                 cell = dequeue(identifier) { NoticeCellView() }
+            case let .permission(request) where request.isSecret:
+                identifier = SecretCellView.identifier
+                cell = dequeue(identifier) { SecretCellView() }
             case .permission:
                 identifier = PermissionCellView.identifier
                 cell = dequeue(identifier) { PermissionCellView() }
+            case .draft:
+                identifier = DraftCellView.identifier
+                cell = dequeue(identifier) { DraftCellView() }
             }
             configure(cell: cell, row: chatRow)
             return cell
@@ -746,8 +799,8 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
     /// A bot's row in a group carries its avatar, beside a bubble or a card, and the first bubble
     /// of a run its name as well; a DM's bot needs neither.
     private func showsAvatar(for message: Message?) -> Bool {
-        guard let chatID, store.chat(chatID)?.isGroup == true, message?.author.botID != nil else { return false }
-        return true
+        guard let chatID, store.chat(chatID)?.showsSpeakers == true, let author = message?.author else { return false }
+        return author.botID != nil || author.contactName != nil
     }
 
     /// The bot's avatar for a card in a group; nil in a DM.
@@ -792,7 +845,8 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         case let .tool(invocation):
             return (.outgoing(to: invocation.targetBotID.flatMap(store.bot)), invocation.detail)
         case let .handoff(from, to, reason):
-            let incoming = !chat.isGroup && chat.botIDs.contains(to)
+            // From a bot outside the chat, as a DM's request or a handoff's report: a message.
+            let incoming = chat.botIDs.contains(to) && !chat.botIDs.contains(from)
             let mode: HandoffCellView.Mode = incoming
                 ? .incoming(from: store.bot(from)) : .handoff(from: store.bot(from), to: store.bot(to))
             return (mode, reason)
@@ -822,15 +876,19 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         case let .status(text):
             return text
 
-        case let .message(id, _):
+        case let .message(id, _, _):
             guard let message = message(for: id) else { return "" }
             switch message.body {
+            case .text where message.isOutputCard:
+                return "\(authorName(of: message.author)): \(OutputCellView.spokenText(output: message.output!))"
             case .text:
                 let words = layout.rendered(for: message).plainText
                 let said = "\(authorName(of: message.author)): \(words.isEmpty ? Attachment.summary(message.attachments) : words)"
                 let held = message.queued ? " \(L("Waiting for the bot to finish its step."))" : ""
                 guard let quote = message.replyTo else { return said + held }
                 return "\(said) \(L("In reply to %@: %@", authorName(of: quote.author), quote.text))\(held)"
+            case let .tool(tool) where tool.agent != nil:
+                return AgentCellView.spokenText(agent: tool.agent!, botName: botName(of: message))
             case let .tool(tool) where tool.run != nil:
                 return CommandCellView.spokenText(run: tool.run!, botName: botName(of: message))
             case .tool, .handoff:
@@ -838,8 +896,12 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 return HandoffCellView.spokenText(mode: marker.mode, reason: marker.reason)
             case let .notice(text):
                 return text
+            case let .permission(request) where request.isSecret:
+                return SecretCellView.spokenText(request: request, botName: botName(of: message))
             case let .permission(request):
                 return PermissionCellView.spokenText(request: request, botName: botName(of: message))
+            case let .draft(card):
+                return DraftCellView.spokenText(card: card, botName: botName(of: message))
             }
         }
     }
@@ -857,12 +919,33 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
         case let .status(text):
             (cell as? StatusCellView)?.configure(text)
 
-        case let .message(id, groupStart):
+        case let .message(id, groupStart, stack):
             guard let message = message(for: id), let chatID, let chat = store.chat(chatID) else {
                 return
             }
 
             switch message.body {
+            case .text where message.isOutputCard:
+                guard let outputCell = cell as? OutputCellView, let output = message.output else { return }
+                let attachment = message.attachments.first
+                outputCell.configure(
+                    output: output, attachment: attachment,
+                    url: attachment.flatMap { store.localURL(for: $0, in: chatID, messageID: message.id) },
+                    error: attachment.flatMap { store.attachmentError(for: $0) },
+                    avatar: cardAvatar(for: message), groupStart: groupStart, stack: stack)
+                outputCell.onOpen = { [weak self] in
+                    guard let self, let series = store.outputs(in: chatID).first(where: { $0.id == output.id }) else { return }
+                    presentAsSheet(OutputViewController(chatID: chatID, series: series))
+                }
+                outputCell.onRetry = attachment.map { attachment in { [weak self] in
+                    self?.store.retryAttachment(attachment, in: chatID, messageID: message.id)
+                } }
+                outputCell.fileMenu = { [weak self] in OutputActions.menu(for: message) { self?.view.window } }
+                outputCell.onReply = message.canBeQuoted ? { [weak self] in self?.startReply(to: message) } : nil
+                outputCell.onFeedback = message.author.botID.map { botID in { [weak self] in
+                    self?.presentAsSheet(FeedbackViewController(botID: botID, chatID: chat.id, message: message))
+                } }
+
             case .text:
                 guard let messageCell = cell as? MessageCellView else { return }
                 let metrics = layout.metrics(
@@ -875,6 +958,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                 if metrics.showsName, case let .bot(botID) = message.author {
                     name = store.bot(botID)?.name ?? L("Bot")
                     nameColor = store.bot(botID)?.accent.color ?? .secondaryLabelColor
+                } else if metrics.showsName, case let .contact(contact) = message.author {
+                    name = contact
+                    nameColor = .secondaryLabelColor
                 } else {
                     name = ""
                     nameColor = .secondaryLabelColor
@@ -883,7 +969,9 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     AttachmentsView.Item(
                         attachment: attachment,
                         url: store.localURL(for: attachment, in: chatID, messageID: message.id),
-                        frame: frame)
+                        frame: frame,
+                        error: store.attachmentError(for: attachment),
+                        onRetry: { [weak self] in self?.store.retryAttachment(attachment, in: chatID, messageID: message.id) })
                 }
                 messageCell.configure(
                     message: message,
@@ -897,8 +985,41 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     metrics: metrics
                 )
                 messageCell.onReply = message.canBeQuoted ? { [weak self] in self?.startReply(to: message) } : nil
+                messageCell.onFeedback = message.author.botID.map { botID in { [weak self] in
+                    self?.presentAsSheet(FeedbackViewController(botID: botID, chatID: chat.id, message: message))
+                } }
+                messageCell.capturePlaybookTitle = message.author.isYou ? L("Save as Standing Instruction…") : L("Save as Skill…")
+                messageCell.onCapturePlaybook = message.canBeQuoted && !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? { [weak self] in self?.captureSkill(from: message, in: chatID) } : nil
                 messageCell.onQuoteClick = message.replyTo.map { quote in { [weak self] in self?.reveal(quote.messageID) } }
                 messageCell.onSendNow = { [weak self] in self?.store.sendNow(message.id, in: chat.id) }
+
+            case let .tool(tool) where tool.agent != nil:
+                guard let agentCell = cell as? AgentCellView, let agent = tool.agent else { return }
+                agentCell.configure(
+                    agent: agent, messageID: message.id, botName: botName(of: message), avatar: cardAvatar(for: message),
+                    groupStart: groupStart)
+                agentCell.onDecision = { [weak self] decision in
+                    self?.store.answerPermission(chatID: chat.id, messageID: message.id, decision: decision)
+                }
+                agentCell.onChoice = { [weak self] choice in
+                    try await self?.store.answerAgent(chatID: chat.id, messageID: message.id, choice: choice)
+                }
+                agentCell.onSend = { [weak self] text in
+                    try await self?.store.answerAgent(chatID: chat.id, messageID: message.id, text: text)
+                }
+                agentCell.onStop = { [weak self] in
+                    try await self?.store.stopAgent(chatID: chat.id, messageID: message.id)
+                }
+                agentCell.onShowCommand = { [weak self] in
+                    guard let self, let command = agent.question?.command else { return }
+                    presentAsSheet(CommandSheetViewController(title: L("%@'s command", agent.name), command: command))
+                }
+                // Before it starts there is no transcript to read.
+                let started = agent.state != .checking && agent.question?.kind != .start && !(agent.state == .denied || agent.state == .expired || agent.state == .dismissed)
+                agentCell.onOpen = started ? { [weak self] in
+                    self?.presentAsSheet(AgentTranscriptViewController(chatID: chat.id, messageID: message.id, agent: agent))
+                } : nil
 
             case let .tool(tool) where tool.run != nil:
                 guard let commandCell = cell as? CommandCellView, let run = tool.run else { return }
@@ -931,6 +1052,20 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     metrics: layout.noticeMetrics(
                         for: message, tableWidth: max(tableView.bounds.width, 320)))
 
+            case let .permission(request) where request.isSecret:
+                let secretCell = cell as? SecretCellView
+                // The values stay on the bot's Runner.
+                let runnerName = message.author.botID.flatMap { store.bot($0) }.flatMap { store.device($0.runnerID) }?.name ?? L("its Runner")
+                secretCell?.configure(
+                    request: request, messageID: message.id, botName: botName(of: message), runnerName: runnerName,
+                    avatar: cardAvatar(for: message), groupStart: groupStart)
+                secretCell?.onSave = { [weak self] values in
+                    try await self?.store.answerSecret(chatID: chat.id, messageID: message.id, values: values)
+                }
+                secretCell?.onDecline = { [weak self] in
+                    self?.store.answerPermission(chatID: chat.id, messageID: message.id, decision: "deny")
+                }
+
             case let .permission(request):
                 let permissionCell = cell as? PermissionCellView
                 permissionCell?.configure(
@@ -938,12 +1073,38 @@ extension ChatViewController: NSTableViewDataSource, NSTableViewDelegate {
                     groupStart: groupStart)
                 permissionCell?.onDecision = { [weak self] decision in
                     guard let self else { return }
+                    if decision == "access", case let .bot(botID) = message.author {
+                        self.presentAsSheet(BotAccessViewController(botID: botID))
+                        return
+                    }
                     self.store.answerPermission(chatID: chat.id, messageID: message.id, decision: decision)
                 }
                 permissionCell?.onShowCommand = { [weak self] in
                     guard let self else { return }
                     presentAsSheet(CommandSheetViewController(
                         title: "\(botName(of: message)) \(request.verbPhrase)", command: request.fullCommand))
+                }
+
+            case let .draft(card):
+                guard let draftCell = cell as? DraftCellView else { return }
+                draftCell.configure(
+                    card: card, messageID: message.id, botName: botName(of: message), avatar: cardAvatar(for: message),
+                    groupStart: groupStart)
+                draftCell.onEdit = { [weak self] fields in
+                    self?.store.editDraft(chatID: chat.id, messageID: message.id, fields: fields)
+                }
+                // The card as the store has it now, with the user's latest changes.
+                let current = { [weak self] () -> DraftCard? in
+                    guard let shown = self?.message(for: message.id), case let .draft(card) = shown.body else { return nil }
+                    return card
+                }
+                draftCell.onSend = { [weak self] always in
+                    guard let self, let card = current() else { return }
+                    try await store.sendDraft(card, chatID: chat.id, messageID: message.id, botID: message.author.botID, always: always)
+                }
+                draftCell.onDiscard = { [weak self] in
+                    guard let self, let card = current() else { return }
+                    try await store.discardDraft(card, chatID: chat.id, messageID: message.id)
                 }
             }
 

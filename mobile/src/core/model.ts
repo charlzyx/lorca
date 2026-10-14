@@ -14,10 +14,14 @@ export interface ProviderStatus {
   name?: string;
   api?: CustomAPI;
   models?: CustomModel[];
+  /** The model Auto-review runs on this provider unless the user picks another: the catalog's
+   * small, fast review model for a built-in, a custom provider's first. */
+  review_model?: string;
 }
 
-/// The wire protocol a custom provider's server speaks.
-export type CustomAPI = "chat-completions" | "responses" | "messages";
+/// The wire protocol a custom provider's server speaks: a chat protocol, or a decision API
+/// (`system-one`, `decisions`) whose models only Auto-review runs.
+export type CustomAPI = "chat-completions" | "responses" | "messages" | "system-one" | "decisions";
 
 /// A model a custom provider offers, with what its server's model list said about it. Only the
 /// id is sure.
@@ -44,7 +48,10 @@ export interface RelayProblem {
 export interface Device {
   /// The machine signing public key, base64url.
   id: string;
+  /// What the Device shows as: the name the account gave it, else the one its machine goes by.
   name: string;
+  /// The name the machine goes by, which a name the account gives the Device stands in for.
+  machine_name?: string;
   model: string;
   os: string;
   os_version: string;
@@ -55,6 +62,8 @@ export interface Device {
   last_seen: number;
   /// Plugins installed on that Runner, with their setup state.
   plugins?: PluginStatus[];
+  /// The channels its bots listen on.
+  channels?: ChannelStatus[];
   /// The `lorca` that Device runs, as `lorca --version` says it.
   version?: string;
   /// Only on a Runner whose CLI replaces itself (installed with lorca.app's script).
@@ -78,6 +87,21 @@ export interface UpdateStatus {
 }
 
 /// A plugin as its Runner advertises it: installed, and in what state.
+/// The Browser plugin, whose screen lists a bot's browser profiles.
+export const BROWSER_PLUGIN_ID = "playwright";
+
+/// One of a bot's browser profiles, as its Runner reports it (`browser.sessions`). Each keeps its
+/// own sign-ins there. `revision` goes up with every change of control; Return to Bot sends the
+/// one this phone last saw.
+export interface BrowserProfile {
+  id: string;
+  name: string;
+  state: "stopped" | "bot" | "taking_over" | "human";
+  revision: number;
+  /// The user records a workflow in it for the bot to learn, with the browser in hand.
+  recording?: boolean;
+}
+
 export interface PluginStatus {
   id: string;
   name: string;
@@ -85,18 +109,40 @@ export interface PluginStatus {
   version?: string;
   /// An SF Symbol name.
   icon?: string;
-  state: "ready" | "needs_setup" | "needs_auth" | "connecting" | "error";
+  state: "ready" | "needs_setup" | "needs_auth" | "insufficient_access" | "connecting" | "error";
   detail?: string;
+  /// A named account's marketplace service (gmail) and the user's name for it (Work); its `id`
+  /// is the account's own.
+  service_id?: string;
+  account_name?: string;
 }
 
-/// The kinds the account has connected: built-ins first, then custom providers in the order
-/// they were added, as the core lists them.
+/// An installed plugin as its Runner details it: here, how each server signs in.
+export interface PluginDetail {
+  status: PluginStatus;
+  servers: { name: string; kind: string; auth: { oauth?: boolean; signed_in?: boolean } }[];
+}
+
+/// The connected kinds a bot can run with: built-ins first, then custom providers in the order
+/// they were added, as the core lists them. A decision provider is Auto-review's alone.
 export function connectedProviders(providers: readonly ProviderStatus[]): string[] {
+  return providers.filter((p) => p.is_connected && !isDecisionAPI(p.api)).map((p) => p.kind);
+}
+
+/// The providers Auto-review can run a model of: every one the account has connected, decision
+/// providers among them, in the order the core lists them.
+export function reviewProviders(providers: readonly ProviderStatus[]): string[] {
   return providers.filter((p) => p.is_connected).map((p) => p.kind);
 }
 
 export function isRunner(device: Device): boolean {
   return device.os === "macos" || device.os === "linux" || device.os === "windows";
+}
+
+/// Released standalone CLIs advertise updates; bundled and development CLIs do not.
+/// Only these Runners show `lorca service` status and installation advice.
+export function isStandaloneRunner(device: Device | undefined): boolean {
+  return !!device && isRunner(device) && !!device.update;
 }
 
 /// What a Device goes by: a machine that never said what it is has no name of its own.
@@ -122,7 +168,19 @@ export interface Bot {
   /** How much the model thinks: off, minimal, low, medium, high, xhigh, max. */
   thinking?: string;
   workdir?: string;
+  /** The user's Access for it (`src/core/access.ts`); none is full access. */
+  permissions?: BotPermissions;
   created_at: number;
+}
+
+/// A bot's Access, as the CLI keeps it in the encrypted roster: without `connections` every plugin
+/// on the Runner, else only those it lists; files `write` and shell on unless they say otherwise.
+export interface BotPermissions {
+  connections?: Record<string, { capabilities: string[]; tools?: string[] }>;
+  filesystem?: "none" | "read" | "write";
+  shell?: boolean;
+  /** Whether the bot's emails and Slack messages wait in the chat as drafts for the user to send; on unless false. */
+  drafts?: boolean;
 }
 
 /// A recurring task a bot runs on a schedule in its direct chat, as the roster carries it, with
@@ -133,12 +191,19 @@ export interface Routine {
   name: string;
   /** The task, written to the bot, handed to it on every run. */
   prompt: string;
-  /** `every 30m`, `every 2h`, `every 1d`, or five cron fields in the Runner's local time. */
+  /** `every 30m`, `every 2h`, `every 1d`, or five cron fields in `timezone`. */
   schedule: string;
+  /** The IANA timezone a cron schedule reads in. */
+  timezone?: string;
+  /** After due times its Runner missed: "coalesce" runs once when it is back, "skip" waits for the next one. */
+  missed_run_policy?: "coalesce" | "skip";
+  /** How it stands, from the core: "on", "running", "paused", "blocked", "failed", or "waiting_for_runner". */
+  state?: string;
+  health?: RoutineHealth;
   /** "Weekdays at 9:00 AM" */
   schedule_text: string;
   is_enabled: boolean;
-  /** Why Lorca paused it, when it did: "away". */
+  /** Why Lorca paused it, when it did: "away", or "authentication" after three failed sign-ins in a row. */
   paused_reason?: string;
   last_run_at?: number;
   /** "sent", "pass", or "error". */
@@ -148,9 +213,47 @@ export interface Routine {
   /** The script the Runner runs at each due time before the bot does; `next_run_at` is then the next check. */
   check?: string | null;
   created_at: number;
+  /** When a one-time routine runs; its Runner removes it after that run. */
+  once_at?: number | null;
+  /** What a routine on events listens to: a pull request through GitHub, or its own webhook. */
+  events?: RoutineEvents | null;
+  /** The calendar events a routine around events runs before or after: so many minutes before they start, or after they end. */
+  calendar?: { account?: string; matching?: string | null; minutes?: number | null; after?: boolean | null; next_event?: { title?: string; start?: number; end?: number } | null } | null;
 }
 
-export type Author = { kind: "you" } | { kind: "bot"; bot_id: string } | { kind: "system" };
+/// What a routine on events listens to, as the CLI gives it: a receiver on the relay ("github",
+/// "webhook"), a subject ("acme/project#42"), how it listens, and the latest event.
+export interface RoutineEvents {
+  receiver: string;
+  subject?: string;
+  /** "pending", "subscribed", "needs_setup", or "gateway". */
+  status?: string;
+  source_name?: string;
+  title?: string;
+  url?: string;
+  /** A webhook's URL and the key its senders include. */
+  endpoint?: string;
+  key?: string;
+  last_event?: { summary: string; at: number } | null;
+}
+
+/// The routines on events that wait on the user's setup, such as installing the GitHub App.
+export const routinesAwaitingSetup = (routines: Routine[]) => routines.filter((routine) => routine.events?.status === "needs_setup").map((routine) => routine.id);
+
+/// How a routine's checks and runs have gone, as its Runner records them.
+export interface RoutineHealth {
+  last_check_at?: number | null;
+  last_success_at?: number | null;
+  /** How the last check went: "quiet", "ready", "failed", or "blocked". */
+  status?: string | null;
+  connection_failures?: number;
+  authentication_failures?: number;
+  /** The runs' own streak with the model provider, which checks do not clear. */
+  model?: { status?: string | null; authentication_failures?: number };
+}
+
+/// `contact` is someone outside Lorca, in a channel's conversation.
+export type Author = { kind: "you" } | { kind: "bot"; bot_id: string } | { kind: "system" } | { kind: "contact"; name: string };
 
 export interface ChatSearchResults {
   chats: { chat_id: string; snippet: string }[];
@@ -210,13 +313,57 @@ export type Body =
       script_command?: string;
       /** A bash call's card, from Auto-review's question to how the command ended. */
       run?: CommandRun;
+      /** The card of the coding agent a coding_agent call started, shown from the start. */
+      agent?: AgentRun;
     }
   | { kind: "handoff"; from: string; to: string; reason: string }
   | { kind: "notice"; text: string; routine_id?: string }
   /// The bot asks before a plugin or shell action, or before installing a plugin (`tool` is `install`).
   /// `rule` is the rule Always allow adds, which Auto-review proposed for a shell command (`plugin_id` is `computer`);
   /// `command` is that command in full, where `summary` is its first line.
-  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; command?: string; link?: string; code?: string };
+  | { kind: "permission"; plugin_id: string; plugin_name: string; tool: string; summary: string; decision: "pending" | "allowed" | "always" | "denied" | "expired" | "dismissed" | "connected" | "failed"; reason?: string; rule?: string; command?: string; link?: string; code?: string; secret?: SecretAsk }
+  /// An email or Slack message the bot wrote in the chat, waiting for the user to send it: the
+  /// chat's view of its review item, whose `version` Send and Discard name. `note` says why it
+  /// was not sent or needs another look; `direct` is whether, with drafts off, the bot sends such
+  /// messages itself (Slack), where Gmail only keeps drafts.
+  | { kind: "draft"; review_id: string; version: number; state: ReviewState; plugin_id: string; account: string; draft: MessageDraft; note?: string; direct?: boolean };
+
+/// The parts of a message a bot wrote, as its draft card shows and edits them.
+export interface MessageDraft {
+  /** `email` or `slack`. */
+  kind: string;
+  /** Email addresses, or the Slack channel or person. */
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
+  body: string;
+  /** The files it carries; an edit keeps the ones it still names. */
+  attachments?: { name: string; size: number }[];
+  /** What it answers: an email's id or a Slack thread. */
+  reply?: string;
+}
+
+/// What a secret request asks for (a permission card with `tool` `secret`): the values the bot
+/// names, and where its Runner uses them. The card takes the values; they go sealed to the Runner
+/// and never come back.
+export interface SecretAsk {
+  /** `browser` (typed into a sign-in page of `site` in the bot's Browser), `command` (an environment variable of its commands), or `plugin` (a setting of the card's plugin). */
+  use: "browser" | "command" | "plugin";
+  site?: string;
+  fields: { name: string; label: string }[];
+}
+
+/// A secret kept on a Runner for one of its bots, as Settings lists it: never its value.
+export interface SavedSecret {
+  id: string;
+  bot_id: string;
+  name: string;
+  label: string;
+  use: SecretAsk["use"];
+  site?: string;
+  updated_at: number;
+}
 
 /// Where a bash call's command stands: Auto-review checking it, the question it asks, the command
 /// running in its terminal, what the command asks, and that it ended. While it asks, its card takes
@@ -248,6 +395,69 @@ export interface CommandRun {
   reason?: string;
   /** The rule Always allow adds. */
   rule?: string;
+}
+
+/// A coding agent a bot runs on its Runner, Claude Code or Codex, as the card of the call that
+/// started it shows it: Auto-review's question before it starts, what it works on and where, how it
+/// stands, its last lines, and what it asks. A question about starting it or a command it wants to
+/// run is answered like a command's (`chats.permission`); one its pane asks, with a choice or text
+/// (`coding.answer`). Stop is `coding.stop`; its transcript, `coding.transcript`.
+export interface AgentRun {
+  id: string;
+  /** `claude` or `codex`. */
+  kind: string;
+  /** `herdr` or `luvus` when it runs in a pane of that terminal host on its Runner. */
+  host?: string;
+  task: string;
+  /** Where it works, from the home folder. */
+  folder?: string;
+  branch?: string;
+  state: "checking" | "asking" | "starting" | "working" | "idle" | "exited" | "failed" | "stopped" | "denied" | "expired" | "dismissed";
+  /** Working, with nothing new for a while. */
+  stalled?: boolean;
+  /** Auto-review held its start and told the bot why, without asking: it is `denied`. */
+  held?: boolean;
+  question?: AgentQuestion;
+  output?: string;
+  outcome?: string;
+  device?: string;
+  started_at?: number;
+}
+
+/// What a coding agent's card asks: whether it may start (`start`) or run a command (`command`),
+/// or what its pane asks, with a menu of choices (`choices`) or for text (`text`).
+export interface AgentQuestion {
+  kind: "start" | "command" | "choices" | "text";
+  text?: string;
+  command?: string;
+  choices?: string[];
+  reason?: string;
+  rule?: string;
+}
+
+/// Its product's name, which is not translated.
+export function agentName(agent: AgentRun): string {
+  return agent.kind === "codex" ? "Codex" : "Claude Code";
+}
+
+export function agentIsOpen(agent: AgentRun): boolean {
+  return ["checking", "asking", "starting", "working", "idle"].includes(agent.state);
+}
+
+/// Stop ends it: not while Auto-review decides whether it may start, and not once it is done,
+/// waiting for a follow-up.
+export function agentIsRunning(agent: AgentRun): boolean {
+  return agentIsOpen(agent) && agent.state !== "checking" && agent.state !== "idle" && agent.question?.kind !== "start";
+}
+
+/// It started, so it has a transcript to read.
+export function agentStarted(agent: AgentRun): boolean {
+  return !["checking", "denied", "expired", "dismissed"].includes(agent.state) && agent.question?.kind !== "start";
+}
+
+/// Where it works, in a word: its branch, else its folder's name.
+export function agentPlace(agent: AgentRun): string {
+  return agent.branch ?? (agent.folder ?? "").split("/").filter(Boolean).pop() ?? "";
 }
 
 export function isLive(run: CommandRun): boolean {
@@ -287,8 +497,11 @@ export function showsCard(tool: Extract<Body, { kind: "tool" }>): boolean {
 /// a plugin tool it adds a rule for that exact tool (`tool`).
 export type AutoReviewRule = { id: string; text: string; behavior: "allow" | "ask"; tool?: string };
 
-/// The check on effectful plugin actions and shell commands, shared through the roster.
-export type AutoReview = { is_enabled: boolean; rules: AutoReviewRule[] };
+/// The check on effectful plugin actions and shell commands, shared through the roster. It runs
+/// the review model of `provider`, any provider the account has connected, or without one of the
+/// bot's own provider. `models` holds the review models the user picked, by provider kind; any
+/// other provider runs its status's `review_model`.
+export type AutoReview = { is_enabled: boolean; rules: AutoReviewRule[]; provider?: string; models?: Record<string, string> };
 
 export type MessageState =
   | { kind: "thinking" }
@@ -308,6 +521,152 @@ export interface Message {
   promoted_at?: number;
   /** A message of the user's the bot's turn holds for its next step; Send now has it read now. */
   queued?: boolean;
+  /** A file or document link a bot published: this message is one version of it. */
+  output?: Output;
+}
+
+/// A published output: `id` names it across its versions, the message carrying it is the version.
+/// A file is the message's attachment; a link is `url`.
+export interface Output {
+  id: string;
+  name: string;
+  mime: string;
+  bot_id: string;
+  version: number;
+  url?: string;
+  evidence?: OutputEvidence;
+}
+
+/// What the bot says it checked: a test run, a screenshot from before or after a change, or
+/// another check, and how it went.
+export interface OutputEvidence {
+  kind: "test_result" | "before_screenshot" | "after_screenshot" | "verification";
+  summary: string;
+  status: "passed" | "failed" | "unverified";
+  command?: string;
+}
+
+export function evidenceTitle(evidence: OutputEvidence): string {
+  switch (evidence.kind) {
+    case "test_result":
+      return t("Test result");
+    case "before_screenshot":
+      return t("Before screenshot");
+    case "after_screenshot":
+      return t("After screenshot");
+    default:
+      return t("Check");
+  }
+}
+
+export function evidenceStatus(evidence: OutputEvidence): string {
+  return evidence.status === "passed" ? t("Passed") : evidence.status === "failed" ? t("Failed") : t("Not verified");
+}
+
+/// The document a link output points at; only an https address without credentials opens.
+export function documentUrl(output: Output): string | undefined {
+  if (!output.url) return undefined;
+  try {
+    const url = new URL(output.url);
+    return url.protocol === "https:" && url.hostname && !url.username && !url.password ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/// The SF Symbol for what the output is.
+/// What an output is, for its icon and its tint: a link or a kind of file.
+export type OutputKind = "file" | "link" | "image" | "video" | "audio" | "pdf" | "code" | "data" | "table" | "archive" | "text";
+
+const OUTPUT_EXTENSIONS: Record<string, OutputKind> = {};
+for (const [kind, extensions] of [
+  ["code", "html htm css js mjs ts tsx jsx go rs py rb swift java kt c h cc cpp sh sql svg diff patch"],
+  ["data", "json jsonl yaml yml toml xml"],
+  ["table", "csv tsv xls xlsx numbers"],
+  ["archive", "zip gz tgz tar 7z rar"],
+  ["text", "txt md log rtf doc docx"],
+] as const) {
+  for (const ext of extensions.split(" ")) OUTPUT_EXTENSIONS[ext] = kind;
+}
+
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf(".");
+  return dot > name.lastIndexOf("/") && dot >= 0 ? name.slice(dot + 1) : "";
+}
+
+/// What the output is, from its link, its media type, or its file's extension.
+export function outputKind(output: Output): OutputKind {
+  if (output.url) return "link";
+  const byExtension = OUTPUT_EXTENSIONS[extensionOf(output.name).toLowerCase()];
+  if (byExtension) return byExtension;
+  if (output.mime.startsWith("image/")) return "image";
+  if (output.mime.startsWith("video/")) return "video";
+  if (output.mime.startsWith("audio/")) return "audio";
+  if (output.mime === "application/pdf") return "pdf";
+  if (output.mime === "application/json") return "data";
+  if (output.mime.startsWith("text/")) return "text";
+  return "file";
+}
+
+/// The SF Symbol for what the output is.
+export function outputSymbol(output: Output): string {
+  switch (outputKind(output)) {
+    case "link":
+      return "link";
+    case "image":
+      return "photo";
+    case "video":
+      return "film";
+    case "audio":
+      return "waveform";
+    case "pdf":
+      return "richtext.page";
+    case "code":
+      return "chevron.left.forwardslash.chevron.right";
+    case "data":
+      return "curlybraces";
+    case "table":
+      return "tablecells";
+    case "archive":
+      return "zipper.page";
+    case "text":
+      return "text.page";
+    default:
+      return "document";
+  }
+}
+
+/// "HTML", "PNG", or the link's host: what the output's card says it is beside its size.
+export function outputTypeName(output: Output): string {
+  if (output.url) {
+    const host = output.url.match(/^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/:?#]+)/i)?.[1] ?? "";
+    return host.replace(/^www\./, "");
+  }
+  const ext = extensionOf(output.name);
+  if (ext && ext.length <= 8) return ext.toUpperCase();
+  const sub = output.mime.split("/")[1];
+  if (output.mime.includes("/") && sub && sub !== "octet-stream" && sub.length <= 8) return sub.toUpperCase();
+  return "";
+}
+
+/// An output and its versions, newest first.
+export interface OutputSeries {
+  id: string;
+  versions: Message[];
+}
+
+/// A chat's output messages as one series per output, the latest published first.
+export function groupOutputs(messages: Message[]): OutputSeries[] {
+  const byId = new Map<string, Message[]>();
+  for (const message of messages) {
+    if (!message.output) continue;
+    const versions = byId.get(message.output.id) ?? [];
+    if (!versions.some((m) => m.id === message.id)) versions.push(message);
+    byId.set(message.output.id, versions);
+  }
+  return [...byId.entries()]
+    .map(([id, versions]) => ({ id, versions: versions.sort((a, b) => b.output!.version - a.output!.version) }))
+    .sort((a, b) => b.versions[0].created_at - a.versions[0].created_at);
 }
 
 /// A message quoted by the user's reply: who wrote it and how it opens, as the core keeps it with
@@ -342,7 +701,93 @@ export interface ChatMeta {
   /// What a group is for, which every member reads in its system prompt.
   description?: string | null;
   is_pinned: boolean;
+  /// The sidebar section the chat is listed under; none lists it with the chats in no section.
+  section_id?: string | null;
+  /// Out of the chat list but kept: search finds it, and the list's Hidden group holds it.
+  is_hidden?: boolean;
+  /// Set while the chat's alerts are off on every Device: until `until` (seconds), or until unmuted.
+  mute?: { until?: number | null } | null;
   created_at: number;
+  /// A conversation a channel keeps: one Telegram chat or topic, or one Slack thread, named by
+  /// `title`. The bot's own DM has none.
+  channel?: ChatChannel | null;
+}
+
+/// Where a channel's conversation happens.
+export interface ChatChannel {
+  channel_id: string;
+  service: string;
+  account_id: string;
+  chat_id: string;
+  thread_id?: string | null;
+}
+
+/// What a channel takes.
+export interface ChannelListen {
+  every?: boolean;
+  mentions?: boolean;
+  replies?: boolean;
+  tags?: string[];
+}
+
+/// A bot listening on a Telegram or Slack account, as its Runner advertises it.
+export interface ChannelStatus {
+  id: string;
+  bot_id: string;
+  name: string;
+  /// `telegram` or `slack`.
+  service: string;
+  account_id: string;
+  chats?: { id: string; title?: string }[];
+  listen: ChannelListen;
+  task: string;
+  /// `listening`, `paused`, `held` (a message's turn didn't finish, so later ones wait), or
+  /// `offline` (the account can't be read now).
+  state: "listening" | "paused" | "held" | "offline";
+  detail?: string;
+  held_delivery?: string | null;
+  /// Chats that wrote to the account's bot or added it to a group, waiting for the user to allow
+  /// them; the bot answers nothing there meanwhile. Newest first.
+  requests?: ChatRequest[];
+}
+
+/// A chat asking to be allowed in a channel.
+export interface ChatRequest {
+  id: string;
+  title: string;
+  private?: boolean;
+  /// Who wrote, or who added the bot to the group.
+  from?: string;
+}
+
+/// The one DM a bot has with the user: a direct chat that is not a channel's conversation.
+export function isBotDM(chat: ChatMeta): boolean {
+  return chat.kind === "dm" && !chat.channel;
+}
+
+/// A transcript with more than one speaker on the bots' side: a group, or a channel's
+/// conversation with the people there.
+export function showsSpeakers(chat: ChatMeta): boolean {
+  return chat.kind === "group" || !!chat.channel;
+}
+
+/// A named group of chats in the chat list. Every Device shows the same sections, in the same
+/// order, folded the same way.
+export interface Section {
+  id: string;
+  name: string;
+  collapsed?: boolean;
+}
+
+/// Whether a chat's alerts are off at `now` (ms). The unread count is kept either way.
+export function isMuted(chat: ChatMeta, now = Date.now()): boolean {
+  if (!chat.mute) return false;
+  return chat.mute.until == null || now < chat.mute.until * 1000;
+}
+
+/// A section's name as the core keeps it: one line of at most 60 characters.
+export function sectionName(name: string): string {
+  return [...name.split(/\s+/).filter(Boolean).join(" ")].slice(0, 60).join("");
 }
 
 /// The tokens and money the turns in a chat used, from its Runner.
@@ -384,8 +829,9 @@ export function isProviderKind(kind: string): kind is ProviderKind {
   return (PROVIDER_KINDS as readonly string[]).includes(kind);
 }
 
-/// A provider the user added, any server that speaks OpenAI's or Anthropic's API, has the kind
-/// `custom:` and a slug of the name it was added with. It lives in the account's credentials.
+/// A provider the user added, any server that speaks OpenAI's or Anthropic's API or a decision
+/// API, has the kind `custom:` and a slug of the name it was added with. It lives in the
+/// account's credentials.
 export const CUSTOM_PROVIDER_PREFIX = "custom:";
 
 export function isCustomProvider(kind: string): boolean {
@@ -394,11 +840,20 @@ export function isCustomProvider(kind: string): boolean {
 
 /// The protocols a custom provider's server can speak: the product's name, the same in every
 /// language; the path Lorca adds to the base URL for a model call; and the base URL's example.
+/// The decision APIs come last; their example is a root, as the path is added to one.
 export const CUSTOM_APIS: readonly { id: CustomAPI; title: string; path: string; placeholder: string }[] = [
   { id: "chat-completions", title: "OpenAI Chat Completions", path: "/chat/completions", placeholder: "https://api.example.com/v1" },
   { id: "responses", title: "OpenAI Responses", path: "/responses", placeholder: "https://api.example.com/v1" },
-  { id: "messages", title: "Anthropic Messages", path: "/v1/messages", placeholder: "https://api.example.com" },
+  { id: "messages", title: "Anthropic Messages", path: "/messages", placeholder: "https://api.example.com/v1" },
+  { id: "system-one", title: "System One", path: "/systemone", placeholder: "https://api.example.com/v1" },
+  { id: "decisions", title: "OpenAI Decisions", path: "/decisions", placeholder: "https://api.example.com/v1" },
 ];
+
+/// A decision API, whose models answer typed questions instead of chatting: Auto-review can run
+/// them, and no bot can.
+export function isDecisionAPI(api: string | undefined): boolean {
+  return api === "system-one" || api === "decisions";
+}
 
 export function customAPI(id: string | undefined) {
   return CUSTOM_APIS.find((api) => api.id === id) ?? CUSTOM_APIS[0];
@@ -406,14 +861,17 @@ export function customAPI(id: string | undefined) {
 
 /// Where a custom provider's model calls go, from the base URL as typed, the way the core
 /// stores it: trimmed, without a trailing slash, and cut back to the root when a whole endpoint
-/// was pasted. Empty while the base URL is.
+/// was pasted. A decision API's URL is its endpoint, since vendors serve one at different paths:
+/// one that ends in a decision path stays as it is, and any other gets the API's path. Empty
+/// while the base URL is.
 export function customRequestURL(api: CustomAPI, baseURL: string): string {
   let root = baseURL.trim().replace(/\/+$/, "");
   if (!root) return "";
   const { path } = customAPI(api);
-  const pasted = api === "messages" ? [path, "/v1"] : [path];
-  const endpoint = pasted.find((suffix) => root.endsWith(suffix));
-  if (endpoint) root = root.slice(0, -endpoint.length);
+  if (isDecisionAPI(api)) return /\/(systemone|decisions)$/.test(root) ? root : root + path;
+  if (root.endsWith(path)) root = root.slice(0, -path.length);
+  // Messages adds the /v1 a root without one lacks (Moonshot's …/anthropic).
+  if (api === "messages" && !root.endsWith("/v1")) root += "/v1";
   return root + path;
 }
 
@@ -435,7 +893,7 @@ export function isLoopbackHost(host: string): boolean {
 }
 
 /// A server people often add, to start the form from: its product name, protocol, and base URL.
-/// `local` ones run on the user's own computer.
+/// `local` ones run on the user's own computer; those with a decision API serve Auto-review.
 export interface CustomPreset {
   name: string;
   api: CustomAPI;
@@ -452,23 +910,34 @@ export const CUSTOM_PRESETS: readonly CustomPreset[] = [
   { name: "Together AI", api: "chat-completions", baseURL: "https://api.together.xyz/v1", keyPlaceholder: () => t("Key from api.together.ai") },
   { name: "Ollama", api: "chat-completions", baseURL: "http://localhost:11434/v1", keyPlaceholder: () => t("Optional for a server on your network"), local: true },
   { name: "LM Studio", api: "chat-completions", baseURL: "http://localhost:1234/v1", keyPlaceholder: () => t("Optional for a server on your network"), local: true },
+  { name: "OpenRouter Decisions", api: "system-one", baseURL: "https://openrouter.ai/api/alpha/decisions", keyPlaceholder: () => t("sk-or-… from openrouter.ai/keys") },
+  { name: "OpenAI Decisions", api: "decisions", baseURL: "https://api.openai.com/v1/decisions", keyPlaceholder: () => t("sk-… from platform.openai.com") },
+  { name: "TypeSafe", api: "system-one", baseURL: "https://api.typesafe.ai/v1/systemone", keyPlaceholder: () => t("Key from typesafe.ai") },
 ];
+
+/// The group a preset sits in on Add Custom Provider's menu: hosted servers, the ones on the
+/// user's own computer, then decision APIs.
+export function presetGroup(preset: CustomPreset): "cloud" | "local" | "decisions" {
+  return preset.local ? "local" : isDecisionAPI(preset.api) ? "decisions" : "cloud";
+}
 
 export function customPreset(name: string | undefined): CustomPreset | undefined {
   const wanted = name?.trim().toLowerCase();
   return wanted ? CUSTOM_PRESETS.find((preset) => preset.name.toLowerCase() === wanted) : undefined;
 }
 
-/// The preset whose server a base URL names, by host and port.
-export function presetForURL(baseURL: string): CustomPreset | undefined {
+/// The preset whose server a base URL names, by host and port and, among a server's presets, by
+/// API: openrouter.ai with System One is OpenRouter Decisions, with Chat Completions OpenRouter.
+export function presetForURL(baseURL: string, api?: CustomAPI): CustomPreset | undefined {
   const host = urlHost(baseURL);
-  return host ? CUSTOM_PRESETS.find((preset) => urlHost(preset.baseURL) === host) : undefined;
+  const server = host ? CUSTOM_PRESETS.filter((preset) => urlHost(preset.baseURL) === host) : [];
+  return server.find((preset) => preset.api === api) ?? server[0];
 }
 
 /// The name a custom provider takes when the user gives it none: the preset's whose server the
 /// base URL names, else the URL's host. Empty without a host.
-export function defaultProviderName(baseURL: string): string {
-  return presetForURL(baseURL)?.name ?? urlHost(baseURL);
+export function defaultProviderName(baseURL: string, api?: CustomAPI): string {
+  return presetForURL(baseURL, api)?.name ?? urlHost(baseURL);
 }
 
 /// The account's custom provider with this name, which the core keeps unique ignoring case.
@@ -581,9 +1050,9 @@ export function modelListingNote(listing: ModelListing): string | undefined {
 }
 
 /// Every provider a bot can run with: the built-ins, then the account's custom providers in the
-/// order they were added.
+/// order they were added, but those with a decision API.
 export function providerKinds(providers: readonly ProviderStatus[]): string[] {
-  return [...PROVIDER_KINDS, ...providers.filter((p) => isCustomProvider(p.kind)).map((p) => p.kind)];
+  return [...PROVIDER_KINDS, ...providers.filter((p) => isCustomProvider(p.kind) && !isDecisionAPI(p.api)).map((p) => p.kind)];
 }
 
 export function providerUsesAPIKey(kind: ProviderKind): boolean {
@@ -637,17 +1106,70 @@ export function providerLabel(kind: string, providers: readonly ProviderStatus[]
 }
 
 /** A model the core's catalog offers, as the snapshot carries it: its provider, id, and name,
- * and the thinking levels it takes, lowest first. */
+ * the thinking levels it takes, lowest first, and whether it is a decision model, which answers
+ * typed questions instead of chatting: Auto-review can run it, and no bot can. */
 export interface ProviderModel {
   provider: string;
   id: string;
   name: string;
   levels: string[];
+  decides?: boolean;
 }
 
-/** The models a provider offers, in the catalog's order; the first is the default the CLI uses. */
+/** The models a bot of a provider can run, in the catalog's order; the first is the default the
+ * CLI uses. Decision models are Auto-review's alone. */
 export function providerModels(models: ProviderModel[], provider: string): ProviderModel[] {
+  return models.filter((model) => model.provider === provider && !model.decides);
+}
+
+/** Every model of a provider Auto-review can run, in the catalog's order: the ones bots can, and
+ * decision models. */
+export function reviewModels(models: ProviderModel[], provider: string): ProviderModel[] {
   return models.filter((model) => model.provider === provider);
+}
+
+/// What Auto-review's Reviews with offers and shows: every connected provider, and the one
+/// picked, none for the bot's own (as when the picked one is no longer connected, which the core
+/// then reviews with too).
+export function reviewPicker(review: AutoReview, providers: readonly ProviderStatus[]): { providers: string[]; provider?: string } {
+  const kinds = reviewProviders(providers);
+  const provider = review.provider && kinds.includes(review.provider) ? review.provider : undefined;
+  return { providers: kinds, provider };
+}
+
+/// One row of Settings' Review Models: a connected provider, the name of the model it reviews
+/// with by default (none when its status names none), all its models with decision models among
+/// them and the picked one added, by its id, when the list lacks it, and the model the user
+/// picked, none for the default.
+export interface ReviewModelRow {
+  kind: string;
+  defaultName?: string;
+  models: ProviderModel[];
+  picked?: string;
+}
+
+/// Auto-review with a provider's review model picked, or its default put back (`undefined`), as
+/// an `auto_review.set` patch of `models` leaves it.
+export function withReviewModel(review: AutoReview, kind: string, model: string | undefined): AutoReview {
+  const { [kind]: _, ...others } = review.models ?? {};
+  const models = model ? { ...others, [kind]: model } : others;
+  return { ...review, models: Object.keys(models).length ? models : undefined };
+}
+
+/// A row for every connected provider, in the order the core lists them. `catalog` is the core's
+/// with the custom providers' models (`withCustomModels`).
+export function reviewModelRows(review: AutoReview, providers: readonly ProviderStatus[], catalog: ProviderModel[]): ReviewModelRow[] {
+  return providers
+    .filter((status) => status.is_connected)
+    .map((status) => {
+      const kind = status.kind;
+      const offered = reviewModels(catalog, kind);
+      const picked = review.models?.[kind] || undefined;
+      const models = picked && !offered.some((model) => model.id === picked) ? [...offered, { provider: kind, id: picked, name: picked, levels: [] }] : offered;
+      const fallback = status.review_model;
+      const defaultName = fallback ? (offered.find((model) => model.id === fallback)?.name ?? fallback) : undefined;
+      return { kind, defaultName, models, picked };
+    });
 }
 
 /** Every thinking level, lowest first. */
@@ -663,11 +1185,11 @@ export function thinkingLevels(models: ProviderModel[], provider: string, model:
 
 /// The catalog with each custom provider's saved models after it, so the pickers offer them as
 /// they do the catalog's: named as the provider's server names them, with the thinking levels the
-/// core says each takes.
+/// core says each takes. Every model of a decision API decides.
 export function withCustomModels(models: ProviderModel[], providers: readonly ProviderStatus[]): ProviderModel[] {
   const custom = providers.flatMap((provider) =>
     isCustomProvider(provider.kind)
-      ? (provider.models ?? []).map((model) => ({ provider: provider.kind, id: model.id, name: modelLabel(model), levels: model.levels ?? [] }))
+      ? (provider.models ?? []).map((model) => ({ provider: provider.kind, id: model.id, name: modelLabel(model), levels: model.levels ?? [], decides: isDecisionAPI(provider.api) }))
       : [],
   );
   return [...models, ...custom];
@@ -684,4 +1206,310 @@ export function thinkingLabel(level: string): string {
     max: t("Max"),
   };
   return labels[level] ?? level.charAt(0).toUpperCase() + level.slice(1);
+}
+
+/// Durable work a bot keeps across turns, as the core's `tasks` methods carry it: an owning bot
+/// (and so its Runner), what done looks like, the next step, the tasks it waits for, and, once a
+/// run ends, a result with what supports it. Not the Running tasks of `app/tasks`, which are a
+/// chat's terminal commands.
+/// A draft or an exact call a bot left for the user to approve, as its Runner keeps it: what it
+/// would do (`payload`), where (`target`), why (`rationale`), and how it ended. Only that Runner
+/// changes it, and a decision names the `version` the user saw.
+export interface ReviewItem {
+  id: string;
+  runner_id: string;
+  bot_id: string;
+  origin: { chat_id: string; message_id?: string | null; routine_id?: string | null; task_id?: string | null };
+  target: { account: string; resource: string };
+  rationale: string;
+  payload: ReviewPayload;
+  version: number;
+  revision: number;
+  preconditions: { workdir: string; files: { path: string; hash?: string | null }[] };
+  state: ReviewState;
+  outcome?: { summary: string; result?: { text?: string } | null; message_id: string } | null;
+  created_at: number;
+  /** An email or Slack message: its draft card in the chat is where it is decided. */
+  is_message?: boolean;
+}
+
+export type ReviewPayload =
+  | { kind: "draft"; text: string }
+  | { kind: "shell"; arguments: { command?: string } }
+  | { kind: "plugin"; plugin_id: string; server_name: string; tool: string; arguments: unknown };
+
+export type ReviewState = "pending" | "approved" | "executing" | "succeeded" | "failed" | "rejected" | "cancelled" | "uncertain";
+
+/// Waiting for the user, or approved and about to run.
+export function reviewIsOpen(item: ReviewItem): boolean {
+  return item.state === "pending" || item.state === "approved" || item.state === "executing";
+}
+
+export interface DurableTask {
+  id: string;
+  revision: number;
+  authority_runner_id: string;
+  owner_bot_id: string;
+  runner_id: string;
+  goal: string;
+  acceptance_criteria: string[];
+  dependencies: string[];
+  next_action: string;
+  chat_ids: string[];
+  links: { label: string; url: string }[];
+  state: DurableTaskState;
+  reason?: string | null;
+  result?: string | null;
+  evidence: TaskEvidence[];
+  active_run?: { id: string; bot_id: string; runner_id: string; chat_id: string; started_at: number } | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export type DurableTaskState = "queued" | "working" | "blocked" | "awaiting_review" | "completed" | "cancelled";
+
+/// What supports a task's result: a message, an output version, a file, a review, or a link.
+export interface TaskEvidence {
+  kind: "message" | "output" | "file" | "review" | "url";
+  label: string;
+  chat_id?: string | null;
+  message_id?: string | null;
+  attachment_id?: string | null;
+  url?: string | null;
+  output_id?: string | null;
+  version?: number | null;
+  review_id?: string | null;
+}
+
+/// Why a task the user cancelled in the app stopped, for its bot to read; the apps show the state
+/// alone for it.
+export const CANCELLED_BY_USER = "Cancelled by the user.";
+
+export const taskIsFinished = (state: DurableTaskState) => state === "completed" || state === "cancelled";
+
+/// A run can start: queued or blocked, and not running.
+export const taskCanStart = (task: DurableTask) => (task.state === "queued" || task.state === "blocked") && !task.active_run;
+
+/// The SF Symbol for a state, the same as the desktop apps'.
+export function taskSymbol(state: DurableTaskState): string {
+  switch (state) {
+    case "working":
+      return "arrow.triangle.2.circlepath";
+    case "blocked":
+      return "exclamationmark.circle.fill";
+    case "awaiting_review":
+      return "eye";
+    case "completed":
+      return "checkmark.circle";
+    case "cancelled":
+      return "xmark.circle";
+    default:
+      return "circle";
+  }
+}
+
+/// What waits on the user first, then open work, then finished tasks.
+export function taskOrder(state: DurableTaskState): number {
+  return { blocked: 0, awaiting_review: 1, working: 2, queued: 3, completed: 4, cancelled: 4 }[state];
+}
+
+/// What a DM's turns, a task's runs, or a routine's runs may use on the bot's Runner. A missing
+/// limit is none; zero allows nothing.
+export interface BudgetLimits {
+  max_usd?: number | null;
+  max_tokens?: number | null;
+  max_runtime_secs?: number | null;
+  max_retries?: number | null;
+  max_connector_calls?: number | null;
+}
+
+/// One allowance as its Runner keeps it. `chat` holds the limits each new turn in a DM starts
+/// with; `job` is one turn; `task` and `routine` all of their runs.
+export interface BudgetState {
+  kind: "chat" | "job" | "task" | "routine";
+  id: string;
+  runner_id: string;
+  chat_id: string;
+  limits: BudgetLimits;
+  usage: {
+    tokens: number;
+    api_cost_usd: number;
+    subscription_estimate_usd: number;
+    unknown_price_calls: number;
+    runtime_secs: number;
+    retries: number;
+    connector_calls: number;
+  };
+  state: "ready" | "running" | "complete" | "budget_exhausted" | "interrupted";
+  /// The limit it stopped at: usd, tokens, runtime, retries, connector_calls, or unknown_price.
+  reached?: string | null;
+  updated_at: number;
+}
+
+/// A plugin account's call limit on its Runner, shared by every bot there.
+export interface CallLimits {
+  limits: { max_calls: number; window_secs: number; max_concurrency: number };
+  /// When the service asked the calls to wait until, in seconds.
+  retry_at?: number | null;
+  plugin_id: string;
+  service_id: string;
+}
+
+/// A group's shared project context, after the desktop apps' Project section: the briefs, goals,
+/// constraints, decisions, facts, links (`document`), and files (`asset`) every bot in the group
+/// can read. The core owns scope, revisions, source checks, and sync.
+export type ProjectKind = "brief" | "goal" | "constraint" | "decision" | "fact" | "document" | "asset";
+
+/// The order the Project section lists the kinds in, and the + menu offers them.
+export const PROJECT_KINDS: ProjectKind[] = ["brief", "goal", "constraint", "decision", "fact", "document", "asset"];
+
+/// Where an entry came from, kept whole so a correction carries a cited output along.
+export interface ProjectSource {
+  kind: "user" | "bot" | "url" | "message" | "output";
+  label: string;
+  url?: string | null;
+  message_id?: string | null;
+  output?: { chat_id: string; message_id: string; output_id: string; version: number } | null;
+}
+
+export interface ProjectEntry {
+  id: string;
+  kind: ProjectKind;
+  title: string;
+  text: string;
+  source: ProjectSource;
+  verification: string;
+  freshness: string;
+  updated_at: number;
+  verified_at?: number | null;
+  fetched_at?: number | null;
+  asset?: Attachment | null;
+  refresh_error?: string | null;
+  supersedes?: string[];
+  current?: boolean;
+  removed?: boolean;
+}
+
+/// A group's current entries in list order, and the entries that are two versions of one (two
+/// Devices changed it at once).
+export interface ProjectContext {
+  entries: ProjectEntry[];
+  conflicts: string[][];
+}
+
+/// Briefs first and files last, newest first within a kind.
+export function orderProjectEntries(entries: ProjectEntry[]): ProjectEntry[] {
+  return [...entries].sort((a, b) => PROJECT_KINDS.indexOf(a.kind) - PROJECT_KINDS.indexOf(b.kind) || b.updated_at - a.updated_at || a.id.localeCompare(b.id));
+}
+
+/// The other current versions of an entry two Devices changed at once.
+export function otherVersions(context: ProjectContext | undefined, id: string): string[] {
+  return context?.conflicts.find((versions) => versions.includes(id))?.filter((other) => other !== id) ?? [];
+}
+
+/// A bot's proposal, waiting for the user to accept it.
+export function isSuggestion(entry: ProjectEntry): boolean {
+  return entry.verification === "unverified" && entry.source.kind === "bot";
+}
+
+/// A bot reads the link again before it relies on it; an agreed decision is the user's to change.
+export function canCheckLink(entry: ProjectEntry): boolean {
+  return !!entry.source.url && !(entry.kind === "decision" && entry.verification === "agreed");
+}
+
+/// The last time the link was read or confirmed, in seconds.
+export function linkChecked(entry: ProjectEntry): number | undefined {
+  const times = [entry.fetched_at, entry.verified_at].filter((at): at is number => typeof at === "number");
+  return times.length ? Math.max(...times) : undefined;
+}
+
+/// The host of the entry's link, for its row.
+export function projectHost(entry: ProjectEntry): string | undefined {
+  if (!entry.source.url) return undefined;
+  try {
+    return new URL(entry.source.url).hostname.replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+export function projectSymbol(kind: ProjectKind): string {
+  return { brief: "doc.text", goal: "flag", constraint: "hand.raised", decision: "checkmark.seal", fact: "info.circle", document: "link", asset: "paperclip" }[kind];
+}
+
+/// What the core answers when the entry being saved changed on another Device first.
+export const STALE_PROJECT_ENTRY = "This entry changed on another Device.";
+
+/// Whose skill it is: one bot's, in every chat it is in (`bot`), or a group's, for the bots in
+/// that group (`project`).
+export interface PlaybookScope {
+  kind: "bot" | "project";
+  id: string;
+}
+
+/// A reference or a script the skill carries, as text: `references/checklist.md`.
+export interface PlaybookFile {
+  path: string;
+  text: string;
+}
+
+export interface PlaybookContent {
+  name: string;
+  description: string;
+  instructions: string;
+  examples: string;
+  references: PlaybookFile[];
+  scripts: PlaybookFile[];
+}
+
+/// A skill as the roster lists it, without its body.
+export interface PlaybookSummary {
+  id: string;
+  scope: PlaybookScope;
+  name: string;
+  description: string;
+  status: "draft" | "saved" | "deleted";
+  revision: number;
+  hash: string;
+  updated_at: number;
+}
+
+/// One step of a skill's history: who changed it where, and what it said then.
+export interface PlaybookRevision {
+  id: string;
+  revision: number;
+  status: "draft" | "saved" | "deleted";
+  content: PlaybookContent | null;
+  provenance: { kind: string; chat_id?: string | null; message_ids: string[] };
+  device_id: string;
+  created_at: number;
+}
+
+/// A skill with its body and history, fetched when it opens.
+export interface PlaybookRecord {
+  id: string;
+  scope: PlaybookScope;
+  status: "draft" | "saved" | "deleted";
+  revision: number;
+  hash: string;
+  content: PlaybookContent | null;
+  revisions: PlaybookRevision[];
+}
+
+/// Whose skills a chat shows: the bot's in a DM, the group's in a group.
+export function skillScopeOf(chat: ChatMeta): PlaybookScope | undefined {
+  if (chat.kind === "group") return { kind: "project", id: chat.id };
+  return chat.bot_ids[0] ? { kind: "bot", id: chat.bot_ids[0] } : undefined;
+}
+
+/// What the core answers when a skill being saved changed on another Device first.
+export function isStaleSkill(error: string): boolean {
+  return error.includes("changed since");
+}
+
+/// Whether two drafts say the same: an unchanged card sends without an edit.
+export function sameDraft(a: MessageDraft, b: MessageDraft): boolean {
+  const list = (values?: string[]) => (values ?? []).join("\n");
+  const files = (draft: MessageDraft) => (draft.attachments ?? []).map((file) => file.name).join("\n");
+  return list(a.to) === list(b.to) && list(a.cc) === list(b.cc) && list(a.bcc) === list(b.bcc) && (a.subject ?? "") === (b.subject ?? "") && a.body === b.body && files(a) === files(b);
 }
