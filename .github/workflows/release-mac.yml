@@ -58,8 +58,6 @@ jobs:
             echo "::error::build_only requires publish to be off"
             exit 1
           fi
-      - name: Apply dots branding
-        run: git apply --check brand.patch && git apply brand.patch
       - uses: oven-sh/setup-bun@v2
       - id: package
         name: Name the release after package.json
@@ -175,9 +173,9 @@ jobs:
       - name: Verify the build-only app and bundled CLI
         if: env.BUILD_ONLY == 'true'
         run: |
-          app="macos/.build/bundle/release/dots.app"
-          cli="$PWD/$app/Contents/Resources/bin/dots"
-          test "$(plutil -extract CFBundleName raw "$app/Contents/Info.plist")" = dots
+          app="macos/.build/bundle/release/Lorca.app"
+          cli="$PWD/$app/Contents/Resources/bin/lorca"
+          test "$(plutil -extract CFBundleName raw "$app/Contents/Info.plist")" = Lorca
           executable=$(plutil -extract CFBundleExecutable raw "$app/Contents/Info.plist")
           test "$(lipo -archs "$app/Contents/MacOS/$executable")" = arm64
           test "$(lipo -archs "$cli")" = arm64
@@ -185,12 +183,12 @@ jobs:
           codesign -dv "$app" 2>&1 | grep -F "Signature=adhoc"
           codesign -dv "$cli" 2>&1 | grep -F "Signature=adhoc"
           cli_version=$(bun -e 'console.log(Bun.TOML.parse(await Bun.file("Cargo.toml").text()).workspace.package.version)')
-          test "$("$cli" --version)" = "dots $cli_version"
+          test "$("$cli" --version)" = "lorca $cli_version"
           for mode in default production development; do
-            export HOME="$RUNNER_TEMP/dots-smoke-$mode"
-            root="$HOME/.dots"
+            export HOME="$RUNNER_TEMP/lorca-smoke-$mode"
+            root="$HOME/.lorca"
             unset LORCA_HOME
-            if [[ $mode == development ]]; then root="$HOME/.dots-dev"; fi
+            if [[ $mode == development ]]; then root="$HOME/.lorca-dev"; fi
             if [[ $mode != default ]]; then export LORCA_HOME="$root"; fi
             mkdir -p "$root"
             printf '%s\n' '{"mcpServers":{"build-smoke":{"command":"/usr/bin/true"}}}' > "$root/mcp.json"
@@ -200,24 +198,24 @@ jobs:
             "$cli" mcp list | grep -F build-smoke
             "$cli" mcp remove build-smoke
             if grep -q build-smoke "$root/mcp.json"; then exit 1; fi
-            test ! -e "$HOME/.lorca"
-            test ! -e "$HOME/.lorca-dev"
-            if [[ $mode == development ]]; then test ! -e "$HOME/.dots"; fi
+            test ! -e "$HOME/.dots"
+            test ! -e "$HOME/.dots-dev"
+            if [[ $mode == development ]]; then test ! -e "$HOME/.lorca"; fi
             echo "Verified $mode configuration root: $root"
           done
       - name: Keep the build-only ZIP
         if: env.BUILD_ONLY == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: dots-${{ steps.package.outputs.version }}-adhoc-zip
-          path: dist/mac/dots-${{ steps.package.outputs.version }}.zip
+          name: Lorca-${{ steps.package.outputs.version }}-adhoc-zip
+          path: dist/mac/Lorca-${{ steps.package.outputs.version }}.zip
           if-no-files-found: error
       - name: Keep the disk image
         if: env.PUBLISH != 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: dots-${{ steps.package.outputs.version }}
-          path: dist/mac/dots-${{ steps.package.outputs.version }}.dmg
+          name: Lorca-${{ steps.package.outputs.version }}
+          path: dist/mac/Lorca-${{ steps.package.outputs.version }}.dmg
           if-no-files-found: error
       - name: Remove the keys and the keychain
         if: always() && env.BUILD_ONLY != 'true'

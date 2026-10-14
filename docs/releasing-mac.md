@@ -161,8 +161,7 @@ bucket fails the run before the build.
 
 For a personal test build without Apple credentials, turn **publish** off and **build_only** on.
 This explicitly uses an ad-hoc signature, skips notarization, and keeps a ZIP and DMG as Actions
-artifacts. It cannot publish; selecting both options fails before building. The Mac workflow
-applies `brand.patch`, so these artifacts are named `dots-<version>`. macOS may require an
+artifacts. It cannot publish; selecting both options fails before building. The artifacts are named `Lorca-<version>`. macOS may require an
 explicit security confirmation to open this unnotarized build. The equivalent local command is
 `bun run release-mac --local --build-only`. Normal signed releases retain the setup below.
 
