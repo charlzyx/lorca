@@ -68,7 +68,7 @@ A bot made from one Device runs on its Runner, which can be offline: [A bot on a
 
 ## Subjects
 
-One doc per subject under `docs/architecture/`, each short enough to read in one pass. `bun run check:docs` holds this file to 16 KiB and each subject to 24 KiB, and checks that every subject is listed here and that links and their anchors resolve.
+Subject docs live in `docs/architecture/`. `bun run check:docs` checks this index, links, anchors, and size limits: 16 KiB here, 24 KiB per subject.
 
 | Doc | Read it for |
 | --- | --- |
@@ -79,7 +79,8 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [CLI (runtime)](docs/architecture/runtime.md) | The `lorca` binary and its data directory, installing it, its signed self-updates and `lorca service`, the agent loop and a turn on a Runner |
 | [Notifications](docs/architecture/notifications.md) | Phone pushes for replies, failures, and questions, the macOS app's own notifications, reads on another Device, the chat on screen |
 | [Bot permissions](docs/architecture/bot-permissions.md) | A bot's Access to plugins, tools, files, and shell; where the CLI checks it; access requests |
-| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools, Auto-review |
+| [Tools](docs/architecture/tools.md) | Team, memory, and coding tools |
+| [Auto-review](docs/architecture/auto-review.md) | Fast paths, what the review reads, its rules and two passes, holds back to the bot, asks |
 | [Handoffs](docs/architecture/handoffs.md) | Durable delegated contracts, expected outputs, result evidence and return routing, offline delivery and restart recovery |
 | [Review queue](docs/architecture/review-queue.md) | Encrypted editable proposals, version-bound approval, Runner execution and outcomes |
 | [Message drafts](docs/architecture/drafts.md) | Emails and Slack messages a bot writes in a chat as drafts the user edits, sends, or discards; sending directly; edits as feedback |
@@ -93,7 +94,7 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [Integrations and named accounts](docs/architecture/integrations.md) | Slack, Gmail, Calendar, and Drive; stable account instances, OAuth on the Runner, account selection, access recovery, and source links |
 | [Marketplace](docs/architecture/marketplace.md) | The index of plugins and bot templates and how lorca.app keeps it current on every Device, bots added from a template, the marketplace sheet |
 | [Workflow onboarding](docs/architecture/workflows.md) | Workflows from the marketplace: packs, a setup on a Runner and its accounts, the sample before the schedule, how setups sync, the workflow page in each app |
-| [Bot templates](docs/architecture/templates.md) | A bot shared as a link or a file and a new bot made from one: what a template holds, redaction and flags, encrypted links and their keys, the Runner's own connections, the apps' sheets |
+| [Bot templates](docs/architecture/templates.md) | Bot template files and encrypted links, content, redaction, flags, connection handling, and app sheets |
 | [MCP servers](docs/architecture/mcp-servers.md) | The user's own MCP servers in a Runner's `mcp.json`: the file and other apps' spellings, sign-in when a server asks, the `mcp.*` methods and `lorca mcp`, the apps' MCP Servers section and server sheet |
 | [Bots and Memory](docs/architecture/bots.md) | The lead bot, DMs and groups, who answers, handoffs between bots, a bot's memory |
 | [Spaces](docs/architecture/spaces.md) | A Space on a Runner, `spaces.*`, `Bot.space_id`, approval Never |
@@ -101,7 +102,8 @@ One doc per subject under `docs/architecture/`, each short enough to read in one
 | [One-time routines, routines on events, and calendar events](docs/architecture/routine-triggers.md) | Routines that run once at a date and time, run for each event about one subject (a pull request until it merges or closes, a webhook's requests), or run around a Calendar account's events |
 | [Event triggers](docs/architecture/event-triggers.md) | Runner event subscriptions, the gateways users run to sign and seal a service's events, the encrypted inbox, ordering and recovery |
 | [Hosted receivers](docs/architecture/receivers.md) | The relay's receivers for routines on events: the Lorca GitHub App and its install and bind, routine webhooks with their URL and key, what the relay sees, setup |
-| [Channels](docs/architecture/channels.md) | A bot listening on Telegram and Slack: the accounts and their builtin servers, filters, the chats the user allows and the ones asking, the Runner's readers, conversations and what people write there, replies, the feedback collector |
+| [Channels](docs/architecture/channels.md) | A bot listening on Telegram and Slack: the accounts and their builtin servers, filters, the chats the user allows and the ones asking, conversations and what people write there, replies, the feedback collector |
+| [Channel readers](docs/architecture/channel-readers.md) | How the Runner reads Telegram and Slack, what it takes, Telegram's photos and albums |
 | [Durable tasks](docs/architecture/tasks.md) | Work that spans turns: owner, revisions, runs and recovery, evidence, the apps' Tasks section |
 | [Coordinator attention](docs/architecture/attention.md) | Consolidated reviews, blockers, commitments and changes, coordinator briefs, deduplication, encrypted records and notification preferences |
 | [Shared project context](docs/architecture/project-context.md) | Group briefs, goals, constraints, decisions, source freshness and corrections, encrypted reference assets, bounded bot discovery |
