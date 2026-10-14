@@ -195,7 +195,7 @@ pub fn turn_order(chat: &ChatMeta, app: &Arc<App>, mentions: &[String], replied:
 /// The bots a message mentions, by id: the ones the user picked from the `@` menu, then each
 /// other `@Name` in the text that only one bot answers to. A name two bots share stays as typed
 /// unless the user picked which.
-fn resolve_mentions(app: &App, text: &str, picked: Vec<String>) -> Vec<String> {
+pub(crate) fn resolve_mentions(app: &App, text: &str, picked: Vec<String>) -> Vec<String> {
     let bots = app.state.lock().unwrap().bots.clone();
     let mut mentions: Vec<String> = Vec::new();
     for id in picked {

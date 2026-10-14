@@ -79,6 +79,9 @@ rmcp = { version = "3.4.0", default-features = false, features = ["client", "tra
 process-wrap = { version = "10", features = ["tokio1"], optional = true }
 sse-stream = { version = "0.2.4", optional = true }
 httpdate = { version = "1", optional = true }
+gray_matter = "0.3.2"
+walkdir = "2"
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 # `serve --parent-pid` watches the parent through a process handle; `lorca service run` leaves

@@ -33,6 +33,8 @@ A bot's profile also carries the user's [Access](bot-permissions.md): the plugin
 
 ## Durable work
 
+Completed assistant text resolves unique `@Name` references into `Body::Text.mentions`, using the same known-bot lookup as user text. Rebuilt context includes those ids in other bots' messages. A room turn's cue identifies messages addressed to this bot since its last completed message; a later teammate question takes priority over an earlier request addressed to someone else. Attribution remains the original speaker, and a teammate mention adds no user authorization. The room retains its four-round bound and original chat. When the user names a bot outside the group, the owner's instructions have it deliver the request and group context through the existing durable `message_bot` handoff, with the recipient's real request and reply in its DM.
+
 [Durable tasks](tasks.md) keep goals, ownership, dependencies, next actions, blockers, and completion evidence across turns and chats. The `tasks` tool and the apps' Tasks section read and edit them. A bot with open tasks reads them again on every provider request, including after compaction. A Job references its canonical task id; a group's chat owner and a task's owner are independent.
 
 ## Attention

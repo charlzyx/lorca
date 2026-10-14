@@ -887,7 +887,7 @@ async fn run_budgeted_check(app: &Arc<App>, routine: &Routine, cancel: &Cancella
     let Some(code) = routine.check.as_deref() else { return CheckRun { found: None, error: None, result: String::new() } };
     let workdir = bot.working_directory(&app.config.home);
     let space = crate::spaces::isolation_for(app, &bot);
-    let tool_dir = crate::spaces::tool_directory(&space, &workdir);
+    let tool_dir = crate::spaces::working_directory(app, &bot);
     if tool_dir != workdir {
         if let Err(error) = std::fs::create_dir_all(&tool_dir) {
             return failed(format!("The Space sandbox could not be created: {error}"));

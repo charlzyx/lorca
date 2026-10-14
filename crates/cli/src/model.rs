@@ -200,6 +200,8 @@ pub struct Space {
     /// as a solo bot does. Approval `never` does not require it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<Sandbox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
     pub created_at: f64,
 }
 

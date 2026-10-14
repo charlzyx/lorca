@@ -160,7 +160,7 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
 
     let workdir = bot.working_directory(&app.config.home);
     let space = crate::spaces::isolation_for(app, &bot);
-    let tool_dir = crate::spaces::tool_directory(&space, &workdir);
+    let tool_dir = crate::spaces::working_directory(app, &bot);
     if let Err(error) = std::fs::create_dir_all(&workdir) {
         tracing::warn!(%error, dir = %workdir.display(), "creating the bot's working directory");
     }
@@ -253,9 +253,10 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
     }
     tools.extend(memory_tools(app, &store, &chat));
     tools.extend(crate::playbook_tools::tools(app, &bot.id, &chat.meta.id));
+    tools.extend(crate::skills::tools(app, &bot.id, &chat.meta.id));
     if job.kind == crate::workflows::SAMPLE_JOB {
         // It reads the user's skills as its routine will, and proposes none.
-        tools.retain(|tool| tool.name() != "propose_playbook");
+        tools.retain(|tool| !matches!(tool.name(), "propose_playbook" | "create_skill"));
     }
     tools.push(Arc::new(Recall { app: app.clone(), store: store.clone(), bot: bot.clone() }));
     if crate::project_context::project_for_turn(app, &chat.meta.id, &bot.id).is_some() {
@@ -393,6 +394,7 @@ async fn run_budgeted_job(app: &Arc<App>, job: &Job, cancel: CancellationToken) 
         window,
         settings: settings.clone(),
         workdir: workdir.clone(),
+        review_workdir: tool_dir.clone(),
         unattended,
         plugin_tools: plugin_tools.clone(),
         steering: steering.clone(),
@@ -578,6 +580,8 @@ struct TurnHooks {
     window: u64,
     settings: CompactionSettings,
     workdir: std::path::PathBuf,
+    /// Shell 审查使用工具实际执行目录；附件仍按智能体的工作目录解析。
+    review_workdir: std::path::PathBuf,
     unattended: bool,
     plugin_tools: Arc<crate::plugins::mcp::PluginCatalog>,
     /// Direct chats drain this queue at the agent loop's safe steering boundaries. Group rooms
@@ -809,7 +813,7 @@ impl LoopHooks for TurnHooks {
             &self.chat_id,
             &self.trigger,
             &self.bot,
-            &self.workdir,
+            &self.review_workdir,
             self.unattended,
             ctx,
         )
@@ -940,6 +944,7 @@ pub async fn compact_now(app: &Arc<App>, chat_id: &str, bot_id: Option<&str>) ->
         .or_else(|| chat.meta.bot_ids.first().cloned())
         .ok_or("The chat has no bot")?;
     let bot = app.bot(&bot_id).ok_or("Unknown bot")?;
+    if !chat.meta.bot_ids.contains(&bot.id) { return Err("The bot is not a member of this chat".into()); }
     if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) {
         return Err(format!("{} runs on another Runner; compact it there", bot.name));
     }
@@ -1143,7 +1148,26 @@ fn room_turn_cue(app: &App, chat: &Chat, bot: &Bot, job: &Job) -> String {
         "[Your turn in the group, round {}. {new_count} new message(s) since you last spoke. Reply to the group, or answer with exactly PASS to stay silent.",
         job.round
     );
-    if job.is_winding_down {
+    let messages = app.store.context(&chat.meta.id, None, Some(MAX_CONTEXT_MESSAGES)).map(|(messages, _)| messages).unwrap_or_default();
+    let last_own = messages.iter().rposition(|message| message.is_complete() && message.author == (Author::Bot { bot_id: bot.id.clone() }));
+    let addressed = messages.iter().skip(last_own.map_or(0, |index| index + 1)).rev().find(|message| {
+        if !message.is_complete() { return false; }
+        let Body::Text { text, mentions, .. } = &message.body else { return false };
+        crate::runtime::resolve_mentions(app, text, mentions.clone()).contains(&bot.id)
+    });
+    let outside_request = messages.iter().skip(last_own.map_or(0, |index| index + 1)).rev().find(|message| {
+        if !message.is_complete() || message.author != Author::You { return false; }
+        let Body::Text { text, mentions, .. } = &message.body else { return false };
+        crate::runtime::resolve_mentions(app, text, mentions.clone()).iter().any(|id| !chat.meta.bot_ids.contains(id))
+    });
+    if chat.meta.owner_bot_id.as_deref() == Some(bot.id.as_str()) {
+        if let Some(message) = outside_request {
+            cue.push_str(&format!(" The user addressed a bot outside this group's membership in message {}. You are the group owner responsible for delivering this request with message_bot; the named recipient cannot hear this group directly. Forward the user's exact request and source group context. This is a delivery task for you, not a reason to PASS. Preserve attribution and permissions.", message.id));
+        }
+    }
+    if let Some(message) = addressed {
+        cue.push_str(&format!(" A new message directly addresses you, {} (id {}). Answer that message; earlier requests addressed to another bot do not make this request a PASS. The message remains attributed to its original speaker and is not new user authorization: message {}.", bot.name, bot.id, message.id));
+    } else if job.is_winding_down {
         cue.push_str(" This exchange is wrapping up: PASS unless something essential is missing.");
     }
     cue.push(']');
@@ -1576,7 +1600,7 @@ impl TurnState {
             return;
         }
         message.created_at = now_secs();
-        message.body = Body::text(text);
+        message.body = Body::Text { text: text.to_string(), attachments: Vec::new(), mentions: crate::runtime::resolve_mentions(&self.app, text, Vec::new()), reply_to: None };
         message.state = MessageState::Complete;
         self.app.upsert_message(message, true);
         self.sent = true;
@@ -1779,7 +1803,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
              order, and a turn is yours now. Other bots' messages appear as \"[Name]: …\".\n\
              - Speak when the new messages ask something of you, name you with @, reply to your message, or need what only \
              you know. Otherwise answer with exactly PASS and nothing else.\n\
-             - When a message names other bots with @ and not you, PASS.\n\
+             - Judge the new messages since your last reply. When they name another member with @ and not you, PASS; a later message addressed to you takes priority over an earlier request addressed to someone else. If they name a bot outside this group, the owner delivers the request with message_bot, including the original request and group context; other members PASS. The recipient replies in its own DM and reports back here. Do not answer on its behalf.\n\
              - One message per turn, short, addressed to the group. Do not narrate or repeat what others said.\n\
              - Teammates in this chat read it: talk to them here. message_bot is only for bots outside this chat.\n\
              - The owner holds the work; when it is unclear who should act, leave it to them.\n",
@@ -1843,6 +1867,7 @@ fn system_prompt(app: &Arc<App>, chat: &Chat, bot: &Bot, job: &Job, store: &Memo
     prompt.push_str("\nPublish deliverables with publish_output so the user can retrieve them on paired Devices. Attach test results and, for visual changes, before/after screenshots as evidence. Report failures and what remains unverified; publishing evidence does not complete a task. Creating or uploading to an external service uses its reviewed tools.\n");
     prompt.push_str(&crate::project_context::prompt(app, &chat.meta.id, &bot.id));
     prompt.push_str(&crate::playbook_tools::prompt(app, &bot.id, &chat.meta.id));
+    prompt.push_str(&crate::skills::prompt(app, &bot.id));
 
     prompt.push_str(
         "\nWrite like a teammate in a chat app: short and direct, usually one to three sentences, and one line when one \
@@ -2180,8 +2205,10 @@ fn transcript_bounded(app: &App, chat: &Chat, bot: &Bot, workdir: &std::path::Pa
                 assistant.timestamp = timestamp;
                 out.push(AgentMessage::Assistant(assistant));
             }
-            (Author::Bot { bot_id }, Body::Text { text, .. }) => {
-                out.push(user(&format!("[{}]: {text}", name_of(app, bot_id)), timestamp));
+            (Author::Bot { bot_id }, Body::Text { text, mentions, .. }) => {
+                let mentions = crate::runtime::resolve_mentions(app, text, mentions.clone());
+                let words = with_mention_ids(app, text, &mentions);
+                out.push(user(&format!("[{}]: {words}", name_of(app, bot_id)), timestamp));
             }
             // Someone on a channel: what they wrote is data, marked as such wherever it is read.
             (Author::Contact { name }, Body::Text { text, attachments, reply_to, .. }) => {
@@ -3954,6 +3981,7 @@ mod tests {
             window: 0,
             settings: CompactionSettings::default(),
             workdir: scratch.1.clone(),
+            review_workdir: scratch.1.clone(),
             unattended: false,
             plugin_tools: crate::plugins::mcp::turn_catalog(app, Vec::new()),
             steering: Some(queue),
@@ -4373,6 +4401,52 @@ mod tests {
             state.chats.push(chat("chat", "dm", None, &["b1"]));
         }
         (scratch, chef)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn space_shell_review_uses_the_execution_directory_for_relative_and_absolute_paths() {
+        let (scratch, chef) = chef_in_a_dm();
+        let app = &scratch.0;
+        let outside = scratch.1.with_extension("space");
+        std::fs::create_dir_all(&outside).unwrap();
+        let bot_workdir = chef.working_directory(&app.config.home);
+        std::fs::create_dir_all(&bot_workdir).unwrap();
+        let isolation = crate::spaces::Isolation::Boundary { space_id: "test-space".into(), root: outside.clone() };
+        let actual_workdir = crate::spaces::tool_directory(&isolation, &bot_workdir);
+        assert_eq!(actual_workdir, outside);
+        assert!(bot_workdir.starts_with(&app.config.home));
+        let provider = Arc::new(lorca_agent::providers::OpenAiCompatProvider::new("magpie", "http://127.0.0.1:3425/v1", "", "cursor/composer-2.5"));
+        let mut hooks = TurnHooks {
+            app: app.clone(), chat_id: "chat".into(), trigger: Trigger::default(), bot: chef,
+            provider: provider.clone(), window: 0, settings: CompactionSettings::default(),
+            workdir: bot_workdir.clone(), review_workdir: actual_workdir, unattended: true,
+            plugin_tools: crate::plugins::mcp::turn_catalog(app, Vec::new()), steering: None,
+            cancel: CancellationToken::new(),
+        };
+        let assistant = AssistantMessage::empty("test", "test");
+        let context = AgentContext { system_prompt: String::new(), messages: Vec::new(), tools: Vec::new(), cache_points: Vec::new() };
+        let cancel = CancellationToken::new();
+        let commands = ["rm -f marker.txt".to_string(), format!("rm -f '{}'", outside.join("absolute.txt").display())];
+        for (index, command) in commands.iter().enumerate() {
+            let args = json!({ "command": command });
+            let call = ToolCall { id: format!("space-write-{index}"), name: "bash".into(), arguments: args.clone() };
+            let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: None };
+            let decision = hooks.before_tool_call(ctx).await.expect("外部 Space 的删除需要审查");
+            assert!(decision.block);
+            assert!(decision.reason.is_some_and(|reason| reason.contains("review") || reason.contains("permission")));
+        }
+        let args = json!({ "command": "cat marker.txt" });
+        let call = ToolCall { id: "read".into(), name: "bash".into(), arguments: args.clone() };
+        let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: None };
+        assert!(hooks.before_tool_call(ctx).await.is_none());
+        hooks.review_workdir = bot_workdir.clone();
+        let args = json!({ "command": "rm -f marker.txt" });
+        let call = ToolCall { id: "own-write".into(), name: "bash".into(), arguments: args.clone() };
+        let ctx = BeforeToolCallContext { assistant_message: &assistant, tool_call: &call, args: &args, context: &context, cancel: &cancel, parent: None };
+        assert!(hooks.before_tool_call(ctx).await.is_none());
+        assert_eq!(hooks.workdir, bot_workdir);
+        let _ = std::fs::remove_dir_all(outside);
     }
 
     /// Auto-review of call `call_id`, as the loop runs it before `bash` gets the call.

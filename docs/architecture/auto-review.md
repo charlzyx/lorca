@@ -2,6 +2,10 @@
 
 Auto-review is the check a Runner runs before a bot's action that may have effects: a shell command, what a bot types into one (`bash_input`), an effectful plugin call, opening or running a browser profile, starting a coding agent, and each command a coding agent runs. It runs only within the bot's [Access](bot-permissions.md), which is checked first and cannot be widened by any rule or answer. It follows Claude Code's auto mode: most actions never reach a model, a model allows by default and holds only what it can name a rule for, and a held action goes back to the bot before it reaches the user.
 
+## Approval Never
+
+A bot with approval `never` skips exact-tool rules and model review, including when account Auto-review is off. The current profile must still exist on the same Runner and in the same Space as the call's profile. File and Shell Access and the Space boundary are checked independently; Never changes only approval.
+
 ## Settings and rules
 
 The setting lives in the roster (`AutoReview { is_enabled, rules[{ id, text, behavior: allow | ask, tool? }], provider?, models{ kind: model } }`), so every Device shows and edits the same one: every app's Settings › Auto-review has the switch, Reviews with (Provider: the bot's provider, or any provider the account has connected), and the rules, and Settings › Providers has Review Models, one pop-up per connected provider with "Default (…)" (the status's `review_model`) and each of its models, decision models among them. `auto_review.set` takes `provider` (`null` for the bot's) and `models`, a patch by kind in which `null` puts a provider back on its default.

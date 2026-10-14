@@ -479,6 +479,7 @@ mod tests {
                 name: "Lab".into(),
                 runner_id: bot.runner_id,
                 sandbox: Some(crate::model::Sandbox { root: Some(root.display().to_string()) }),
+                archived: None,
                 created_at: 1.0,
             });
             state.bots.iter_mut().find(|member| member.id == f.bot).unwrap().space_id = Some("space-lab".into());

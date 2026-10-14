@@ -2,8 +2,8 @@
 //!
 //! A Space names a set of bots on one Runner. Its sandbox is an optional file
 //! boundary. Approval `never` is stored on the bot and does not require that
-//! boundary, whether the bot is in a Space or solo. Skills stay playbooks on a
-//! bot or a group; a Space does not hold them.
+//! boundary, whether the bot is in a Space or solo. Standard skill directories
+//! are discovered from the Space root; Playbooks retain their bot/group scopes.
 //!
 //! The relay sees Spaces only inside the encrypted roster. A build that does not
 //! know the field leaves it out, and [`take_roster`] keeps the Spaces this Device
@@ -69,6 +69,15 @@ pub fn isolation_for(app: &App, bot: &Bot) -> Isolation {
     isolation(&app.config.home, &state.spaces, bot)
 }
 
+pub fn workdir(app: &App, id: &str) -> Result<Value, String> {
+    let space = app.state.lock().unwrap().spaces.iter().find(|space| space.id == id).cloned().ok_or("Unknown space")?;
+    if app.this_device_id().as_deref() != Some(space.runner_id.as_str()) {
+        return Err("This operation belongs to the Space's assigned Runner".into());
+    }
+    let root = Some(space.sandbox.as_ref().and_then(|sandbox| sandbox.root.as_deref()).map(expand_path).unwrap_or_else(|| app.config.home.join("spaces").join(id)));
+    Ok(json!({ "id": id, "runner_id": space.runner_id, "workdir": root.map(|root| root.to_string_lossy().into_owned()) }))
+}
+
 /// A bot may join a Space only on that Space's Runner. Approval is checked
 /// against the Space's sandbox, which `never` does not require.
 pub fn assignment_ok(spaces: &[Space], bot: &Bot) -> Result<(), String> {
@@ -104,7 +113,7 @@ pub fn take_roster(
     incoming: Option<Vec<Space>>,
     incoming_bots: &mut [Bot],
 ) -> bool {
-    let Some(incoming) = incoming else {
+    let Some(mut incoming) = incoming else {
         let mut republish = !spaces.is_empty();
         for bot in incoming_bots.iter_mut() {
             let Some(old) = current_bots.iter().find(|old| old.id == bot.id) else {
@@ -121,8 +130,15 @@ pub fn take_roster(
         }
         return republish;
     };
-    *spaces = incoming;
     let mut republish = false;
+    for space in &mut incoming {
+        if space.archived.is_none() {
+            if let Some(old) = spaces.iter().find(|old| old.id == space.id) {
+                if old.archived.is_some() { space.archived = old.archived; republish = true; }
+            }
+        }
+    }
+    *spaces = incoming;
     for bot in incoming_bots.iter_mut() {
         if bot
             .space_id
@@ -171,6 +187,7 @@ fn create(app: &App, params: &Value) -> Result<Space, String> {
         name: space_name(&string(params, "name")?)?,
         runner_id,
         sandbox,
+        archived: Some(false),
         created_at: 0.0,
     };
     insert(app, space)
@@ -200,6 +217,7 @@ fn update(app: &App, params: &Value) -> Result<Space, String> {
         None => None,
         Some(value) => Some(parse_sandbox(value)?),
     };
+    let archived = match params.get("archived") { None => None, Some(value) => Some(value.as_bool().ok_or("archived must be boolean")?) };
     let space = {
         let mut state = app.state.lock().unwrap();
         let space = state
@@ -213,6 +231,7 @@ fn update(app: &App, params: &Value) -> Result<Space, String> {
         if let Some(sandbox) = sandbox {
             space.sandbox = sandbox;
         }
+        if let Some(archived) = archived { space.archived = Some(archived); }
         space.clone()
     };
     app.roster_changed(true);
@@ -332,7 +351,7 @@ fn clean_root(root: &str) -> Result<Option<String>, String> {
     Ok(Some(root.to_string()))
 }
 
-fn expand_path(path: &str) -> PathBuf {
+pub(crate) fn expand_path(path: &str) -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     match path.strip_prefix('~') {
         Some(rest) => home.join(rest.trim_start_matches(['/', '\\'])),
@@ -340,8 +359,19 @@ fn expand_path(path: &str) -> PathBuf {
     }
 }
 
-/// The directory file tools use. Open keeps `workdir`. A boundary keeps it when
-/// it already lies inside the sandbox root, and otherwise uses the root.
+/// 空间成员使用空间根目录，已有的根内子目录保持不变；切换只影响执行目录。
+pub fn working_directory(app: &App, bot: &Bot) -> PathBuf {
+    let workdir = bot.working_directory(&app.config.home);
+    let space = bot.space_id.as_ref().and_then(|id| app.state.lock().unwrap().spaces.iter().find(|space| &space.id == id).cloned());
+    match space {
+        Some(space) => {
+            let root = space.sandbox.as_ref().and_then(|sandbox| sandbox.root.as_deref()).map(expand_path).unwrap_or_else(|| app.config.home.join("spaces").join(&space.id));
+            if allow_path(&root, &workdir) { workdir } else { root }
+        }
+        None => workdir,
+    }
+}
+
 pub fn tool_directory(isolation: &Isolation, workdir: &Path) -> PathBuf {
     match isolation {
         Isolation::Open => workdir.to_path_buf(),
@@ -598,6 +628,7 @@ mod tests {
             name: "Lab".into(),
             runner_id: "runner".into(),
             sandbox: None,
+            archived: None,
             created_at: 1.0,
         };
         let mut member = bot("bot", "runner");
@@ -619,6 +650,7 @@ mod tests {
             name: "Lab".into(),
             runner_id: "runner".into(),
             sandbox: Some(Sandbox { root: None }),
+            archived: None,
             created_at: 1.0,
         };
         let mut member = bot("bot", "runner");
@@ -669,6 +701,7 @@ mod tests {
             name: "Lab".into(),
             runner_id: "runner".into(),
             sandbox: None,
+            archived: None,
             created_at: 1.0,
         };
         let mut current = bot("bot", "runner");

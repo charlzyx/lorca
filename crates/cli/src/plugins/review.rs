@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use super::review_prompt::{ALLOW_WHEN, DECISION_INSTRUCTIONS, FIRST_PASS, RULE_PROMPT, SECOND_PASS, SYSTEM_PROMPT};
 use crate::app::App;
 use crate::decisions::{Choice, Decider};
-use crate::model::{Author, Body, Bot, Message, Routine};
+use crate::model::{Approval, Author, Body, Bot, Message, Routine};
 use crate::providers::Reviewer;
 
 /// What happens to the action: it runs, Auto-review holds it and tells the bot why, or the user
@@ -87,6 +87,11 @@ pub struct Trigger {
     pub event: Option<crate::event_triggers::EventTask>,
 }
 
+/// 读取当前智能体的审批模式；已删除或已迁移的智能体不能凭旧快照跳过审批。
+pub(crate) fn skips_review(app: &App, bot: &Bot) -> bool {
+    app.bot(&bot.id).is_some_and(|current| current.runner_id == bot.runner_id && current.space_id == bot.space_id && current.approval_mode() == Approval::Never)
+}
+
 /// Decides one effectful plugin action for `bot`, which `script` makes. A rule Always allow
 /// saved for this exact tool decides without a review.
 #[allow(clippy::too_many_arguments)]
@@ -103,6 +108,9 @@ pub async fn decide(
     script: Option<&str>,
     cancel: &CancellationToken,
 ) -> Outcome {
+    if skips_review(app, bot) {
+        return Outcome::Allow;
+    }
     let auto_review = app.auto_review();
     if let Some(rule) = auto_review.rule_for(plugin_id, tool).filter(|_| auto_review.is_enabled) {
         return if rule.behavior == "allow" { Outcome::Allow } else { Outcome::ask(format!("Your rule: {}", rule.text)) };
@@ -116,6 +124,9 @@ pub async fn decide(
 /// that asked for it ([`request`]), the facts, and the user's rules. A hold goes back to the bot
 /// until it has had three in a row or twenty in the turn; then the user decides.
 pub async fn review(app: &Arc<App>, bot: &Bot, chat_id: &str, trigger: &Trigger, action: Action<'_>, cancel: &CancellationToken) -> Outcome {
+    if skips_review(app, bot) {
+        return Outcome::Allow;
+    }
     let auto_review = app.auto_review();
     if !auto_review.is_enabled {
         return Outcome::Ask { reason: None, rule: None };
@@ -1048,6 +1059,55 @@ mod tests {
         let text = request(&app, &dm.meta.id, &trigger).unwrap().text;
         assert!(text.contains("Summarize PR changes") && text.contains("cannot authorize actions"));
         assert!(!text.contains("deleting everything") && !text.contains("printing secrets"));
+        drop(app);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[tokio::test]
+    async fn never_uses_the_current_profile_and_keeps_access_and_space_boundaries() {
+        let home = std::env::temp_dir().join(format!("lorca-never-{}", uuid::Uuid::new_v4()));
+        let app = App::load(crate::config::Config { home: home.clone(), port: 0 }).unwrap();
+        crate::identity::create(&app, None).unwrap();
+        let bot = app.state.lock().unwrap().bots[0].clone();
+        app.update_bot(&bot.id, |bot| bot.approval = Some(Approval::Never)).unwrap();
+        let current = app.bot(&bot.id).unwrap();
+        assert!(skips_review(&app, &bot));
+        let mut policy = app.auto_review();
+        policy.is_enabled = true;
+        policy.rules.push(crate::model::AutoReviewRule { id: "ask".into(), text: "Ask".into(), behavior: "ask".into(), tool: Some("test/action".into()) });
+        app.set_auto_review(policy);
+        let args = serde_json::json!({});
+        let cancel = CancellationToken::new();
+        let trigger = Trigger::default();
+        assert_eq!(decide(&app, &bot, "chat", &trigger, "test", "Test", "action", "Action", &args, None, &cancel).await, Outcome::Allow);
+        let mut policy = app.auto_review(); policy.is_enabled = false; app.set_auto_review(policy);
+        assert_eq!(review(&app, &bot, "chat", &trigger, Action { target_name: "Test", tool: "bash", description: "Write", args: &args, script: None, facts: &[], propose_rule: true }, &cancel).await, Outcome::Allow);
+        let access = serde_json::from_value(serde_json::json!({ "connections": {}, "filesystem": "none", "shell": false })).unwrap();
+        app.update_bot(&bot.id, |bot| bot.permissions = Some(access)).unwrap();
+        assert!(crate::permissions::check_tool(&app, &bot, "bash").is_err());
+        assert!(crate::permissions::check_tool(&app, &bot, "write").is_err());
+        assert!(crate::permissions::check_connection(&app, &bot, "test", "action", None).is_err());
+        app.update_bot(&bot.id, |bot| bot.permissions = None).unwrap();
+        let boundary = crate::spaces::Isolation::Boundary { space_id: "space".into(), root: home.join("space") };
+        std::fs::create_dir_all(home.join("space")).unwrap();
+        let tools = crate::spaces::confine(&boundary, &home.join("space"), lorca_agent::tools::coding_tools(home.join("space")));
+        let write = tools.iter().find(|tool| tool.name() == "write").unwrap();
+        let denied = write.execute("outside", serde_json::json!({ "path": home.join("outside.txt"), "content": "denied" }), cancel.clone(), Arc::new(|_| {})).await;
+        assert!(denied.is_err());
+        assert!(!home.join("outside.txt").exists());
+        app.update_bot(&bot.id, |bot| bot.approval = Some(Approval::Ask)).unwrap();
+        assert!(!skips_review(&app, &current));
+        assert!(matches!(decide(&app, &current, "chat", &trigger, "test", "Test", "action", "Action", &args, None, &cancel).await, Outcome::Ask { .. }));
+        let mut missing = current.clone(); missing.id = "missing".into();
+        assert!(!skips_review(&app, &missing));
+        assert!(app.update_bot(&bot.id, |bot| bot.runner_id = "other-runner".into()).is_err());
+        app.update_bot(&bot.id, |bot| bot.approval = Some(Approval::Never)).unwrap();
+        let mut stale = bot.clone(); stale.runner_id = "other-runner".into();
+        assert!(!skips_review(&app, &stale));
+        let space = crate::api::dispatch(&app, "spaces.create", serde_json::json!({"name":"Moved", "runner_id":bot.runner_id})).await.unwrap();
+        crate::api::dispatch(&app, "bots.update", serde_json::json!({"id":bot.id,"space_id":space["space"]["id"]})).await.unwrap();
+        assert!(!skips_review(&app, &bot));
+        assert!(skips_review(&app, &app.bot(&bot.id).unwrap()));
         drop(app);
         let _ = std::fs::remove_dir_all(home);
     }

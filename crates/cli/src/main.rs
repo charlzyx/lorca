@@ -66,6 +66,13 @@ enum Command {
         #[usage(subcommand)]
         command: McpCommand,
     },
+    /// 管理本 Runner 的标准技能目录；参数使用 JSON，正文及资源保持原格式。
+    Skills {
+        #[usage(choices("list", "search", "read", "install", "update", "remove", "set_selection", "create", "import_playbook"))]
+        action: String,
+        #[usage(default = "{}")]
+        params: String,
+    },
     /// Runner event subscriptions and encrypted gateway delivery.
     Events {
         #[usage(subcommand)]
@@ -337,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
     };
     // `lorca mcp` and `lorca chats` say how each step went in their own words; the log keeps to
     // warnings.
-    let quiet = matches!(command, Command::Mcp { .. } | Command::Marketplace { .. } | Command::Models { .. } | Command::Chats { .. } | Command::Tasks { .. });
+    let quiet = matches!(command, Command::Mcp { .. } | Command::Skills { .. } | Command::Marketplace { .. } | Command::Models { .. } | Command::Chats { .. } | Command::Tasks { .. });
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| if quiet { "lorca=warn,lorca_agent=warn".into() } else { "lorca=info,lorca_agent=info".into() }))
         .with_target(false)
@@ -452,6 +459,16 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Command::Skills { action, params } => {
+            let params: serde_json::Value = serde_json::from_str(&params)?;
+            let method = format!("skills.{action}");
+            let value = match serve_call(&app.config, &method, &params).await? {
+                Some(result) => result,
+                None => lorca::skills::dispatch(&app, &method, params).await,
+            }.map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         Command::Provider { command } => provider(&app, command).await,
         // A server's connection runs deep: on a runtime thread, whose stack is twice the main
         // thread's megabyte on Windows.

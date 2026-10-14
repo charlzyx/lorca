@@ -70,10 +70,10 @@ impl Relay {
     }
 
     async fn start_with(quota_bytes: u64, pusher: crate::push::Pusher) -> Self {
-        Self::open(quota_bytes, pusher, None).await
+        Self::open(quota_bytes, pusher).await
     }
 
-    async fn open(quota_bytes: u64, pusher: crate::push::Pusher, static_dir: Option<std::path::PathBuf>) -> Self {
+    async fn open(quota_bytes: u64, pusher: crate::push::Pusher) -> Self {
         let home = std::env::temp_dir().join(format!("lorca-binary-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let local = Arc::new(db::Local::default());
@@ -97,7 +97,6 @@ impl Relay {
             pusher: Arc::new(pusher),
             pushes: tokio_util::task::TaskTracker::new(),
             receivers: Arc::new(crate::receivers::Receivers::default()),
-            static_dir,
         };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -658,36 +657,13 @@ async fn project_context_sync_is_encrypted_separate_from_transcript_paging_and_g
     assert_eq!(relay.client.put_blob(&relay.url, &relay.token, late).await.unwrap_err().status, Some(409));
 }
 
-/// GPT Sites fetch `/sites/`. Unset, the path answers 404. A path that leaves
-/// the directory is not a file.
 #[tokio::test]
-async fn sites_serves_the_static_directory() {
-    let unset = Relay::start(0).await;
-    let missing = unset.http.get(format!("{}/sites/app/index.html", unset.url)).send().await.unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    let root = std::env::temp_dir().join(format!("lorca-sites-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(root.join("app")).unwrap();
-    std::fs::write(root.join("app/index.html"), b"<p>sites</p>").unwrap();
-    let relay = Relay::open(0, crate::push::Pusher::new(None, None), Some(root.clone())).await;
-
-    let index = relay.http.get(format!("{}/sites/", relay.url)).send().await.unwrap();
-    assert_eq!(index.status(), StatusCode::OK);
-    let listed = index.text().await.unwrap();
-    assert!(listed.contains("app/index.html"), "{listed}");
-
-    let file = relay.http.get(format!("{}/sites/app/index.html", relay.url)).send().await.unwrap();
-    assert_eq!(file.status(), StatusCode::OK);
-    assert_eq!(file.headers().get(header::CONTENT_TYPE).unwrap(), "text/html; charset=utf-8");
-    assert_eq!(file.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), "*");
-    assert_eq!(file.bytes().await.unwrap().as_ref(), b"<p>sites</p>");
-
-    for prefix in ["/static", "/dots-static"] {
-        let gone = relay.http.get(format!("{}{prefix}/app/index.html", relay.url)).send().await.unwrap();
-        assert_eq!(gone.status(), StatusCode::NOT_FOUND, "{prefix}");
+async fn sites_routes_are_not_part_of_relay() {
+    let relay = Relay::start(0).await;
+    for path in ["/sites", "/sites/", "/sites/app/index.html"] {
+        let response = relay.http.get(format!("{}{path}", relay.url)).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
-
-    let leave = relay.http.get(format!("{}/sites/%2e%2e/secret", relay.url)).send().await.unwrap();
-    assert_eq!(leave.status(), StatusCode::NOT_FOUND);
-    let _ = std::fs::remove_dir_all(&root);
+    let health = relay.http.get(format!("{}/v1/health", relay.url)).send().await.unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
 }

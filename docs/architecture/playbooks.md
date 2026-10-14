@@ -1,4 +1,4 @@
-# Playbooks
+# Skills and Playbooks
 
 A playbook is a skill the user writes for a bot or a group: instructions, an example, reference text, and optional script text. The apps call them skills. `crates/cli/src/playbooks.rs` owns the records; the macOS app and the Windows and Linux app read and edit them through their local CLI. Plugin-provided skills remain part of their installed plugin ([Plugins](plugins.md#plugins)), and Lorca's own docs are the builtin `lorca` skill ([below](#discovery-and-lazy-reads)); a user playbook has its own identity and revision history.
 
@@ -59,3 +59,25 @@ The core supports lifecycle and export on every Device. Draft generation uses a 
 ## Portable export
 
 Export selects one saved playbook's current content. The result is version 1 of `lorca-playbook`: `{ format, version, content, files }`, where files contain generated `SKILL.md` and only that content's bundled references and scripts. The CLI scrubs the content again, preserving existing `«redacted credential»` and `«redacted N chars»` markers through repeated save/export/import cycles. Scope ids, account and Runner identities, chat messages, memory, history, provenance, provider configuration, plugin configuration, and credentials stay outside the export. A receiving workflow creates an independent scoped playbook from `content` using a new id and the usual reviewed save; portable content grants no permissions.
+
+## Standard Agent Skills
+
+`crates/cli/src/skills/` manages actual skill directories on each Runner. `SKILL.md` uses YAML frontmatter and an unchanged Markdown body. `gray_matter` parses YAML; names follow the official Unicode NFKC/lowercase, 64-character directory-name rules, descriptions use the 1024-character limit, and extension fields belong under `metadata`. Unknown top-level fields fail validation. Original files remain byte-for-byte intact, including license files, nested references, assets and scripts. VCS administration directories stay outside packages.
+
+| Scope | Root on its Runner | Availability |
+| --- | --- | --- |
+| Runner | `<LORCA_HOME>/skills/<name>` | Agents on this Runner |
+| Space | `<space root>/.agents/skills/<name>` | Current members of that Space |
+| Agent | `<LORCA_HOME>/agent-skills/<bot id>/<name>` | That agent |
+
+Space discovery uses its configured root (or `<LORCA_HOME>/spaces/<id>`) even when a turn works in a child directory. Skills have Runner-scoped identifiers. `skills-index.json` stores source provenance, installed revision, content digest and explicit agent/Space selections. Directories and this index remain local to that Runner; they are not roster fields or relay blobs. A paired Device names `runner_id` to manage them through signed requests. Installing the same source on another Runner is explicit; one Runner's local paths are not reused on another.
+
+The system prompt carries names, descriptions and read entries within a catalog budget, with an omitted count. `search_skills` finds available directories; `read_skill { id, path?, offset?, limit? }` reads the original file or a resource within that directory. `path: "."` lists the root and a relative directory lists its children. Text, binary and directory results report the next offset when paginated. Resources are loaded on demand. Files and symlinks cannot escape their package root, and a Space skill root cannot escape the Space through a symlink.
+
+`create_skill { scope: agent | space, name, files }` writes a real directory through the same validator. It rechecks agent membership and file-write access after waiting for the installation lock; Space boundaries remain in force. Reading a script only returns its contents. Script execution uses ordinary shell/file tools, Access and Auto-review; `allowed-tools` metadata grants no runtime authority. `propose_playbook` retains its separate reviewed draft workflow.
+
+The Runner API and `lorca skills <action> '<JSON>'` expose `list`, `search`, `read`, `install`, `update`, `remove`, `set_selection`, `create`, and `import_playbook`. Management uses `scope: {kind: runner | space | agent, id?}`; agent discovery uses `bot_id`. `install` takes `source: {kind: local | github | npm, location, reference?, subdir?}` and an optional skill name. Local locations are absolute paths on the target Runner. GitHub uses an HTTPS repository plus a separate Git ref/subdirectory. npm packages are fetched with `npm pack --ignore-scripts`; lifecycle hooks are not run. Sources with multiple candidates return a selection list, and ordinary repositories/packages without valid skill directories are not treated as skills.
+
+Updates keep their source and require `expected_digest`; GitHub can select another `reference`. Copying and validation finish in a staging directory before replacement. Previous packages and removals are retained in hidden recovery directories with their original directory names; a recovered directory can be installed as a local source. A package over the operational budget (16 MiB per file, 128 MiB total, 10000 files) is rejected explicitly, never silently truncated. These are Runner resource budgets, independent of Playbook's format limits.
+
+`import_playbook` is an explicit one-way conversion of an existing saved Playbook export into a standard directory. It keeps the original Playbook record and history. The Playbook JSON and standard skill directory remain different formats; arbitrary standard packages are not compressed into Playbook's constrained fields.

@@ -103,6 +103,7 @@ pub fn serve(app: Arc<App>, from: String, request: Request, blob_id: String) {
 async fn answer(app: &Arc<App>, from: &str, request: &Request) -> Result<Value, String> {
     let body = &request.body;
     match request.verb.as_str() {
+        verb if verb.starts_with("skills.") => crate::skills::serve(app, verb, body).await,
         "templates.memories" => Ok(json!(crate::templates::local_memories(app, body["bot_id"].as_str().ok_or("missing bot_id")?)?)),
         "templates.export.preview" => {
             let selection = serde_json::from_value(body["selection"].clone()).map_err(|e| format!("Invalid export selection: {e}"))?;
@@ -116,6 +117,10 @@ async fn answer(app: &Arc<App>, from: &str, request: &Request) -> Result<Value, 
         verb if verb.starts_with("reviews.") => crate::review_queue::serve(app, verb, body, from).await,
         verb if verb.starts_with("tasks.") => crate::tasks::serve(app, verb, body, from),
         "memory.read" => memory_read(app, body["bot_id"].as_str().ok_or("missing bot_id")?),
+        "bots.context" => bot_context(app, body["id"].as_str().ok_or("missing id")?),
+        #[cfg(feature = "runner")]
+        "chats.compact" => { let tokens_before = crate::turns::compact_now(app, body["chat_id"].as_str().ok_or("missing chat_id")?, body["bot_id"].as_str()).await?; Ok(json!({ "tokens_before": tokens_before })) }
+        "spaces.workdir" => crate::spaces::workdir(app, body["id"].as_str().ok_or("missing id")?),
         "memory.write" => {
             let text = body["text"].as_str().ok_or("missing text")?;
             memory_write(app, body["bot_id"].as_str().ok_or("missing bot_id")?, text, body["expected_hash"].as_str())
@@ -188,4 +193,13 @@ fn local_bot(app: &Arc<App>, bot_id: &str) -> Result<crate::model::Bot, String> 
         return Err(format!("{} runs on {runner}, not here.", bot.name));
     }
     Ok(bot)
+}
+
+
+pub fn bot_context(app: &App, id: &str) -> Result<Value, String> {
+    let bot = app.bot(id).ok_or("Unknown bot")?;
+    if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) { return Err("This operation belongs to the bot's assigned Runner".into()); }
+    let state = app.state.lock().unwrap();
+    let chat = state.chats.iter().filter(|chat| chat.meta.kind == "dm" && chat.meta.channel.is_none() && chat.meta.bot_ids == [id]).min_by(|a,b| a.meta.created_at.total_cmp(&b.meta.created_at).then_with(|| a.meta.id.cmp(&b.meta.id))).ok_or("No direct chat")?;
+    Ok(json!({ "bot_id": id, "chat_id": chat.meta.id, "usage": chat.usage }))
 }

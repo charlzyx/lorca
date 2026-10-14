@@ -12,7 +12,6 @@ mod metrics;
 mod push;
 mod receivers;
 mod routes;
-mod static_dir;
 mod store;
 mod sweep;
 
@@ -85,11 +84,6 @@ struct Args {
     /// extension (`lorca-relay.files`).
     #[usage(long, env = "LORCA_RELAY_FILES_DIR", conflicts("--s3-bucket"))]
     files_dir: Option<std::path::PathBuf>,
-
-    /// Directory served at `/sites` with no token, so a relay on a LAN can hand out
-    /// files. Unset, that route answers 404. A request that leaves the directory is 404.
-    #[usage(long, env = "LORCA_RELAY_STATIC_DIR")]
-    static_dir: Option<std::path::PathBuf>,
 
     /// Keep `file` ciphertext in this S3-compatible bucket (AWS, R2, MinIO) instead of a
     /// directory. Needs --s3-endpoint and the access keys.
@@ -279,8 +273,6 @@ pub struct AppState {
     pub pushes: tokio_util::task::TaskTracker,
     /// The services' webhooks this relay takes for routines.
     pub receivers: Arc<receivers::Receivers>,
-    /// Files served at `/sites` when set. Ciphertext never goes here.
-    pub static_dir: Option<std::path::PathBuf>,
 }
 
 /// How long a stopping relay waits for APNs and FCM to take the pushes it already answered
@@ -341,7 +333,6 @@ async fn main() -> anyhow::Result<()> {
         pusher: pusher.clone(),
         pushes: tokio_util::task::TaskTracker::new(),
         receivers: receivers.clone(),
-        static_dir: args.static_dir.clone(),
     };
 
     let ticking = db.clone();
@@ -367,7 +358,6 @@ async fn main() -> anyhow::Result<()> {
         files = %file_store.describe(),
         push = %pusher.describe(),
         receivers = %receivers.describe(),
-        static_dir = args.static_dir.as_ref().map(|dir| dir.display().to_string()),
         "lorca-relay listening"
     );
     let shared = args.db.contains("://");

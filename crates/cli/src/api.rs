@@ -75,6 +75,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
     }
     match method {
         method if method.starts_with("templates.") => crate::templates::dispatch(app, method, &params).await,
+        method if method.starts_with("skills.") => crate::skills::dispatch(app, method, params).await,
         method if method.starts_with("playbooks.") => crate::playbooks::dispatch(app, method, params).await,
         method if method.starts_with("events.") => crate::event_triggers::dispatch(app, method, params).await,
         "projects.get" | "projects.save" | "projects.refresh" | "projects.asset" | "projects.asset_path" => {
@@ -249,6 +250,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         method if method.starts_with("workflows.") => crate::workflows::handle(app, method, &params).await,
+        "spaces.workdir" => {
+            let id = string(&params, "id")?;
+            let space = app.state.lock().unwrap().spaces.iter().find(|space| space.id == id).cloned().ok_or("Unknown space")?;
+            if app.this_device_id().as_deref() != Some(space.runner_id.as_str()) {
+                return requests::ask(app, &space.runner_id, method, json!({ "id": id })).await;
+            }
+            crate::spaces::workdir(app, &id)
+        }
         method if method.starts_with("spaces.") => crate::spaces::dispatch(app, method, &params),
 
         "bots.create" => {
@@ -313,7 +322,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 if let Some(v) = opt_string(&params, "runner_id") { bot.runner_id = v; }
                 if let Some(v) = params["workdir"].as_str() { bot.workdir = Some(v.to_string()).filter(|w| !w.trim().is_empty()); }
                 if let Some(v) = permissions { bot.permissions = Some(v); }
-                if let Some(v) = space_id { bot.space_id = v; }
+                if let Some(v) = space_id { if bot.space_id != v && !params.as_object().is_some_and(|p| p.contains_key("workdir")) { bot.workdir = None; } bot.space_id = v; }
                 if let Some(v) = approval { bot.approval = v; }
                 // A draft card's Send Directly changes only this, whatever else the policy says.
                 if let Some(v) = params["drafts"].as_bool() {
@@ -396,8 +405,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             let chat_id = string(&params, "chat_id")?;
             let bot_id = string(&params, "bot_id")?;
             let bot = app.bot(&bot_id).ok_or("Unknown producing bot")?;
-            let space = crate::spaces::isolation_for(app, &bot);
-            let workdir = crate::spaces::tool_directory(&space, &bot.working_directory(&app.config.home));
+            let workdir = crate::spaces::working_directory(app, &bot);
             let mut payload = params;
             payload.as_object_mut().ok_or("Output parameters must be an object")?.remove("chat_id");
             payload.as_object_mut().unwrap().remove("bot_id");
@@ -437,8 +445,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             requests::ask(app, &bot.runner_id, "chats.send_now", json!({ "chat_id": chat_id, "message_id": message_id })).await
         }
+        "bots.context" => {
+            let bot = app.bot(&string(&params, "id")?).ok_or("Unknown bot")?;
+            if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) { return requests::ask(app, &bot.runner_id, method, json!({ "id": bot.id })).await; }
+            crate::requests::bot_context(app, &bot.id)
+        }
         #[cfg(feature = "runner")]
         "chats.compact" => {
+            let chat_id = string(&params, "chat_id")?;
+            let chat = app.chat(&chat_id).ok_or("Unknown chat")?;
+            let bot_id = opt_string(&params, "bot_id").or(chat.meta.owner_bot_id).or_else(|| chat.meta.bot_ids.first().cloned()).ok_or("The chat has no bot")?;
+            let bot = app.bot(&bot_id).ok_or("Unknown bot")?;
+            if app.this_device_id().as_deref() != Some(bot.runner_id.as_str()) { return requests::ask_within(app, &bot.runner_id, method, json!({ "chat_id": chat_id, "bot_id": bot_id }), std::time::Duration::from_secs(180)).await; }
             let chat_id = string(&params, "chat_id")?;
             let tokens_before = crate::turns::compact_now(app, &chat_id, opt_string(&params, "bot_id").as_deref()).await?;
             Ok(json!({ "tokens_before": tokens_before }))

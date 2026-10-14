@@ -131,9 +131,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/verify", post(auth_verify))
         .route("/v1/pair/{nonce}/request", post(post_pair_request))
         .route("/v1/pair/{nonce}/reply", get(get_pair_reply))
-        .route("/sites", get(crate::static_dir::index))
-        .route("/sites/", get(crate::static_dir::index))
-        .route("/sites/{*path}", get(crate::static_dir::file))
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::limit::per_ip));
     Router::new()
         .route("/", get(root))

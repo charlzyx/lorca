@@ -34,6 +34,9 @@ pub async fn before_tool_call(
     unattended: bool,
     ctx: BeforeToolCallContext<'_>,
 ) -> Option<BeforeToolCallResult> {
+    if matches!(ctx.tool_call.name.as_str(), "bash" | "bash_input") && review::skips_review(app, bot) {
+        return None;
+    }
     if ctx.tool_call.name == "bash_input" {
         return review_input(app, chat_id, trigger, bot, unattended, ctx).await;
     }

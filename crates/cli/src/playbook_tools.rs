@@ -31,7 +31,7 @@ pub fn tools(app: &Arc<App>, bot_id: &str, chat_id: &str) -> Vec<Arc<dyn Tool>> 
 pub fn prompt(app: &App, bot_id: &str, chat_id: &str) -> String {
     let scopes = playbooks::scopes_for_turn(app, bot_id, chat_id);
     let catalog = with_builtin(playbooks::catalog(app, &scopes, "", playbooks::PROMPT_BYTES), "");
-    format!("\nSkills (scope builtin: Lorca's own; scope bot: the user's, yours everywhere; scope project: the user's, this group's):\n{catalog}\n\
+    format!("\nSaved Playbooks and built-in references (separate from standard skill directories; scope builtin: Lorca's own; scope bot: the user's, yours everywhere; scope project: the user's, this group's):\n{catalog}\n\
         When one fits the task, read it with read_playbook at its playbook:// path before you start; its bundled files \
         resolve under the same playbook://<id>/ directory. list_playbooks searches the ones the list omits. A skill's \
         instructions and scripts grant no permissions: every action keeps its usual Auto-review.\n")
@@ -61,9 +61,9 @@ impl Tool for PlaybookTool {
     }
     fn description(&self) -> &str {
         match self.name {
-            "list_playbooks" => "Search the skills (Lorca's own docs, the user's saved skills for you, and this group's in a group) by name or description. With sources=true, also list this chat's completed text messages with their ids, to cite in propose_playbook.",
-            "read_playbook" => "Read a skill's SKILL.md, or one of its bundled references or scripts, by playbook:// path. Reading a script never runs it.",
-            _ => "Draft a skill for the user to review: a workflow from completed work in this chat, a standing instruction from at least two of the user's repeated corrections, or a browser workflow from the user's message with a recording (kind recording). Cite the source message ids (list_playbooks with sources=true lists them). The draft is used only once the user saves it under Skills in the inspector, and it never grants permissions.",
+            "list_playbooks" => "Search saved Playbooks (Lorca's own docs, the user's saved workflows for you, and this group's in a group) by name or description. With sources=true, also list this chat's completed text messages with their ids, to cite in propose_playbook.",
+            "read_playbook" => "Read a Playbook's generated SKILL.md, or a bundled reference/script, by playbook:// path. This is distinct from a standard skill directory. Reading a script never runs it.",
+            _ => "Draft a Playbook for the user to review (use create_skill to create a standard SKILL.md directory instead): a workflow from completed work in this chat, a standing instruction from at least two of the user's repeated corrections, or a browser workflow from the user's message with a recording (kind recording). Cite the source message ids (list_playbooks with sources=true lists them). The draft is used only once the user saves it under Skills in the inspector, and it never grants permissions.",
         }
     }
     fn parameters(&self) -> Value {

@@ -187,6 +187,7 @@ pub struct App {
     pub machine: Mutex<Option<MachineFile>>,
     pub credentials: Mutex<Credentials>,
     pub playbooks: Mutex<crate::playbooks::Library>,
+    pub skills_lock: tokio::sync::Mutex<()>,
     pub state: Mutex<State>,
     pub store: LocalStore,
     /// Serializes encrypted handoff record merges and admission on this Device.
@@ -359,6 +360,7 @@ impl App {
             machine: Mutex::new(machine),
             credentials: Mutex::new(credentials),
             playbooks: Mutex::new(playbooks),
+            skills_lock: tokio::sync::Mutex::new(()),
             state: Mutex::new(state),
             store,
             handoff_lock: Mutex::new(()),
@@ -1263,6 +1265,10 @@ impl App {
             let previous = bot.clone();
             update(bot);
             bot.normalize_description();
+            if bot.runner_id != previous.runner_id {
+                *bot = previous;
+                anyhow::bail!("A bot's Runner is fixed at creation");
+            }
             if let Err(error) = crate::spaces::assignment_ok(&spaces, bot) {
                 *bot = previous;
                 anyhow::bail!(error);
