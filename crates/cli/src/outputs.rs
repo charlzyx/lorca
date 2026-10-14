@@ -158,6 +158,11 @@ pub fn publish(app: &App, chat_id: &str, bot_id: &str, workdir: &Path, request: 
             let path = bounded(path, "path", 8192)?;
             let path = Path::new(&path);
             let source = if path.is_absolute() { path.to_path_buf() } else { workdir.join(path) };
+            if let crate::spaces::Isolation::Boundary { root, .. } = crate::spaces::isolation_for(app, &bot) {
+                if !crate::spaces::allow_path(&root, &source) {
+                    return Err(format!("{} is outside this Space's sandbox ({})", path.display(), root.display()));
+                }
+            }
             let attachment = crate::files::store(
                 app,
                 &crate::files::OutgoingFile { path: source.to_string_lossy().into_owned(), id: None, name: Some(name.clone()), mime: mime.clone(), width: None, height: None },
@@ -456,6 +461,33 @@ mod tests {
         assert_eq!(code_span("cargo test"), "`cargo test`");
         assert_eq!(code_span("echo `date`\nls"), "``echo `date` ls``");
         assert_eq!(code_span("`x`"), "`` `x` ``");
+    }
+
+    #[test]
+    fn a_sandbox_refuses_a_published_path_outside_its_root() {
+        let f = Fixture::new();
+        let bot = f.app.bot(&f.bot).unwrap();
+        let root = f.home.join("space-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("inside.txt"), b"in").unwrap();
+        let outside = f.home.join("secret.txt");
+        std::fs::write(&outside, b"sandbox-secret-token").unwrap();
+        {
+            let mut state = f.app.state.lock().unwrap();
+            state.spaces.push(crate::model::Space {
+                id: "space-lab".into(),
+                name: "Lab".into(),
+                runner_id: bot.runner_id,
+                sandbox: Some(crate::model::Sandbox { root: Some(root.display().to_string()) }),
+                archived: None,
+                created_at: 1.0,
+            });
+            state.bots.iter_mut().find(|member| member.id == f.bot).unwrap().space_id = Some("space-lab".into());
+        }
+        let refused = f.publish(PublishOutput { name: "Secret".into(), path: Some(outside.display().to_string()), ..Default::default() }).unwrap_err();
+        assert!(refused.contains("outside"), "{refused}");
+        assert!(!refused.contains("sandbox-secret-token"));
+        f.publish(PublishOutput { name: "In".into(), path: Some(root.join("inside.txt").display().to_string()), ..Default::default() }).unwrap();
     }
 
     #[test]

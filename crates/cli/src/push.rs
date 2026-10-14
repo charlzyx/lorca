@@ -288,7 +288,7 @@ mod tests {
         let bot = Bot {
             id: "bot".into(), name: "Chef".into(), description: String::new(), symbol_name: "sparkles".into(),
             accent: "indigo".into(), avatar: None, runner_id: "runner".into(), provider: "deepseek".into(),
-            model: None, thinking: None, legacy_instructions: String::new(), workdir: None, permissions: None, created_at: 1.0,
+            model: None, thinking: None, legacy_instructions: String::new(), workdir: None, permissions: None, space_id: None, approval: None, created_at: 1.0,
         };
         app.state.lock().unwrap().bots.push(bot.clone());
         (app, bot, home)

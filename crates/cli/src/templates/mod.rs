@@ -582,6 +582,8 @@ pub async fn import_text(app: &Arc<App>, text: &str, params: &Value) -> Result<V
         legacy_instructions: String::new(),
         workdir: None,
         permissions: None,
+        space_id: None,
+        approval: None,
         created_at: 0.0,
     };
     let memory = template.memories.join("\n");

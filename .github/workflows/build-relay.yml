@@ -1,4 +1,5 @@
-# 构建 lorca-relay（Linux x86_64，musl 静态链接），产物上传为 artifact
+# Shippable lorca-relay for this fork: Linux x86_64, static musl, uploaded as an artifact.
+# Upstream does not publish a relay binary. Run by hand; the artifact is the binary.
 name: Build Relay
 
 on:

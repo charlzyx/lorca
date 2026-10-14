@@ -171,7 +171,11 @@ impl CodingAgentTool {
         }
         let folder = args["folder"].as_str();
         let worktree = args["worktree"].as_str().map(str::trim).filter(|name| !name.is_empty());
-        let place = workspace::prepare(&app.config.home, &self.workdir, folder, worktree, prompt).await?;
+        let boundary = match crate::spaces::isolation_for(app, &self.bot) {
+            crate::spaces::Isolation::Boundary { root, .. } => Some(root),
+            crate::spaces::Isolation::Open => None,
+        };
+        let place = workspace::prepare(&app.config.home, &self.workdir, folder, worktree, prompt, boundary.as_deref()).await?;
         // A pane's command line and screen would show its secrets.
         let host = if secrets.is_empty() { hosts::detect().await } else { None };
         let task: String = prompt.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(prompt).chars().take(TASK_CHARS).collect();
@@ -314,10 +318,23 @@ pub async fn review_start(app: &Arc<App>, bot: &Bot, chat_id: &str, trigger: &Tr
         description.push_str(&format!(" {}", super::holds_secrets(&secrets)));
     }
     let args = json!({ "agent": ctx.args["agent"], "folder": ctx.args["folder"], "worktree": ctx.args["worktree"], "prompt": ctx.args["prompt"], "proof": ctx.args["proof"], "secrets": ctx.args["secrets"] });
-    let action = Action { target_name: &runner_name, tool: "coding_agent", description: &description, args: &args, script: None, propose_rule: true };
-    let Outcome::Ask { reason, rule } = crate::plugins::review::review(app, bot, chat_id, trigger, action, ctx.cancel).await else {
-        update(&|card| card.state = "starting".into());
-        return None;
+    let action = Action { target_name: &runner_name, tool: "coding_agent", description: &description, args: &args, script: None, facts: &[], propose_rule: true };
+    let (reason, rule) = match crate::plugins::review::review(app, bot, chat_id, trigger, action, ctx.cancel).await {
+        Outcome::Allow => {
+            update(&|card| card.state = "starting".into());
+            return None;
+        }
+        // The bot reads why and finds another way, or asks the user in the chat.
+        Outcome::Held { reason, note, .. } if !unattended => {
+            update(&|card| {
+                card.state = "denied".into();
+                card.held = true;
+                card.outcome = Some(reason.clone());
+            });
+            return Some(crate::local_review::blocked(note));
+        }
+        Outcome::Held { reason, rule, .. } => (Some(reason), rule),
+        Outcome::Ask { reason, rule } => (reason, rule),
     };
     let Some(message_id) = card.clone().filter(|_| !unattended) else {
         update(&|card| {

@@ -176,6 +176,8 @@ async fn setup() -> Scratch {
         legacy_instructions: String::new(),
         workdir: Some(home.join("work").to_string_lossy().to_string()),
         permissions: None,
+        space_id: None,
+        approval: None,
         created_at: 0.0,
     };
     {

@@ -78,6 +78,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraydeque"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d902e3d592a523def97af8f317b08ce16b7ab854c1985a0c671e6f15cebc236"
+
+[[package]]
 name = "askama"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -623,6 +629,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "cpufeatures"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -934,6 +946,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e985e0451871ad22fb8d2b6b076e2028a502a0d3950998c2c5c0a4f9b5d9679"
+dependencies = [
+ "cfg-if",
+ "core_detect",
+ "multiversion_no_op",
+ "rustversion",
+ "scopeguard",
+ "simdutf8",
 ]
 
 [[package]]
@@ -1282,6 +1308,17 @@ dependencies = [
  "log",
  "plain",
  "scroll",
+]
+
+[[package]]
+name = "gray_matter"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3563a3eb8bacf11a0a6d93de7885f2cca224dddff0114e4eb8053ca0f1918acd"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+ "yaml-rust2",
 ]
 
 [[package]]
@@ -1912,7 +1949,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lorca"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1927,6 +1964,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures",
+ "gray_matter",
  "hkdf",
  "hmac 0.12.1",
  "httpdate",
@@ -1960,8 +1998,10 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "usage-rs",
  "uuid",
+ "walkdir",
  "windows-sys 0.61.2",
  "x25519-dalek",
  "zip",
@@ -1969,7 +2009,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-agent"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2000,7 +2040,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-markdown"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "pulldown-cmark",
  "serde",
@@ -2009,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-mobile"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "lorca",
  "lorca-markdown",
@@ -2023,7 +2063,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-models"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -2031,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-provider-auth"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "base64 0.22.1",
  "rand 0.8.8",
@@ -2044,7 +2084,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-relay"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2077,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "lorca-tls"
-version = "0.1.15"
+version = "0.1.17"
 dependencies = [
  "reqwest 0.12.28",
  "rustls",
@@ -2183,6 +2223,12 @@ dependencies = [
  "num-traits",
  "pxfm",
 ]
+
+[[package]]
+name = "multiversion_no_op"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "nix"
@@ -4721,6 +4767,17 @@ dependencies = [
  "der",
  "spki",
  "tls_codec",
+]
+
+[[package]]
+name = "yaml-rust2"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2462ea039c445496d8793d052e13787f2b90e750b833afee748e601c17621ed9"
+dependencies = [
+ "arraydeque",
+ "encoding_rs",
+ "hashlink",
 ]
 
 [[package]]

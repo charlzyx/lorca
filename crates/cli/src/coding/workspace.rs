@@ -1,6 +1,7 @@
 //! Where a coding agent works. In a git repository that is a worktree of its own, so it never
 //! edits the checkout the user works in: a new one on a branch of its own name, or the one a
-//! bot names again, under `worktrees/` in Lorca's folder. A folder that is not a repository is
+//! bot names again, under `worktrees/` in Lorca's folder. A Space sandbox keeps the folder
+//! inside its root and puts that worktree under the root. A folder that is not a repository is
 //! worked in as it is. The proof the bot expects goes in `.lorca-proof/` there, which ignores
 //! itself in git.
 
@@ -28,11 +29,17 @@ pub(crate) struct Place {
 
 /// Prepares the folder for an agent: `folder` (relative to `workdir`, the bot's working
 /// directory, where it also defaults to), and in a repository the worktree `worktree` names or
-/// a new one named after `task`.
-pub(crate) async fn prepare(home: &Path, workdir: &Path, folder: Option<&str>, worktree: Option<&str>, task: &str) -> Result<Place, String> {
+/// a new one named after `task`. `boundary` is a Space sandbox root: the folder must stay
+/// inside it, and the worktree is created under that root. `None` keeps worktrees in Lorca's folder.
+pub(crate) async fn prepare(home: &Path, workdir: &Path, folder: Option<&str>, worktree: Option<&str>, task: &str, boundary: Option<&Path>) -> Result<Place, String> {
     let folder = resolve(workdir, folder);
     if !folder.is_dir() {
         return Err(format!("{} is not a folder on this Runner", super::home_relative(&folder)));
+    }
+    if let Some(root) = boundary {
+        if !crate::spaces::allow_path(root, &folder) {
+            return Err(format!("{} is outside this Space's sandbox ({})", super::home_relative(&folder), root.display()));
+        }
     }
     let Some(repo) = git(&folder, &["rev-parse", "--show-toplevel"]).await.ok().map(PathBuf::from) else {
         if worktree.is_some() {
@@ -45,7 +52,7 @@ pub(crate) async fn prepare(home: &Path, workdir: &Path, folder: Option<&str>, w
         Some(name) => slug(name).ok_or("A worktree name needs letters or digits")?,
         None => format!("{}-{}", slug(task).unwrap_or_else(|| "work".into()), &uuid::Uuid::new_v4().simple().to_string()[..4]),
     };
-    let path = worktrees_folder(home, &repo).join(&name);
+    let path = worktrees_folder(boundary.unwrap_or(home), &repo).join(&name);
     let head = git(&repo, &["rev-parse", "HEAD"]).await.map_err(|error| format!("{} has no commit to start from: {error}", super::home_relative(&repo)))?;
     if path.exists() {
         // A worktree named again: it goes on from where it is.
@@ -85,12 +92,12 @@ fn canonical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The folder a repository's worktrees go in: `worktrees/<name>-<hash>` in Lorca's folder, so two
-/// repositories of one name keep theirs apart.
-fn worktrees_folder(home: &Path, repo: &Path) -> PathBuf {
+/// The folder a repository's worktrees go in: `worktrees/<name>-<hash>` under `base` (Lorca's
+/// folder, or a Space sandbox root), so two repositories of one name keep theirs apart.
+fn worktrees_folder(base: &Path, repo: &Path) -> PathBuf {
     let hash = Sha256::digest(canonical(repo).to_string_lossy().as_bytes());
     let name = repo.file_name().and_then(|name| name.to_str()).and_then(slug).unwrap_or_else(|| "repo".into());
-    home.join("worktrees").join(format!("{name}-{}", hex(&hash[..3])))
+    base.join("worktrees").join(format!("{name}-{}", hex(&hash[..3])))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -196,7 +203,7 @@ mod tests {
         git(&repo, &["add", "."]).await.unwrap();
         git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await.unwrap();
 
-        let place = prepare(&home, &scratch, Some("shop"), Some("Fix login"), "anything").await.unwrap();
+        let place = prepare(&home, &scratch, Some("shop"), Some("Fix login"), "anything", None).await.unwrap();
         assert_eq!(place.branch.as_deref(), Some("fix-login"));
         assert!(place.folder.starts_with(home.join("worktrees")), "{}", place.folder.display());
         assert!(place.folder.join("README.md").exists());
@@ -206,21 +213,55 @@ mod tests {
         // Named again, it is the same worktree, and the diff shows what changed since.
         std::fs::write(place.folder.join("README.md"), "shop\nlogin\n").unwrap();
         std::fs::write(place.folder.join("new.txt"), "new\n").unwrap();
-        let again = prepare(&home, &scratch, Some(repo.to_str().unwrap()), Some("fix-login"), "anything").await.unwrap();
+        let again = prepare(&home, &scratch, Some(repo.to_str().unwrap()), Some("fix-login"), "anything", None).await.unwrap();
         assert_eq!(again.folder, place.folder);
         let diff = diff(&again.folder, again.base.as_deref().unwrap()).await;
         assert!(diff.contains("+login") && diff.contains("+new"), "{diff}");
 
         // A new one without a name takes the task's words.
-        let fresh = prepare(&home, &scratch, Some("shop"), None, "Add dark mode").await.unwrap();
+        let fresh = prepare(&home, &scratch, Some("shop"), None, "Add dark mode", None).await.unwrap();
         assert!(fresh.branch.as_deref().unwrap().starts_with("add-dark-mode-"));
 
         let plain = scratch.join("notes");
         std::fs::create_dir_all(&plain).unwrap();
-        let place = prepare(&home, &scratch, Some("notes"), None, "Tidy").await.unwrap();
+        let place = prepare(&home, &scratch, Some("notes"), None, "Tidy", None).await.unwrap();
         assert_eq!((place.folder, place.branch), (std::fs::canonicalize(&plain).unwrap(), None));
-        assert!(prepare(&home, &scratch, Some("notes"), Some("x"), "Tidy").await.is_err());
-        assert!(prepare(&home, &scratch, Some("missing"), None, "Tidy").await.is_err());
+        assert!(prepare(&home, &scratch, Some("notes"), Some("x"), "Tidy", None).await.is_err());
+        assert!(prepare(&home, &scratch, Some("missing"), None, "Tidy", None).await.is_err());
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[tokio::test]
+    async fn a_sandbox_keeps_the_worktree_inside_its_root() {
+        let scratch = std::env::temp_dir().join(format!("lorca-worktree-boundary-{}", uuid::Uuid::new_v4()));
+        let root = scratch.join("sandbox");
+        let repo = root.join("shop");
+        std::fs::create_dir_all(&repo).unwrap();
+        let home = scratch.join("home");
+        let outside = scratch.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        git(&repo, &["init", "-q"]).await.unwrap();
+        std::fs::write(repo.join("README.md"), "shop\n").unwrap();
+        git(&repo, &["add", "."]).await.unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]).await.unwrap();
+
+        let place = prepare(&home, &root, Some("shop"), Some("Fix login"), "anything", Some(&root)).await.unwrap();
+        assert!(place.folder.starts_with(root.join("worktrees")), "{}", place.folder.display());
+        assert!(!place.folder.starts_with(&home));
+        assert!(place.folder.join("README.md").exists());
+
+        let notes = root.join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        let plain = prepare(&home, &root, Some("notes"), None, "Tidy", Some(&root)).await.unwrap();
+        assert_eq!(plain.folder, std::fs::canonicalize(&notes).unwrap());
+
+        let escaped = prepare(&home, &root, Some("../outside"), None, "Tidy", Some(&root)).await.unwrap_err();
+        assert!(escaped.contains("outside"), "{escaped}");
+        let absolute = prepare(&home, &root, Some(outside.to_str().unwrap()), None, "Tidy", Some(&root)).await.unwrap_err();
+        assert!(absolute.contains("outside"), "{absolute}");
+
+        let open = prepare(&home, &scratch, Some(repo.to_str().unwrap()), Some("open-tree"), "anything", None).await.unwrap();
+        assert!(open.folder.starts_with(home.join("worktrees")), "{}", open.folder.display());
         let _ = std::fs::remove_dir_all(&scratch);
     }
 }

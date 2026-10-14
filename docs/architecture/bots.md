@@ -8,6 +8,8 @@ A bot's look is an SF Symbol (`symbol_name`) on an accent gradient (`accent`), o
 
 Creating a bot for Runner B from Device A: A writes an encrypted bot profile into the roster (paired Devices can read it) and pins B’s machine id. Bot create rejects a target whose `os` is not desktop. Turns are job envelopes addressed to B. B decrypts the job, runs the loop with the account’s provider credentials, and uploads encrypted replies.
 
+A bot may belong to a [Space](spaces.md) on that Runner. `space_id` is set with `bots.create` and `bots.update`; without one the bot is solo. `approval` is `ask` or `never`, and `never` does not require the Space's sandbox. A teammate made with `create_bot` joins the caller's Space.
+
 If B is offline, the envelope waits on the relay until B fetches it. The UI infers that from decrypted roster state. A turn for a provider the account has not connected ends with a notice in the chat that says to connect it in Settings.
 
 ## The lead bot
@@ -30,6 +32,8 @@ Who answers, after Grok Bot's rooms:
 A bot's profile also carries the user's [Access](bot-permissions.md): the plugins it may use, how far, and which of their tools, and whether it reads or changes files and runs shell commands. The CLI checks it on each call, and a teammate a bot creates gets its creator's current Access.
 
 ## Durable work
+
+Completed assistant text resolves unique `@Name` references into `Body::Text.mentions`, using the same known-bot lookup as user text. Rebuilt context includes those ids in other bots' messages. A room turn's cue identifies messages addressed to this bot since its last completed message; a later teammate question takes priority over an earlier request addressed to someone else. Attribution remains the original speaker, and a teammate mention adds no user authorization. The room retains its four-round bound and original chat. When the user names a bot outside the group, the owner's instructions have it deliver the request and group context through the existing durable `message_bot` handoff, with the recipient's real request and reply in its DM.
 
 [Durable tasks](tasks.md) keep goals, ownership, dependencies, next actions, blockers, and completion evidence across turns and chats. The `tasks` tool and the apps' Tasks section read and edit them. A bot with open tasks reads them again on every provider request, including after compaction. A Job references its canonical task id; a group's chat owner and a task's owner are independent.
 

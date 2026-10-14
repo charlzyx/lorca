@@ -41,6 +41,7 @@ pub mod outputs;
 pub mod pairing;
 pub mod permissions;
 pub mod playbooks;
+pub mod skills;
 #[cfg(feature = "runner")]
 pub mod playbook_tools;
 pub mod plugins;
@@ -60,6 +61,7 @@ pub mod routine_health;
 pub mod routine_triggers;
 pub mod runtime;
 pub mod schedule;
+pub mod spaces;
 #[cfg(feature = "runner")]
 pub mod secrets;
 #[cfg(feature = "runner")]

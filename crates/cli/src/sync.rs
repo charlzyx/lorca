@@ -7,7 +7,7 @@ use crate::app::{remember_applied, upsert_device, App};
 use crate::events::{Event, RelayProblem};
 use crate::keys::unb64;
 use crate::model::*;
-use crate::relay::{BlobIn, RelayError, Signal};
+use crate::relay::{BlobIn, RelayError};
 
 /// A pull page at least this long is applied as a backlog: see `App::bulk_sync`.
 const BULK_BLOBS: usize = 20;
@@ -212,10 +212,10 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
         *failures = 0;
 
         (pull, refresh) = tokio::select! {
-            signal = socket.next() => match signal? {
-                Signal::Blobs => (true, false),
-                Signal::Machines => (false, true),
-            },
+            signals = socket.next() => {
+                let signals = signals?;
+                (signals.blobs, signals.machines)
+            }
             // The outbox, or a wake from a phone that came back to the foreground: its socket
             // may have died unnoticed while the app was suspended, so the relay is asked to
             // answer on it, and a pull costs one request.
@@ -223,7 +223,7 @@ async fn session(app: &Arc<App>, failures: &mut u32) -> Result<(), RelayError> {
                 let woken = app.sync_wakes.load(Ordering::Relaxed);
                 if woken != wakes {
                     wakes = woken;
-                    socket.probe().await?;
+                    socket.probe();
                 }
                 (true, false)
             }
@@ -1172,6 +1172,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     let kept_checks;
     let kept_workflows;
     let kept_permissions;
+    let kept_spaces;
     let kept_unpaired;
     let unpaired_grew;
     let removed_bots: Vec<String>;
@@ -1189,6 +1190,9 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
         kept_checks = this_device.is_some_and(|this| crate::routines::keep_checks(&state.routines, &mut roster.routines, &roster.bots, &this));
         kept_workflows = crate::workflows::merge(&mut state.workflows, roster.workflows);
         kept_permissions = crate::permissions::keep_policies(&state.bots, &mut roster.bots);
+        let mut spaces = std::mem::take(&mut state.spaces);
+        kept_spaces = crate::spaces::take_roster(&mut spaces, &state.bots, roster.spaces.take(), &mut roster.bots);
+        state.spaces = spaces;
         removed_bots = state.bots.iter().filter(|bot| !roster.bots.iter().any(|kept| kept.id == bot.id)).map(|bot| bot.id.clone()).collect();
         state.bots = roster.bots;
         state.routines = roster.routines;
@@ -1228,7 +1232,7 @@ fn apply_roster(app: &Arc<App>, mut roster: RosterBlob) {
     app.shell_sessions.close_orphans(app);
     #[cfg(feature = "runner")]
     app.coding_agents.close_orphans(app);
-    app.roster_changed(normalized_descriptions || kept_checks || kept_permissions || kept_workflows || kept_unpaired);
+    app.roster_changed(normalized_descriptions || kept_checks || kept_permissions || kept_workflows || kept_spaces || kept_unpaired);
     if unpaired_grew {
         app.rotation_due.store(true, Ordering::Relaxed);
     }

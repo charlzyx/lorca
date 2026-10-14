@@ -4,6 +4,10 @@ The relay stores public keys and ciphertext and forwards blobs between an identi
 
 Every flag has an environment variable, listed by `lorca-relay --help`.
 
+## Binaries
+
+This fork builds a shippable `lorca-relay` for Linux x86_64 as a static musl binary (`.github/workflows/build-relay.yml`, run by hand). The artifact is the binary. macOS and Windows relay binaries, and attaching this artifact to a GitHub release, are not part of that workflow.
+
 ## Deploy on Railway
 
 1. Create a service from this repository and leave **Root Directory** empty: the [`Dockerfile`](Dockerfile) builds with the whole Cargo workspace as context. In the service's **Settings**, set **Healthcheck Path** to `/v1/health`, and **Watch Paths** to `/crates/relay/**`, `/Cargo.toml`, and `/Cargo.lock` so that pushes elsewhere in the repo leave the relay running. Lorca's own relay watches the `relay` branch (**Settings › Source › Branch**), and a deploy is a push of main to it: `git push origin main:relay`.
